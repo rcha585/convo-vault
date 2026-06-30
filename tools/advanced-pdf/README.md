@@ -2,9 +2,10 @@
 
 Local high-quality PDF renderer for ChatGPT Conversation Exporter.
 
-This is the v0.4.x direction: the Chrome extension keeps extracting structured
-conversation data, while this local renderer turns that data into a polished,
-real-text PDF using the local Chrome/Edge print engine.
+This is the v0.5.x backend-capture direction: the extension keeps the page
+permission and selection UI, while the local backend can open an independent
+Edge profile, recapture the conversation, and turn the structured data into
+Markdown or polished real-text PDF.
 
 ## Why This Exists
 
@@ -26,7 +27,7 @@ do not support pnpm symlinks.
 
 ## Render
 
-Export a fresh debug JSON from the extension with exporter `0.4.2` or later, then:
+Export a fresh debug JSON from the extension with exporter `0.5.0` or later, then:
 
 ```powershell
 node tools\advanced-pdf\render.js path\to\export-debug.json --out output\pdf\conversation.pdf
@@ -84,7 +85,7 @@ headless printing or Playwright-compatible launch behavior.
 
 ## Backend Edge Capture
 
-The current `0.4.2` path can use Microsoft Edge as an independent backend
+The current `0.5.0` path can use Microsoft Edge as an independent backend
 capture browser. This avoids moving the ChatGPT page the user is actively
 reading.
 

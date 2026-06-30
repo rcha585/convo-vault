@@ -12,20 +12,24 @@ The extension has entered the third major version. The current goal is no longer
 - Export selected messages to Markdown or PDF.
 - Optionally download a debug log for diagnosing missing messages.
 
-### 2026-07-01 Local Advanced Renderer Direction
+### 2026-07-01 Local Backend Capture Direction
 
-The project now has a v0.4.2 local renderer path:
+The project now has a v0.5.0 local backend-capture path:
 
-- The extension still owns ChatGPT-page DOM access, message selection, and structured payload capture.
+- The extension still owns ChatGPT-page permission and message selection.
+- The local backend can open an independent Microsoft Edge profile to recapture the conversation without moving the user's active ChatGPT page.
 - `tools/advanced-pdf/render.js` converts the structured payload into polished real-text PDF through the local Chrome/Edge print engine.
 - `tools/advanced-pdf/server.js` exposes local-only endpoints for extension integration:
   - `GET /health`
   - `POST /render-pdf`
   - `POST /render-markdown`
+  - `POST /capture-render-pdf`
+  - `POST /capture-render-markdown`
+- `tools/advanced-pdf/capture.js` owns the backend Edge capture prototype.
 - The selector format dropdown now exposes only two choices:
   - Markdown
   - PDF
-- Both visible choices prefer the local backend renderer when the service is running.
+- Both visible choices prefer backend Edge capture and fall back to the extension payload if backend capture is not ready yet.
 - The renderer can use a custom Chromium-compatible browser path via `CGCE_RENDER_BROWSER_PATH`, so Huawei Browser can be tested as an optional engine if its installed build supports compatible headless printing behavior.
 
 This changes the intended architecture: `content.js` should become thinner over time, while Markdown cleanup, PDF layout, Obsidian export, full-conversation archives, and indexes move into the local backend pipeline.
