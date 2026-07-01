@@ -12,12 +12,13 @@ The extension has entered the third major version. The current goal is no longer
 - Export selected messages to Markdown or PDF.
 - Optionally download a debug log for diagnosing missing messages.
 
-### 2026-07-01 Local Backend Capture Direction
+### 2026-07-01 Local Backend Rendering Direction
 
-The project now has a v0.5.0 local backend-capture path:
+The project now has a v0.5.0 local backend rendering path:
 
 - The extension still owns ChatGPT-page permission and message selection.
-- The local backend can open an independent Microsoft Edge profile to recapture the conversation without moving the user's active ChatGPT page.
+- The stable export path keeps capture in the current already signed-in ChatGPT page and sends the structured payload to the local backend for Markdown/PDF rendering.
+- The local backend also contains an experimental independent Microsoft Edge recapture prototype, but that route is not the default because it uses a separate browser profile and may ask for ChatGPT login.
 - `tools/advanced-pdf/render.js` converts the structured payload into polished real-text PDF through the local Chrome/Edge print engine.
 - `tools/advanced-pdf/server.js` exposes local-only endpoints for extension integration:
   - `GET /health`
@@ -25,14 +26,14 @@ The project now has a v0.5.0 local backend-capture path:
   - `POST /render-markdown`
   - `POST /capture-render-pdf`
   - `POST /capture-render-markdown`
-- `tools/advanced-pdf/capture.js` owns the backend Edge capture prototype.
+- `tools/advanced-pdf/capture.js` owns the experimental backend Edge capture prototype.
 - The selector format dropdown now exposes only two choices:
   - Markdown
   - PDF
-- Both visible choices prefer backend Edge capture and fall back to the extension payload if backend capture is not ready yet.
+- Both visible choices use the extension payload and local backend rendering by default.
 - The renderer can use a custom Chromium-compatible browser path via `CGCE_RENDER_BROWSER_PATH`, so Huawei Browser can be tested as an optional engine if its installed build supports compatible headless printing behavior.
 
-This changes the intended architecture: `content.js` should become thinner over time, while Markdown cleanup, PDF layout, Obsidian export, full-conversation archives, and indexes move into the local backend pipeline.
+This changes the intended architecture: `content.js` should become thinner over time, while Markdown cleanup, PDF layout, Obsidian export, full-conversation archives, and indexes move into the local backend pipeline. Backend recapture can be revisited as an explicit opt-in once login/session handling is designed cleanly.
 
 The latest implementation is much more stable than the earlier versions because it now handles the real cause of missing messages in current ChatGPT: **virtualized conversation turns**.
 

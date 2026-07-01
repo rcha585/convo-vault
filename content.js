@@ -505,15 +505,14 @@
 
     let response;
     try {
-      response = await fetch(`${ADVANCED_PDF_RENDERER_URL}/capture-render-markdown`, {
+      response = await fetch(`${ADVANCED_PDF_RENDERER_URL}/render-markdown`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
           exportPayload: payload,
-          fileName: defaultFileName,
-          capture: createBackendCaptureRequest(messages, metadata)
+          fileName: defaultFileName
         })
       });
     } catch (error) {
@@ -542,15 +541,14 @@
 
     let response;
     try {
-      response = await fetch(`${ADVANCED_PDF_RENDERER_URL}/capture-render-pdf`, {
+      response = await fetch(`${ADVANCED_PDF_RENDERER_URL}/render-pdf`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
           exportPayload: payload,
-          fileName: defaultFileName,
-          capture: createBackendCaptureRequest(messages, metadata)
+          fileName: defaultFileName
         })
       });
     } catch (error) {
@@ -571,17 +569,6 @@
       pageCount: Number(response.headers.get("x-page-count")) || null,
       pdfEngine: response.headers.get("x-pdf-engine") || "advanced-local-chrome",
       captureWarning: response.headers.get("x-capture-warning") || ""
-    };
-  }
-
-  function createBackendCaptureRequest(messages, metadata) {
-    return {
-      url: location.href,
-      title: metadata?.title || getConversationTitle(),
-      exporterVersion: EXPORTER_VERSION,
-      selectedOrders: messages
-        .map((message) => Number(message.order))
-        .filter((order) => Number.isFinite(order) && order > 0)
     };
   }
 

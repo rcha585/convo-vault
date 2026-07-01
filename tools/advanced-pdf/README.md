@@ -2,10 +2,14 @@
 
 Local high-quality PDF renderer for ChatGPT Conversation Exporter.
 
-This is the v0.5.x backend-capture direction: the extension keeps the page
-permission and selection UI, while the local backend can open an independent
-Edge profile, recapture the conversation, and turn the structured data into
-Markdown or polished real-text PDF.
+This is the v0.5.x local backend rendering direction: the extension keeps the
+page permission and selection UI, captures the currently open ChatGPT page, and
+sends structured data to the local backend for Markdown or polished real-text
+PDF output.
+
+The backend also contains an experimental independent Edge recapture path. That
+path is not the default extension flow because it uses a separate browser
+profile and can require a separate ChatGPT login.
 
 ## Why This Exists
 
@@ -59,9 +63,10 @@ The service listens only on `127.0.0.1:38474` by default. It exposes:
 - `POST /capture-render-pdf` - opens the conversation in an independent local
   Edge profile, captures it, then renders PDF. If capture fails and the request
   includes an extension payload, it falls back to that payload and returns
-  `X-Capture-Warning`.
+  `X-Capture-Warning`. This endpoint is experimental and should not be wired to
+  the default export buttons yet.
 - `POST /capture-render-markdown` - same backend capture path, returning
-  Markdown.
+  Markdown. This endpoint is experimental.
 
 You can change the port with:
 
@@ -85,9 +90,9 @@ headless printing or Playwright-compatible launch behavior.
 
 ## Backend Edge Capture
 
-The current `0.5.0` path can use Microsoft Edge as an independent backend
-capture browser. This avoids moving the ChatGPT page the user is actively
-reading.
+The current `0.5.0` codebase can use Microsoft Edge as an independent backend
+capture browser, but this remains experimental. It avoids moving the ChatGPT
+page the user is actively reading, at the cost of a separate browser profile.
 
 Default local cache/profile location:
 
@@ -107,15 +112,16 @@ Override Edge path with:
 $env:CGCE_EDGE_PATH="C:\Program Files\Microsoft\Edge\Application\msedge.exe"
 ```
 
-The first backend capture may open a separate Edge window. Sign into ChatGPT in
-that window once; the login is stored in the local backend profile under
-`CGCE_CACHE_DIR`.
+The first backend capture may open a separate Edge window and ask for ChatGPT
+login. That login is stored in the local backend profile under `CGCE_CACHE_DIR`
+and is separate from the browser tab where the extension runs.
 
 ## Current Scope
 
-- Uses backend Edge capture when the extension sends a conversation URL.
-- Uses structured `exportPayload.messages` as a fallback when backend capture is
-  not available yet.
+- Uses structured `exportPayload.messages` for the default Markdown/PDF export
+  path.
+- Keeps backend Edge capture endpoints available as an explicit experimental
+  route.
 - Falls back to old `messageDiagnostics` previews for smoke tests.
 - Renders real text through Chrome/Skia PDF, not page screenshots.
 - Preserves Markdown structure, tables, links, blockquotes, lists, code blocks,
