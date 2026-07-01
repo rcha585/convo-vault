@@ -171,8 +171,8 @@ async function renderPdfPayload(payload, body, response, captureWarning = "") {
     "Content-Length": pdfBytes.length,
     "Content-Disposition": makeContentDisposition(filename),
     "X-PDF-Engine": "advanced-local-chrome",
-    "X-Renderer-HTML": htmlPath.replace(/\\/g, "/"),
-    ...(captureWarning ? { "X-Capture-Warning": captureWarning } : {})
+    "X-Renderer-HTML": encodeHeaderValue(htmlPath.replace(/\\/g, "/")),
+    ...(captureWarning ? { "X-Capture-Warning": encodeHeaderValue(captureWarning) } : {})
   });
   response.end(pdfBytes);
 }
@@ -215,7 +215,7 @@ async function renderMarkdownPayload(payload, body, response, captureWarning = "
     "Content-Length": bytes.length,
     "Content-Disposition": makeContentDisposition(filename),
     "X-Markdown-Engine": "advanced-local",
-    ...(captureWarning ? { "X-Capture-Warning": captureWarning } : {})
+    ...(captureWarning ? { "X-Capture-Warning": encodeHeaderValue(captureWarning) } : {})
   });
   response.end(bytes);
 }
@@ -441,6 +441,10 @@ function sendJson(response, statusCode, payload) {
 function makeContentDisposition(filename) {
   const fallback = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
   return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
+function encodeHeaderValue(value) {
+  return encodeURIComponent(String(value || ""));
 }
 
 function stripPdfExtension(filename) {
