@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.5.0";
+  const EXPORTER_VERSION = "0.5.1";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -39,6 +39,7 @@
   const DEBUG_EVENT_LIMIT = 500;
   const DETAILED_DEBUG_LOG = false;
   const PDF_IMAGE_PRELOAD_LIMIT = 18;
+  const ADVANCED_PDF_IMAGE_EMBED_LIMIT = 18;
   const PDF_LINK_CHIP_PADDING_X = 5.2;
   const ADVANCED_PDF_RENDERER_URL = "http://127.0.0.1:38474";
   const MESSAGE_NODE_SELECTORS = [
@@ -425,8 +426,8 @@
         messageCount: messages.length,
         pageCount: pdfResult.pageCount,
         pdfEngine: pdfResult.pdfEngine,
-        imagesEmbedded: 0,
-        imagesFailed: 0,
+        imagesEmbedded: pdfResult.imagesEmbedded || 0,
+        imagesFailed: pdfResult.imagesFailed || 0,
         imageLinks: messages.reduce((total, message) => total + (message.imageCount || 0), 0),
         captureWarning: pdfResult.captureWarning || ""
       };
@@ -487,7 +488,18 @@
     };
   }
 
-  function createStructuredExportPayload(messages, exportedAt = new Date()) {
+  async function createStructuredExportPayload(messages, exportedAt = new Date(), options = {}) {
+    const portableMessages = messages.map((message, index) => createPortableMessageSnapshot(message, index));
+    const assetStats = {
+      imagesEmbedded: 0,
+      imagesFailed: 0,
+      imagesSkipped: 0
+    };
+
+    if (options.embedImages) {
+      await embedImagesForPortableMessages(portableMessages, assetStats);
+    }
+
     return {
       schemaVersion: 1,
       exporterVersion: EXPORTER_VERSION,
@@ -495,13 +507,14 @@
       source: location.href,
       exportedAt: exportedAt.toISOString(),
       messageCount: messages.length,
-      messages: messages.map((message, index) => createPortableMessageSnapshot(message, index))
+      assetStats,
+      messages: portableMessages
     };
   }
 
   async function downloadAdvancedMarkdown(metadata, messages, exportedAt = new Date()) {
     const defaultFileName = markdownBuilder.filename(metadata.title, exportedAt, "md");
-    const payload = createStructuredExportPayload(messages, exportedAt);
+    const payload = await createStructuredExportPayload(messages, exportedAt);
 
     let response;
     try {
@@ -537,7 +550,9 @@
 
   async function downloadAdvancedPdf(metadata, messages, exportedAt = new Date()) {
     const defaultFileName = markdownBuilder.filename(metadata.title, exportedAt, "pdf");
-    const payload = createStructuredExportPayload(messages, exportedAt);
+    const payload = await createStructuredExportPayload(messages, exportedAt, {
+      embedImages: true
+    });
 
     let response;
     try {
@@ -568,8 +583,83 @@
       filename,
       pageCount: Number(response.headers.get("x-page-count")) || null,
       pdfEngine: response.headers.get("x-pdf-engine") || "advanced-local-chrome",
-      captureWarning: response.headers.get("x-capture-warning") || ""
+      captureWarning: response.headers.get("x-capture-warning") || "",
+      imagesEmbedded: payload.assetStats?.imagesEmbedded || 0,
+      imagesFailed: payload.assetStats?.imagesFailed || 0
     };
+  }
+
+  async function embedImagesForPortableMessages(messages, stats) {
+    let remaining = ADVANCED_PDF_IMAGE_EMBED_LIMIT;
+
+    for (const message of messages) {
+      if (remaining <= 0) {
+        stats.imagesSkipped += countMarkdownImages(message.markdown) + countMarkdownImages(message.thinkingMarkdown);
+        continue;
+      }
+
+      const markdownResult = await embedMarkdownImagesForPdf(message.markdown, remaining, stats);
+      message.markdown = markdownResult.markdown;
+      remaining = markdownResult.remaining;
+
+      if (remaining <= 0) {
+        stats.imagesSkipped += countMarkdownImages(message.thinkingMarkdown);
+        continue;
+      }
+
+      const thinkingResult = await embedMarkdownImagesForPdf(message.thinkingMarkdown, remaining, stats);
+      message.thinkingMarkdown = thinkingResult.markdown;
+      remaining = thinkingResult.remaining;
+    }
+  }
+
+  async function embedMarkdownImagesForPdf(markdown, remaining, stats) {
+    const source = String(markdown || "");
+
+    if (!source || remaining <= 0) {
+      return { markdown: source, remaining };
+    }
+
+    const imagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+    let output = "";
+    let lastIndex = 0;
+    let match;
+
+    while ((match = imagePattern.exec(source)) && remaining > 0) {
+      const [fullMatch, alt, url] = match;
+      output += source.slice(lastIndex, match.index);
+      lastIndex = match.index + fullMatch.length;
+
+      if (!/^https?:\/\//i.test(url) || url.startsWith("data:image/")) {
+        output += fullMatch;
+        continue;
+      }
+
+      try {
+        const dataUri = await imageToDataUriFromSrc(url);
+        output += `![${alt || "image"}](${dataUri})`;
+        stats.imagesEmbedded += 1;
+        remaining -= 1;
+      } catch (error) {
+        output += fullMatch;
+        stats.imagesFailed += 1;
+      }
+    }
+
+    output += source.slice(lastIndex);
+
+    if (remaining <= 0) {
+      stats.imagesSkipped += countMarkdownImages(source.slice(lastIndex));
+    }
+
+    return {
+      markdown: output,
+      remaining
+    };
+  }
+
+  function countMarkdownImages(markdown) {
+    return (String(markdown || "").match(/!\[[^\]]*]\([^)]+\)/g) || []).length;
   }
 
   function getFilenameFromContentDisposition(header) {

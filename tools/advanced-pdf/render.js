@@ -136,6 +136,7 @@ function buildDocumentHtml(payload) {
   const md = createMarkdownRenderer();
   const messages = payload.messages.map((message, index) => normalizeMessage(message, index));
   const exportedAt = formatDateTime(payload.exportedAt);
+  const imageRegistry = buildImageRegistry(messages);
   const tocRows = buildTocRows(messages);
 
   return `<!doctype html>
@@ -160,16 +161,21 @@ function buildDocumentHtml(payload) {
     <h2>Contents</h2>
     <div class="toc-grid">
       ${tocRows.map((row) => `
-        <a class="toc-row ${row.kind}" href="#${escapeAttr(row.id)}">
+        <a class="toc-row ${row.kind} ${row.hasThinking ? "has-thinking" : ""}" href="#${escapeAttr(row.id)}">
           <span class="toc-label">${escapeHtml(row.label)}</span>
-          <span class="toc-type">${escapeHtml(row.type)}</span>
+          <span class="toc-meta">
+            ${row.hasThinking ? `<span class="toc-chip" aria-label="Thinking"></span>` : ""}
+            <span class="toc-type">${escapeHtml(row.type)}</span>
+          </span>
         </a>`).join("")}
     </div>
   </section>
 
   <main class="conversation">
-    ${messages.map((message, index) => renderMessage(md, message, index)).join("\n")}
+    ${messages.map((message, index) => renderMessage(md, message, index, imageRegistry)).join("\n")}
   </main>
+
+  ${renderImageGallery(imageRegistry.items)}
 </body>
 </html>`;
 }
@@ -203,16 +209,21 @@ function createMarkdownRenderer() {
     return defaultLinkOpen(tokens, index, options, env, self);
   };
 
-  md.renderer.rules.image = (tokens, index) => {
+  md.renderer.rules.image = (tokens, index, options, env) => {
     const token = tokens[index];
     const src = token.attrGet("src") || "";
     const alt = token.content || token.attrGet("alt") || "image";
+    const registry = env?.imageRegistry;
+    const asset = registry?.bySrc?.get(src);
 
     if (!src.startsWith("data:image/") && !src.startsWith("file:")) {
       return `<span class="attachment-chip image-chip">Image: ${escapeHtml(alt)}</span>`;
     }
 
-    return `<figure class="inline-image"><img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}"><figcaption>${escapeHtml(alt)}</figcaption></figure>`;
+    const figure = `<figure class="inline-image"><img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}"><figcaption>${escapeHtml(alt)}</figcaption></figure>`;
+    return asset
+      ? `<a class="inline-image-link" href="#${escapeAttr(asset.id)}">${figure}</a>`
+      : figure;
   };
 
   return md;
@@ -222,21 +233,21 @@ function renderToken(tokens, index, options, env, self) {
   return self.renderToken(tokens, index, options);
 }
 
-function renderMessage(md, message, index) {
+function renderMessage(md, message, index, imageRegistry) {
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
   const anchorId = getMessageAnchorId(message, index);
   const time = message.timestamp ? `<time>${escapeHtml(message.timestamp)}</time>` : "";
-  const content = renderMessageMarkdown(md, isUser ? stripLeadingAttachmentLines(message.markdown) : message.markdown);
+  const content = renderMessageMarkdown(md, isUser ? stripLeadingAttachmentLines(message.markdown) : message.markdown, imageRegistry);
   const thinking = isAssistant && message.thinkingMarkdown
-    ? renderThinking(md, message.thinkingMarkdown)
+    ? renderThinking(md, message.thinkingMarkdown, imageRegistry)
     : "";
 
   if (isUser) {
     return `<article id="${escapeAttr(anchorId)}" class="message user-message">
       <div class="user-stack">
-        <div class="avatar user-avatar" aria-label="User"></div>
-        ${renderAttachmentLead(message.markdown)}
+        ${renderUserAvatar()}
+        ${renderAttachmentLead(message.markdown, imageRegistry)}
         <div class="bubble user-bubble">${content}</div>
         ${time ? `<div class="message-time user-time">${time}</div>` : ""}
       </div>
@@ -244,7 +255,9 @@ function renderMessage(md, message, index) {
   }
 
   return `<article id="${escapeAttr(anchorId)}" class="message assistant-message">
-    <div class="assistant-avatar" aria-label="Assistant">AI</div>
+    <div class="assistant-header">
+      ${renderAssistantAvatar()}
+    </div>
     <div class="assistant-body">
       ${thinking}
       <div class="assistant-content">${content}</div>
@@ -253,19 +266,37 @@ function renderMessage(md, message, index) {
   </article>`;
 }
 
-function renderThinking(md, thinkingMarkdown) {
+function renderUserAvatar() {
+  return `<div class="avatar user-avatar" aria-label="User">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="8.1" r="3.4" fill="none" stroke="currentColor" stroke-width="1.8"></circle>
+      <path d="M5.7 19.2c.9-3.3 3-5 6.3-5s5.4 1.7 6.3 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+    </svg>
+  </div>`;
+}
+
+function renderAssistantAvatar() {
+  return `<div class="assistant-avatar" aria-label="Assistant">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3.8l1.65 4.15L18 9.6l-4.35 1.65L12 15.4l-1.65-4.15L6 9.6l4.35-1.65L12 3.8Z" fill="currentColor"></path>
+      <path d="M18.4 14.3l.75 1.85 1.95.75-1.95.75-.75 1.85-.75-1.85-1.95-.75 1.95-.75.75-1.85Z" fill="currentColor" opacity=".62"></path>
+    </svg>
+  </div>`;
+}
+
+function renderThinking(md, thinkingMarkdown, imageRegistry) {
   return `<section class="thinking">
     <h3>Thinking</h3>
-    <div class="thinking-body markdown-body">${md.render(cleanMarkdownForHtml(thinkingMarkdown))}</div>
+    <div class="thinking-body markdown-body">${md.render(cleanMarkdownForHtml(thinkingMarkdown), { imageRegistry })}</div>
   </section>`;
 }
 
-function renderMessageMarkdown(md, markdown) {
+function renderMessageMarkdown(md, markdown, imageRegistry) {
   const cleaned = cleanMarkdownForHtml(markdown || "_No text content found._");
-  return `<div class="markdown-body">${md.render(cleaned)}</div>`;
+  return `<div class="markdown-body">${md.render(cleaned, { imageRegistry })}</div>`;
 }
 
-function renderAttachmentLead(markdown) {
+function renderAttachmentLead(markdown, imageRegistry) {
   const attachments = extractLeadingAttachments(markdown);
 
   if (!attachments.length) {
@@ -274,10 +305,17 @@ function renderAttachmentLead(markdown) {
 
   return `<div class="user-attachments">${attachments.map((item) => {
     const typeClass = item.type === "file" ? "file" : "image";
-    return `<span class="attachment-card ${typeClass}">
-      <span class="attachment-icon">${item.type === "file" ? "PDF" : "IMG"}</span>
+    const asset = item.type === "image" ? imageRegistry?.bySrc?.get(item.url) : null;
+    const content = asset
+      ? `<span class="attachment-thumb"><img src="${escapeAttr(item.url)}" alt="${escapeAttr(item.label)}"></span>`
+      : `<span class="attachment-icon">${item.type === "file" ? getFileExtensionLabel(item.label) : "IMG"}</span>`;
+    const card = `<span class="attachment-card ${typeClass} ${asset ? "with-thumb image-preview-card" : ""}">
+      ${content}
       <span class="attachment-name">${escapeHtml(item.label)}</span>
     </span>`;
+    return asset
+      ? `<a class="attachment-card-link" href="#${escapeAttr(asset.id)}">${card}</a>`
+      : card;
   }).join("")}</div>`;
 }
 
@@ -290,7 +328,7 @@ function extractLeadingAttachments(markdown) {
     const file = line.match(/^\[File:\s*([^\]]+)\]/i);
 
     if (image) {
-      result.push({ type: "image", label: image[1] || "Image" });
+      result.push({ type: "image", label: image[1] || "Image", url: image[2] || "" });
     } else if (file) {
       result.push({ type: "file", label: file[1] || "Attachment" });
     }
@@ -308,20 +346,73 @@ function buildTocRows(messages) {
       id: getMessageAnchorId(message, index),
       kind: message.role || "message",
       type: formatRole(message.role),
-      label
+      label,
+      hasThinking: Boolean(message.thinkingMarkdown)
     });
-
-    if (message.thinkingMarkdown) {
-      rows.push({
-        id: getMessageAnchorId(message, index),
-        kind: "thinking",
-        type: "Thinking",
-        label: getThinkingLabel(message.thinkingMarkdown)
-      });
-    }
   });
 
   return rows;
+}
+
+function buildImageRegistry(messages) {
+  const bySrc = new Map();
+  const items = [];
+
+  messages.forEach((message, messageIndex) => {
+    for (const image of extractMarkdownImages(`${message.markdown || ""}\n${message.thinkingMarkdown || ""}`)) {
+      if (!image.src.startsWith("data:image/") || bySrc.has(image.src)) {
+        continue;
+      }
+
+      const item = {
+        id: `asset-image-${items.length + 1}`,
+        src: image.src,
+        alt: image.alt || `Image ${items.length + 1}`,
+        messageNumber: messageIndex + 1
+      };
+      bySrc.set(image.src, item);
+      items.push(item);
+    }
+  });
+
+  return { bySrc, items };
+}
+
+function extractMarkdownImages(markdown) {
+  const images = [];
+  const pattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+  let match;
+
+  while ((match = pattern.exec(String(markdown || "")))) {
+    images.push({
+      alt: match[1] || "image",
+      src: match[2] || ""
+    });
+  }
+
+  return images;
+}
+
+function renderImageGallery(items) {
+  if (!items.length) {
+    return "";
+  }
+
+  return `<section class="image-gallery page-break-before">
+    <h2>Image Attachments</h2>
+    ${items.map((item, index) => `
+      <figure id="${escapeAttr(item.id)}" class="image-detail ${index < items.length - 1 ? "page-break-after" : ""}">
+        <img src="${escapeAttr(item.src)}" alt="${escapeAttr(item.alt)}">
+        <figcaption>${escapeHtml(item.alt)} · message ${item.messageNumber}</figcaption>
+      </figure>`).join("")}
+  </section>`;
+}
+
+function getFileExtensionLabel(filename) {
+  const extension = String(filename || "")
+    .split(/[?#]/)[0]
+    .match(/\.([a-z0-9]{1,5})$/i)?.[1];
+  return (extension || "FILE").slice(0, 4).toUpperCase();
 }
 
 function normalizeMessage(message, index) {
@@ -339,7 +430,8 @@ function getMessageAnchorId(message, index) {
 }
 
 function getMessageLabel(message, index) {
-  const source = message.preview || message.markdown || message.thinkingMarkdown || "";
+  const markdownSource = stripLeadingAttachmentLines(cleanMarkdownForHtml(message.markdown || ""));
+  const source = markdownSource || cleanMarkdownForHtml(message.preview || message.thinkingMarkdown || "");
   const text = stripMarkdown(source).replace(/\s+/g, " ").trim();
   return `${index + 1}. ${text.slice(0, 86) || formatRole(message.role)}`;
 }
@@ -505,6 +597,10 @@ a {
   break-after: page;
 }
 
+.page-break-before {
+  break-before: page;
+}
+
 .cover {
   break-after: page;
 }
@@ -545,30 +641,33 @@ a {
 .toc {
   border: 1px solid #e2e8f0;
   border-radius: 12px;
-  padding: 18px 20px;
+  padding: 16px 18px 15px;
   background: #ffffff;
 }
 
 .toc h2 {
-  margin: 0 0 12px;
+  margin: 0 0 10px;
   font-size: 18px;
   line-height: 1.25;
 }
 
 .toc-grid {
   column-count: 2;
-  column-gap: 28px;
+  column-gap: 26px;
 }
 
 .toc-row {
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
   break-inside: avoid;
-  padding: 2px 0;
+  min-height: 16px;
+  padding: 2.5px 0;
   color: #334155;
   text-decoration: none;
   border-bottom: 1px dotted #dbe3ed;
+  font-size: 10.9px;
+  line-height: 1.22;
 }
 
 .toc-row.thinking {
@@ -579,15 +678,42 @@ a {
   color: #2563eb;
 }
 
+.toc-row.has-thinking .toc-label::after {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: #8b5cf6;
+  vertical-align: middle;
+}
+
 .toc-row .toc-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.toc-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #8a94a6;
+  white-space: nowrap;
+}
+
+.toc-chip {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #8b5cf6;
+  display: inline-block;
+}
+
 .toc-type {
   color: #8a94a6;
-  font-size: 10px;
+  font-size: 9.5px;
 }
 
 .conversation {
@@ -616,44 +742,27 @@ a {
 .assistant-avatar {
   width: 24px;
   height: 24px;
-  border: 1.5px solid #111827;
+  border: 1.35px solid #111827;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
-  font-weight: 750;
   color: #111827;
   background: #fff;
   flex: 0 0 auto;
 }
 
+.avatar svg,
+.assistant-avatar svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+
 .user-avatar {
   align-self: flex-end;
-  position: relative;
-}
-
-.user-avatar::before {
-  content: "";
-  position: absolute;
-  width: 5px;
-  height: 5px;
-  left: 8px;
-  top: 5px;
-  border: 1.3px solid #111827;
-  border-radius: 50%;
-}
-
-.user-avatar::after {
-  content: "";
-  position: absolute;
-  width: 11px;
-  height: 6px;
-  left: 5.5px;
-  top: 13px;
-  border: 1.3px solid #111827;
-  border-bottom: 0;
-  border-radius: 10px 10px 0 0;
+  color: #0f172a;
+  background: #ffffff;
 }
 
 .bubble {
@@ -676,14 +785,23 @@ a {
 }
 
 .assistant-message {
-  display: grid;
-  grid-template-columns: 26px 1fr;
-  gap: 14px;
-  align-items: start;
+  display: block;
+}
+
+.assistant-header {
+  margin: 0 0 8px;
+  display: flex;
+  justify-content: flex-start;
 }
 
 .assistant-avatar {
-  margin-top: 2px;
+  width: 25px;
+  height: 25px;
+  border-width: 1.4px;
+  border-color: #334155;
+  color: #334155;
+  background: linear-gradient(145deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: 0 1px 0 rgba(15, 23, 42, .08);
 }
 
 .assistant-body {
@@ -852,6 +970,12 @@ a {
   break-inside: avoid;
 }
 
+.inline-image-link,
+.attachment-card-link {
+  color: inherit;
+  text-decoration: none;
+}
+
 .inline-image img {
   display: block;
   max-width: 100%;
@@ -870,7 +994,7 @@ a {
 .user-attachments {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   align-items: flex-end;
 }
 
@@ -879,11 +1003,40 @@ a {
   align-items: center;
   gap: 10px;
   min-width: 210px;
-  max-width: 320px;
+  max-width: 350px;
   padding: 8px 12px;
   border: 1px solid #e0e5ec;
   border-radius: 10px;
   background: #ffffff;
+}
+
+.attachment-card.with-thumb {
+  min-width: 0;
+  width: min(285px, 100%);
+  max-width: 285px;
+  padding: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
+}
+
+.attachment-thumb {
+  width: 100%;
+  max-height: 260px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #dbeafe;
+  background: #f8fafc;
+  flex: 0 0 auto;
+  display: block;
+}
+
+.attachment-thumb img {
+  width: 100%;
+  height: auto;
+  max-height: 260px;
+  object-fit: contain;
+  display: block;
 }
 
 .attachment-icon {
@@ -913,6 +1066,12 @@ a {
   white-space: nowrap;
 }
 
+.attachment-card.with-thumb .attachment-name {
+  color: #64748b;
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
 .attachment-chip {
   display: inline-flex;
   align-items: center;
@@ -922,6 +1081,44 @@ a {
   color: #475569;
   font-size: 10.5px;
   font-weight: 650;
+}
+
+.image-gallery {
+  padding-top: 6px;
+}
+
+.image-gallery h2 {
+  margin: 0 0 18px;
+  font-size: 19px;
+  line-height: 1.25;
+  color: #0f172a;
+}
+
+.image-detail {
+  margin: 0;
+  min-height: 690px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  break-inside: avoid;
+}
+
+.image-detail img {
+  display: block;
+  max-width: 100%;
+  max-height: 650px;
+  margin: 0 auto;
+  object-fit: contain;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.image-detail figcaption {
+  margin-top: 8px;
+  text-align: center;
+  color: #64748b;
+  font-size: 10.5px;
 }
 
 .hljs {
