@@ -50,6 +50,24 @@ Start the local renderer before exporting **Markdown** or **PDF** in the extensi
 pnpm run server
 ```
 
+Or from the repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start-local-backend.ps1
+```
+
+To start it hidden in the background:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start-local-backend-detached.ps1
+```
+
+Check whether it is reachable:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\check-local-backend.ps1
+```
+
 The service listens on `http://127.0.0.1:38474`. It receives the current
 conversation URL, selected turn orders, and a fallback extension payload. It
 first tries to capture the conversation in a separate local Edge profile, then
@@ -64,6 +82,10 @@ D:\Programs\ChatGPTConversationExporter
 On the first backend capture, sign into ChatGPT in the separate Edge window.
 That login remains in the local backend profile and does not touch the page you
 already have open.
+
+If the extension says `Local renderer is not running` or `Failed to fetch`, the
+server is not listening on `127.0.0.1:38474`; backend capture has not started,
+and the cache folder may not exist yet.
 
 For command-line debugging with a fresh debug JSON:
 
