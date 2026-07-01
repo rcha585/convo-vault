@@ -1,6 +1,6 @@
 {
   "name": "cgce-advanced-pdf-renderer",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "private": true,
   "description": "Local high-quality PDF renderer for ChatGPT Conversation Exporter structured exports.",
   "type": "commonjs",

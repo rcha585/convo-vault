@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.5.4";
+  const EXPORTER_VERSION = "0.5.5";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -6076,6 +6076,45 @@
       .replace(/[ \t]*\r?\n+[ \t]*/g, " ")
       .replace(/\s{2,}/g, " ")
       .trim();
+  }
+
+  function formatCleanPdfMarkdownLink(label, url) {
+    const cleanLabel = cleanPdfLinkLabel(label, url);
+    return cleanLabel && cleanLabel !== url
+      ? `[${escapeMarkdownLinkLabel(cleanLabel)}](${url})`
+      : url;
+  }
+
+  function cleanPdfLinkLabel(label, url = "") {
+    const value = String(label || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const normalizedUrl = String(url || "").trim();
+
+    if (!value) {
+      return compactUrlLabel(normalizedUrl);
+    }
+
+    if (normalizedUrl && value.includes(normalizedUrl)) {
+      const withoutUrl = value.replaceAll(normalizedUrl, " ").replace(/\s+/g, " ").trim();
+      return withoutUrl || compactUrlLabel(normalizedUrl);
+    }
+
+    return value;
+  }
+
+  function compactUrlLabel(url) {
+    if (!url) {
+      return "";
+    }
+
+    try {
+      const parsed = new URL(url, location.href);
+      const leaf = decodeURIComponent(parsed.pathname.split("/").filter(Boolean).pop() || "");
+      return leaf || parsed.hostname || url;
+    } catch {
+      return url;
+    }
   }
 
   function escapeMarkdownLinkLabel(text) {

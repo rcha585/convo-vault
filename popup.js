@@ -18,6 +18,7 @@ exportButton.addEventListener("click", async () => {
     }
 
     setStatus("Selector opened on the page.");
+    window.close();
   } catch (error) {
     setStatus(error.message || String(error));
   } finally {
