@@ -14,7 +14,7 @@ The extension has entered the third major version. The current goal is no longer
 
 ### 2026-07-01 Local Backend Rendering Direction
 
-The project now has a v0.5.2 local backend rendering path:
+The project now has a v0.5.3 local backend rendering path:
 
 - The extension still owns ChatGPT-page permission and message selection.
 - The stable export path keeps capture in the current already signed-in ChatGPT page and sends the structured payload to the local backend for Markdown/PDF rendering.
@@ -32,7 +32,7 @@ The project now has a v0.5.2 local backend rendering path:
   - PDF
 - Both visible choices use the extension payload and local backend rendering by default.
 - The renderer can use a custom Chromium-compatible browser path via `CGCE_RENDER_BROWSER_PATH`, so Huawei Browser can be tested as an optional engine if its installed build supports compatible headless printing behavior.
-- v0.5.2 tightens the backend PDF presentation with a compact first page that places the Contents directly under the title card, continuation Contents pages when needed, PNG user/assistant badges, closer User-to-ChatGPT flow, dynamic next-turn page breaks after long assistant replies, PDF-export-time image embedding from the signed-in page session, larger in-conversation image previews, and internal full-image appendix pages for successfully embedded images.
+- v0.5.3 removes the obsolete in-extension PDF writer and PDF settings dialog. `content.js` now focuses on ChatGPT-page extraction, selection UI, portable payload creation, image embedding handoff, debug logs, and download handoff; the local backend owns visible Markdown/PDF rendering.
 
 This changes the intended architecture: `content.js` should become thinner over time, while Markdown cleanup, PDF layout, Obsidian export, full-conversation archives, and indexes move into the local backend pipeline. Backend recapture can be revisited as an explicit opt-in once login/session handling is designed cleanly.
 
@@ -53,7 +53,7 @@ The current version addresses this by combining:
 
 ## Main Modules
 
-Most of the implementation is still in `content.js`, but it is organized into clear logical modules.
+Most page-facing extraction and selection code is still in `content.js`, while Markdown/PDF rendering now lives in the local backend.
 
 ### `messageExtractor`
 
@@ -85,7 +85,7 @@ Current behavior:
   - Manual checkbox selection
   - Double-click jump to the original message
 - Keeps the footer outside the scrollable list so the last message is not hidden behind the export button.
-- Lets the user choose Markdown or PDF from the footer. PDF opens a settings dialog before generation.
+- Lets the user choose Markdown or PDF from the footer. Both visible choices post a structured payload to the local backend.
 
 ### `markdownBuilder`
 
@@ -100,26 +100,17 @@ Current behavior:
 - Includes thinking content under a separate section when detected.
 - Keeps image links passively instead of triggering unsafe page-side image behavior.
 
-### `pdfBuilder`
+### Local Backend Export Client
 
-Responsible for producing the first working PDF export.
+Responsible for handing selected messages to the local Markdown/PDF backend.
 
 Current behavior:
 
-- Builds a simple paginated layout from the selected message Markdown.
-- Draws each page with Canvas, then writes the rendered pages into a PDF blob.
-- Adds a compact branded header area, optional two-column table of contents, page headers, export time, and page numbers.
-- Builds a richer first-page content map with Message, Thinking, Image, and File entries generated from extracted keywords/previews, then starts the conversation on a fresh page after the contents section.
-- Adds internal PDF jump links from the content map to the corresponding message, Thinking block, image attachment block, or file attachment block.
-- Renders selected turns as a ChatGPT-like conversation flow: User turns use a right-aligned outline avatar icon, right-aligned bubbles, and right-aligned timestamps; Assistant turns use a left-aligned OpenAI-style icon, left-aligned page content, and left-aligned timestamps after the answer.
-- Places Thinking as a lavender callout before the Assistant answer, preserving headings, lists, quotes, code, status text such as `已思考 16s`, and rendering Thinking list items with a PDF-side dot/vertical-rail timeline.
-- Keeps Assistant answers as open prose rather than wrapping every response in a heavy card.
-- Renders code with a language header, continuous background, and border.
-- During PDF export, attempts to fetch image references and render them as scaled previews in the conversation flow without printing visible image URLs or adding external image-link annotations.
-- Adds internal full-image pages for loaded image previews, so clicking a preview jumps inside the PDF instead of opening a `chatgpt.com` backend URL.
-- Falls back to non-clickable thumbnail-style image cards when a preview cannot be loaded.
-- Detects ChatGPT image attachments wrapped in `button > img` so large user-uploaded/generated images are no longer skipped as UI controls.
-- Detects compact ChatGPT file attachment controls and renders them in PDF as web-style file cards with a file-type icon and filename, separated from the user text bubble and without swallowing surrounding message text.
+- Builds a portable `exportPayload` with message snapshots, Thinking text, timestamps, image/file counts, source ids, and attachment markdown.
+- Embeds a capped number of image references as data URIs for backend PDF rendering.
+- Sends Markdown exports to `POST /render-markdown`.
+- Sends PDF exports to `POST /render-pdf`.
+- Downloads the backend response and writes debug logs when requested.
 
 ### Debug Log
 

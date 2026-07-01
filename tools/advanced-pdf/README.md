@@ -13,10 +13,10 @@ profile and can require a separate ChatGPT login.
 
 ## Why This Exists
 
-The in-extension PDF writer is useful as a lightweight fallback, but high-quality
-CJK typography, Markdown tables, code blocks, links, images, and pagination are
-better handled by a browser layout engine. This renderer keeps the data local and
-avoids a remote PDF service.
+The earlier in-extension PDF writer has been removed. High-quality CJK
+typography, Markdown tables, code blocks, links, images, and pagination are now
+handled by this local browser layout engine. The renderer keeps the data local
+and avoids a remote PDF service.
 
 ## Install
 
@@ -90,7 +90,7 @@ headless printing or Playwright-compatible launch behavior.
 
 ## Backend Edge Capture
 
-The current `0.5.2` codebase can use Microsoft Edge as an independent backend
+The current `0.5.3` codebase can use Microsoft Edge as an independent backend
 capture browser, but this remains experimental. It avoids moving the ChatGPT
 page the user is actively reading, at the cost of a separate browser profile.
 
