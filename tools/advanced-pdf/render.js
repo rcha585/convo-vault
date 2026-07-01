@@ -12,6 +12,13 @@ const { chromium } = require("playwright-core");
 
 const DEFAULT_OUTPUT_DIR = path.resolve(process.cwd(), "output", "pdf");
 const DEFAULT_HTML_DIR = path.resolve(process.cwd(), "tmp", "advanced-pdf");
+const ASSET_DIR = path.resolve(__dirname, "assets");
+const AVATAR_IMAGES = {
+  user: loadPngDataUri("user.png"),
+  assistant: loadPngDataUri("artificial-intelligence.png")
+};
+const FIRST_PAGE_TOC_ROWS = 54;
+const CONTINUATION_TOC_ROWS = 88;
 
 main().catch((error) => {
   console.error(`[advanced-pdf] ${error.stack || error.message || error}`);
@@ -148,36 +155,71 @@ function buildDocumentHtml(payload) {
   <style>${buildCss()}</style>
 </head>
 <body>
-  <section class="cover">
-    <div class="cover-card">
-      <div class="cover-rule"></div>
-      <h1>${escapeHtml(payload.title)}</h1>
-      <p>Exported ${escapeHtml(exportedAt)} | ${messages.length} messages | ChatGPT conversation</p>
-      ${payload.source ? `<p class="source">Source: <a href="${escapeAttr(payload.source)}">${escapeHtml(payload.source)}</a></p>` : ""}
-    </div>
-  </section>
+  ${renderIntroPages(payload, messages, exportedAt, tocRows)}
 
-  <section class="toc page-break-after">
-    <h2>Contents</h2>
+  <main class="conversation">
+    ${messages.map((message, index) => renderMessage(md, message, index, imageRegistry)).join("\n")}
+  </main>
+
+  <script>${buildPaginationScript()}</script>
+  ${renderImageGallery(imageRegistry.items)}
+</body>
+</html>`;
+}
+
+function renderIntroPages(payload, messages, exportedAt, tocRows) {
+  return chunkTocRows(tocRows).map((rows, index) => {
+    const isFirst = index === 0;
+    return `<section class="intro-sheet ${isFirst ? "intro-sheet-first" : "intro-sheet-continuation"} page-break-after">
+      ${isFirst ? renderCoverCard(payload, messages, exportedAt) : ""}
+      ${renderTocCard(rows, index)}
+    </section>`;
+  }).join("\n");
+}
+
+function renderCoverCard(payload, messages, exportedAt) {
+  return `<div class="cover-card">
+    <div class="cover-rule"></div>
+    <h1>${escapeHtml(payload.title)}</h1>
+    <p>Exported ${escapeHtml(exportedAt)} | ${messages.length} messages | ChatGPT conversation</p>
+    ${payload.source ? `<p class="source">Source: <a href="${escapeAttr(payload.source)}">${escapeHtml(payload.source)}</a></p>` : ""}
+  </div>`;
+}
+
+function renderTocCard(rows, sectionIndex) {
+  const title = sectionIndex === 0 ? "Contents" : "Contents (continued)";
+  return `<section class="toc">
+    <h2>${title}</h2>
     <div class="toc-grid">
-      ${tocRows.map((row) => `
+      ${rows.map((row) => renderTocRow(row)).join("")}
+    </div>
+  </section>`;
+}
+
+function renderTocRow(row) {
+  return `
         <a class="toc-row ${row.kind} ${row.hasThinking ? "has-thinking" : ""}" href="#${escapeAttr(row.id)}">
           <span class="toc-label">${escapeHtml(row.label)}</span>
           <span class="toc-meta">
             ${row.hasThinking ? `<span class="toc-chip" aria-label="Thinking"></span>` : ""}
             <span class="toc-type">${escapeHtml(row.type)}</span>
           </span>
-        </a>`).join("")}
-    </div>
-  </section>
+        </a>`;
+}
 
-  <main class="conversation">
-    ${messages.map((message, index) => renderMessage(md, message, index, imageRegistry)).join("\n")}
-  </main>
+function chunkTocRows(rows) {
+  const chunks = [];
+  let index = 0;
 
-  ${renderImageGallery(imageRegistry.items)}
-</body>
-</html>`;
+  chunks.push(rows.slice(index, FIRST_PAGE_TOC_ROWS));
+  index += FIRST_PAGE_TOC_ROWS;
+
+  while (index < rows.length) {
+    chunks.push(rows.slice(index, index + CONTINUATION_TOC_ROWS));
+    index += CONTINUATION_TOC_ROWS;
+  }
+
+  return chunks;
 }
 
 function createMarkdownRenderer() {
@@ -268,20 +310,20 @@ function renderMessage(md, message, index, imageRegistry) {
 
 function renderUserAvatar() {
   return `<div class="avatar user-avatar" aria-label="User">
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="8.1" r="3.4" fill="none" stroke="currentColor" stroke-width="1.8"></circle>
-      <path d="M5.7 19.2c.9-3.3 3-5 6.3-5s5.4 1.7 6.3 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
-    </svg>
+    ${renderAvatarImage(AVATAR_IMAGES.user, "User")}
   </div>`;
 }
 
 function renderAssistantAvatar() {
   return `<div class="assistant-avatar" aria-label="Assistant">
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 3.8l1.65 4.15L18 9.6l-4.35 1.65L12 15.4l-1.65-4.15L6 9.6l4.35-1.65L12 3.8Z" fill="currentColor"></path>
-      <path d="M18.4 14.3l.75 1.85 1.95.75-1.95.75-.75 1.85-.75-1.85-1.95-.75 1.95-.75.75-1.85Z" fill="currentColor" opacity=".62"></path>
-    </svg>
+    ${renderAvatarImage(AVATAR_IMAGES.assistant, "ChatGPT")}
   </div>`;
+}
+
+function renderAvatarImage(src, alt) {
+  return src
+    ? `<img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}">`
+    : `<span class="avatar-fallback">${escapeHtml(alt.slice(0, 2))}</span>`;
 }
 
 function renderThinking(md, thinkingMarkdown, imageRegistry) {
@@ -294,6 +336,65 @@ function renderThinking(md, thinkingMarkdown, imageRegistry) {
 function renderMessageMarkdown(md, markdown, imageRegistry) {
   const cleaned = cleanMarkdownForHtml(markdown || "_No text content found._");
   return `<div class="markdown-body">${md.render(cleaned, { imageRegistry })}</div>`;
+}
+
+function buildPaginationScript() {
+  return `
+(() => {
+  const CONTENT_HEIGHT = 1014;
+  const HALF_PAGE = CONTENT_HEIGHT * 0.55;
+
+  function outerHeight(element) {
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    const marginTop = Number.parseFloat(style.marginTop) || 0;
+    const marginBottom = Number.parseFloat(style.marginBottom) || 0;
+    return rect.height + marginTop + marginBottom;
+  }
+
+  function advancePage(y, height, canSplit) {
+    if (!canSplit && y > 0 && y + height > CONTENT_HEIGHT) {
+      y = 0;
+    }
+
+    if (!canSplit || y + height <= CONTENT_HEIGHT) {
+      return y + height >= CONTENT_HEIGHT ? (y + height) % CONTENT_HEIGHT : y + height;
+    }
+
+    return (height - (CONTENT_HEIGHT - y)) % CONTENT_HEIGHT;
+  }
+
+  window.applyConversationPageBreaks = () => {
+    const messages = Array.from(document.querySelectorAll(".conversation > .message"));
+    let y = 0;
+
+    for (const message of messages) {
+      message.classList.remove("force-page-before");
+    }
+
+    messages.forEach((message, index) => {
+      const isUser = message.classList.contains("user-message");
+      const isAssistant = message.classList.contains("assistant-message");
+      const height = Math.min(Math.max(outerHeight(message), 1), CONTENT_HEIGHT * 8);
+
+      if (message.classList.contains("force-page-before") && y > 0) {
+        y = 0;
+      }
+
+      y = advancePage(y, height, !isUser);
+
+      const next = messages[index + 1];
+      if (isAssistant && next?.classList.contains("user-message") && y > HALF_PAGE) {
+        next.classList.add("force-page-before");
+        y = 0;
+      }
+    });
+  };
+
+  window.addEventListener("load", () => {
+    window.applyConversationPageBreaks();
+  });
+})();`;
 }
 
 function renderAttachmentLead(markdown, imageRegistry) {
@@ -521,6 +622,12 @@ async function renderPdfWithChrome({ htmlPath, outputPath, chromePath }) {
       timeout: 60_000
     });
     await page.emulateMedia({ media: "print" });
+    await page.evaluate(async () => {
+      if (document.fonts?.ready) {
+        await document.fonts.ready;
+      }
+      window.applyConversationPageBreaks?.();
+    });
     await page.pdf({
       path: outputPath,
       format: "A4",
@@ -601,15 +708,15 @@ a {
   break-before: page;
 }
 
-.cover {
+.intro-sheet {
   break-after: page;
 }
 
 .cover-card {
-  margin-top: 72px;
-  padding: 26px 28px 28px;
+  margin: 8px 0 16px;
+  padding: 20px 24px 21px;
   border: 1px solid #d8dee8;
-  border-radius: 14px;
+  border-radius: 10px;
   background: #f8fbff;
   position: relative;
 }
@@ -618,18 +725,18 @@ a {
   height: 4px;
   background: #10a37f;
   border-radius: 999px;
-  margin: -26px -8px 22px;
+  margin: -20px -6px 17px;
 }
 
-.cover h1 {
-  margin: 0 0 10px;
-  font-size: 30px;
+.cover-card h1 {
+  margin: 0 0 8px;
+  font-size: 27px;
   line-height: 1.18;
   font-weight: 800;
   color: #111827;
 }
 
-.cover p {
+.cover-card p {
   margin: 4px 0;
   color: #6b7280;
 }
@@ -640,9 +747,13 @@ a {
 
 .toc {
   border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  padding: 16px 18px 15px;
+  border-radius: 10px;
+  padding: 15px 18px 15px;
   background: #ffffff;
+}
+
+.intro-sheet-continuation .toc {
+  margin-top: 8px;
 }
 
 .toc h2 {
@@ -721,13 +832,14 @@ a {
 }
 
 .message {
-  break-inside: avoid;
-  margin: 0 0 22px;
+  margin: 0;
 }
 
 .user-message {
   display: flex;
   justify-content: flex-end;
+  break-inside: avoid;
+  margin: 0 0 9px;
 }
 
 .user-stack {
@@ -740,29 +852,30 @@ a {
 
 .avatar,
 .assistant-avatar {
-  width: 24px;
-  height: 24px;
-  border: 1.35px solid #111827;
-  border-radius: 50%;
+  width: 25px;
+  height: 25px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #111827;
-  background: #fff;
   flex: 0 0 auto;
 }
 
-.avatar svg,
-.assistant-avatar svg {
-  width: 15px;
-  height: 15px;
+.avatar img,
+.assistant-avatar img {
+  width: 25px;
+  height: 25px;
+  object-fit: contain;
   display: block;
+}
+
+.avatar-fallback {
+  font-size: 9px;
+  font-weight: 800;
+  color: #111827;
 }
 
 .user-avatar {
   align-self: flex-end;
-  color: #0f172a;
-  background: #ffffff;
 }
 
 .bubble {
@@ -786,22 +899,22 @@ a {
 
 .assistant-message {
   display: block;
+  break-inside: auto;
+  margin: 0 0 18px;
+}
+
+.user-message.force-page-before {
+  break-before: page;
 }
 
 .assistant-header {
-  margin: 0 0 8px;
+  margin: 0 0 7px;
   display: flex;
   justify-content: flex-start;
 }
 
 .assistant-avatar {
-  width: 25px;
-  height: 25px;
-  border-width: 1.4px;
-  border-color: #334155;
-  color: #334155;
-  background: linear-gradient(145deg, #ffffff 0%, #f8fafc 100%);
-  box-shadow: 0 1px 0 rgba(15, 23, 42, .08);
+  opacity: .9;
 }
 
 .assistant-body {
@@ -813,13 +926,13 @@ a {
 }
 
 .thinking {
-  margin: 0 0 16px;
+  margin: 0 0 14px;
   padding: 14px 16px;
   border: 1px solid #d4dce8;
   border-left: 4px solid #8b5cf6;
   border-radius: 9px;
   background: #faf8ff;
-  break-inside: avoid;
+  break-inside: auto;
 }
 
 .thinking h3 {
@@ -1176,6 +1289,15 @@ function slugify(value) {
 
 function cleanText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function loadPngDataUri(filename) {
+  try {
+    const bytes = fs.readFileSync(path.join(ASSET_DIR, filename));
+    return `data:image/png;base64,${bytes.toString("base64")}`;
+  } catch (_) {
+    return "";
+  }
 }
 
 function formatDateTime(value) {
