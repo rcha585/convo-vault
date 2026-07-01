@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.5.3";
+  const EXPORTER_VERSION = "0.5.4";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -407,6 +407,8 @@
           filename,
           rendererUrl: ADVANCED_PDF_RENDERER_URL,
           exporterVersion: EXPORTER_VERSION,
+          dataDir: pdfResult.dataDir || "",
+          dataFiles: pdfResult.dataFiles || "",
           captureWarning: pdfResult.captureWarning || ""
         });
         downloadDebugLog(options.debugLog, filename.replace(/\.pdf$/i, "-debug.json"));
@@ -422,6 +424,8 @@
         imagesEmbedded: pdfResult.imagesEmbedded || 0,
         imagesFailed: pdfResult.imagesFailed || 0,
         imageLinks: messages.reduce((total, message) => total + (message.imageCount || 0), 0),
+        dataDir: pdfResult.dataDir || "",
+        dataFiles: pdfResult.dataFiles || "",
         captureWarning: pdfResult.captureWarning || ""
       };
     }
@@ -550,6 +554,8 @@
       pageCount: Number(response.headers.get("x-page-count")) || null,
       pdfEngine: response.headers.get("x-pdf-engine") || "advanced-local-chrome",
       captureWarning: response.headers.get("x-capture-warning") || "",
+      dataDir: decodeHeaderValue(response.headers.get("x-data-dir")),
+      dataFiles: decodeHeaderValue(response.headers.get("x-data-files")),
       imagesEmbedded: payload.assetStats?.imagesEmbedded || 0,
       imagesFailed: payload.assetStats?.imagesFailed || 0
     };
@@ -644,6 +650,18 @@
 
     const quotedMatch = header.match(/filename="([^"]+)"/i);
     return quotedMatch ? quotedMatch[1] : "";
+  }
+
+  function decodeHeaderValue(value) {
+    if (!value) {
+      return "";
+    }
+
+    try {
+      return decodeURIComponent(value);
+    } catch (_) {
+      return value;
+    }
   }
 
   function createDebugLog(options = {}) {
@@ -940,7 +958,9 @@
     return {
       id: message?.id || `message-${index + 1}`,
       role: message?.role || "unknown",
+      turnNumber: index + 1,
       order: message?.order ?? index,
+      conversationOrder: message?.order ?? index,
       sourceMessageId: message?.sourceMessageId || "",
       timestamp: message?.timestamp || "",
       preview: message?.preview || "",

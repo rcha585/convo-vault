@@ -14,7 +14,7 @@ The extension has entered the third major version. The current goal is no longer
 
 ### 2026-07-01 Local Backend Rendering Direction
 
-The project now has a v0.5.3 local backend rendering path:
+The project now has a v0.5.4 local backend rendering path:
 
 - The extension still owns ChatGPT-page permission and message selection.
 - The stable export path keeps capture in the current already signed-in ChatGPT page and sends the structured payload to the local backend for Markdown/PDF rendering.
@@ -24,6 +24,7 @@ The project now has a v0.5.3 local backend rendering path:
   - `GET /health`
   - `POST /render-pdf`
   - `POST /render-markdown`
+  - `POST /render-data`
   - `POST /capture-render-pdf`
   - `POST /capture-render-markdown`
 - `tools/advanced-pdf/capture.js` owns the experimental backend Edge capture prototype.
@@ -33,6 +34,7 @@ The project now has a v0.5.3 local backend rendering path:
 - Both visible choices use the extension payload and local backend rendering by default.
 - The renderer can use a custom Chromium-compatible browser path via `CGCE_RENDER_BROWSER_PATH`, so Huawei Browser can be tested as an optional engine if its installed build supports compatible headless printing behavior.
 - v0.5.3 removes the obsolete in-extension PDF writer and PDF settings dialog. `content.js` now focuses on ChatGPT-page extraction, selection UI, portable payload creation, image embedding handoff, debug logs, and download handoff; the local backend owns visible Markdown/PDF rendering.
+- v0.5.4 adds stable Turn numbers across PDF headings, table of contents, Markdown headings, and downstream data payloads; adds PDF outline/bookmarks through a local post-processing pass; and writes backend data sidecars (`*.data.json`, `*.messages.jsonl`, `*.qa-pairs.json`, `*.topics.json`, `*.entities.json`, `*.summary.md`) for later search, analytics, QA-pair review, and archive workflows.
 
 This changes the intended architecture: `content.js` should become thinner over time, while Markdown cleanup, PDF layout, Obsidian export, full-conversation archives, and indexes move into the local backend pipeline. Backend recapture can be revisited as an explicit opt-in once login/session handling is designed cleanly.
 

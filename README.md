@@ -73,10 +73,13 @@ the selected structured payload to:
 
 - `POST /render-markdown`
 - `POST /render-pdf`
+- `POST /render-data`
 
-The local backend then returns Markdown or PDF for the extension to download.
-This default path does not open a separate browser and does not require a second
-ChatGPT login.
+The local backend returns Markdown, PDF, or a normalized JSON data bundle. PDF
+exports also write local sidecar files next to the rendered PDF request cache:
+`*.data.json`, `*.messages.jsonl`, `*.qa-pairs.json`, `*.topics.json`,
+`*.entities.json`, and `*.summary.md`. This default path does not open a
+separate browser and does not require a second ChatGPT login.
 
 Backend cache defaults to:
 

@@ -60,6 +60,8 @@ The service listens only on `127.0.0.1:38474` by default. It exposes:
   binary.
 - `POST /render-markdown` - accepts the same `exportPayload` and returns a
   cleaned Markdown document.
+- `POST /render-data` - accepts the same `exportPayload` and returns a
+  normalized JSON bundle for downstream processing.
 - `POST /capture-render-pdf` - opens the conversation in an independent local
   Edge profile, captures it, then renders PDF. If capture fails and the request
   includes an extension payload, it falls back to that payload and returns
@@ -90,7 +92,7 @@ headless printing or Playwright-compatible launch behavior.
 
 ## Backend Edge Capture
 
-The current `0.5.3` codebase can use Microsoft Edge as an independent backend
+The current `0.5.4` codebase can use Microsoft Edge as an independent backend
 capture browser, but this remains experimental. It avoids moving the ChatGPT
 page the user is actively reading, at the cost of a separate browser profile.
 
@@ -127,8 +129,15 @@ and is separate from the browser tab where the extension runs.
 - Preserves Markdown structure, tables, links, blockquotes, lists, code blocks,
   user bubbles, assistant replies, Thinking sections, attachment cards, and page
   numbers.
+- Adds stable Turn numbers to message headings, table of contents entries,
+  Markdown headings, and JSON payloads.
+- Adds PDF outline/bookmarks from those headings with a local post-processing
+  pass that targets the PDF's existing named destinations.
 - Provides a backend Markdown endpoint so PDF, Markdown, and future Obsidian
   export can share the same structured payload.
+- Provides a backend data endpoint and PDF sidecar files (`*.data.json`,
+  `*.summary.md`) for later analytics, search indexes, QA-pair review, and
+  archive workflows.
 
 ## Next Integration Step
 
