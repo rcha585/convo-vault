@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.5.5";
+  const EXPORTER_VERSION = "0.5.6";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -4049,8 +4049,9 @@
       message.sourceNode?.closest?.("[data-turn-id-container], [data-turn-container], [data-turn-id], [data-testid*='conversation-turn']"),
       message.sourceTurnId ? document.querySelector(`[data-turn-id="${cssString(message.sourceTurnId)}"]`) : null,
       message.sourceTurnContainer ? document.querySelector(`[data-turn-id-container="${cssString(message.sourceTurnContainer)}"], [data-turn-container="${cssString(message.sourceTurnContainer)}"]`) : null,
-      message.sourceMessageId ? document.querySelector(`[data-message-id="${cssString(message.sourceMessageId)}"]`)?.closest("[data-turn-id-container], [data-turn-container], [data-turn-id], [data-testid*='conversation-turn']") : null
-    ].filter(Boolean);
+      message.sourceMessageId ? document.querySelector(`[data-message-id="${cssString(message.sourceMessageId)}"]`)?.closest("[data-turn-id-container], [data-turn-container], [data-turn-id], [data-testid*='conversation-turn']") : null,
+      findTurnNodeByConversationOrder(message.order)
+    ].filter((node) => node?.isConnected);
     const diagnostics = [];
 
     if (!candidates.length) {
@@ -4099,11 +4100,145 @@
       }
     }
 
+    const globalResult = await findGlobalThinkingTriggerForMessage(message);
+
+    if (globalResult.trigger) {
+      diagnostics.push(...globalResult.candidates);
+      return {
+        trigger: globalResult.trigger,
+        reason: globalResult.reason,
+        source: globalResult.source,
+        candidates: diagnostics
+      };
+    }
+
+    diagnostics.push(...globalResult.candidates);
+
     return {
       trigger: null,
-      reason: "no thinking trigger inside mounted source nodes",
+      reason: globalResult.reason || "no thinking trigger inside mounted source nodes",
       candidates: diagnostics
     };
+  }
+
+  function findTurnNodeByConversationOrder(order) {
+    const number = Number(order);
+
+    if (!Number.isFinite(number) || number <= 0 || number >= 1_000_000) {
+      return null;
+    }
+
+    return getAllTurnNodes().find((turn) => getConversationTurnNumber(turn) === number) || null;
+  }
+
+  async function findGlobalThinkingTriggerForMessage(message) {
+    const expectedStatus = normalizeThinkingStatus(message.thinkingMarkdown);
+    const triggerScores = getGlobalThinkingTriggerScores(message, expectedStatus);
+
+    if (!triggerScores.length) {
+      return {
+        trigger: null,
+        reason: "no global thinking triggers found",
+        candidates: []
+      };
+    }
+
+    const exactStatusMatches = expectedStatus
+      ? triggerScores.filter((entry) => entry.normalizedTriggerText === expectedStatus)
+      : [];
+    const best = [...triggerScores].sort((left, right) => right.score - left.score)[0];
+    const canUseBest = best.score >= 120
+      || (expectedStatus && exactStatusMatches.length === 1 && best.normalizedTriggerText === expectedStatus && best.score >= 100);
+
+    if (!canUseBest) {
+      return {
+        trigger: null,
+        reason: "global thinking triggers found but no confident match",
+        candidates: triggerScores.slice(0, 6).map(formatThinkingTriggerScore)
+      };
+    }
+
+    best.root?.scrollIntoView?.({ block: "center", inline: "nearest" });
+    await sleep(120);
+
+    return {
+      trigger: best.trigger,
+      reason: "found by global trigger fallback",
+      source: "global-fallback",
+      candidates: triggerScores.slice(0, 6).map(formatThinkingTriggerScore)
+    };
+  }
+
+  function getGlobalThinkingTriggerScores(message, expectedStatus) {
+    const triggers = [...document.querySelectorAll("button, [role='button']")]
+      .filter(isThinkingDetailTriggerElement);
+    const sourceMessageId = message.sourceMessageId || "";
+    const order = Number(message.order);
+    const previewNeedle = getThinkingPreviewNeedle(message.preview || message.markdown || "");
+
+    return triggers.map((trigger) => {
+      const root = getClosestTurnNode(trigger) || trigger.closest("[data-message-author-role], article, [role='article']") || trigger;
+      const triggerText = getExpandableCueText(trigger);
+      const normalizedTriggerText = normalizeThinkingStatus(triggerText);
+      const rootText = getElementText(root);
+      const turnNumber = getConversationTurnNumber(root);
+      let score = 0;
+
+      if (sourceMessageId && root.querySelector?.(`[data-message-id="${cssString(sourceMessageId)}"]`)) {
+        score += 160;
+      }
+
+      if (Number.isFinite(order) && order > 0 && turnNumber === order) {
+        score += 120;
+      }
+
+      if (expectedStatus && normalizedTriggerText === expectedStatus) {
+        score += 100;
+      } else if (expectedStatus && normalizedTriggerText.includes(expectedStatus)) {
+        score += 70;
+      }
+
+      if (previewNeedle && rootText.includes(previewNeedle)) {
+        score += 35;
+      }
+
+      if (isNodeInViewport(root)) {
+        score += 8;
+      }
+
+      return {
+        trigger,
+        root,
+        score,
+        turnNumber,
+        triggerText,
+        normalizedTriggerText
+      };
+    })
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score);
+  }
+
+  function formatThinkingTriggerScore(entry) {
+    return {
+      source: "global-fallback",
+      score: entry.score,
+      turnNumber: Number.isFinite(entry.turnNumber) ? entry.turnNumber : null,
+      triggerText: entry.triggerText,
+      node: summarizeNode(entry.root),
+      triggerCount: 1
+    };
+  }
+
+  function normalizeThinkingStatus(text) {
+    return cleanMarkdown(text).replace(/\s+/g, "").trim();
+  }
+
+  function getThinkingPreviewNeedle(text) {
+    return String(text || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 42);
   }
 
   function findThinkingTriggerInRoot(root) {
