@@ -12,8 +12,8 @@ $scriptPath = Join-Path $repoRoot "scripts\start-local-backend.ps1"
 $arguments = @(
   "-NoProfile",
   "-ExecutionPolicy", "Bypass",
-  "-File", "`"$scriptPath`"",
-  "-CacheDir", "`"$CacheDir`"",
+  "-File", $scriptPath,
+  "-CacheDir", $CacheDir,
   "-Port", "$Port"
 )
 
@@ -27,10 +27,7 @@ $startInfo.WorkingDirectory = [string]$repoRoot
 $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
 $startInfo.UseShellExecute = $false
 $startInfo.CreateNoWindow = $true
-
-foreach ($argument in $arguments) {
-  [void]$startInfo.ArgumentList.Add($argument)
-}
+$startInfo.Arguments = ($arguments | ForEach-Object { ConvertTo-CommandLineArgument $_ }) -join " "
 
 $pathValue = $startInfo.EnvironmentVariables["Path"]
 if (-not $pathValue) {
@@ -47,3 +44,16 @@ Start-Sleep -Seconds 2
 
 Write-Host "Started local backend process: $($process.Id)"
 Write-Host "Health: http://127.0.0.1:$Port/health"
+
+function ConvertTo-CommandLineArgument {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Value
+  )
+
+  if ($Value -notmatch '[\s"]') {
+    return $Value
+  }
+
+  return '"' + ($Value -replace '\\(?=\\*")', '$0$0' -replace '"', '\"') + '"'
+}
