@@ -68,6 +68,10 @@ Check whether it is reachable:
 powershell -ExecutionPolicy Bypass -File scripts\check-local-backend.ps1
 ```
 
+The extension popup also shows local renderer status. It can copy the hidden
+start command and can stop a running renderer. Browser security does not allow
+the extension to directly launch local scripts without a separate native helper.
+
 The service listens on `http://127.0.0.1:38474`. The stable extension path sends
 the selected structured payload to:
 

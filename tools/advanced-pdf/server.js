@@ -26,7 +26,7 @@ const server = http.createServer((request, response) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`[advanced-pdf-server] Listening on http://${HOST}:${PORT}`);
-  console.log("[advanced-pdf-server] Endpoints: GET /health, POST /render-pdf, POST /render-markdown, POST /render-data, POST /capture-render-pdf, POST /capture-render-markdown");
+  console.log("[advanced-pdf-server] Endpoints: GET /health, POST /shutdown, POST /render-pdf, POST /render-markdown, POST /render-data, POST /capture-render-pdf, POST /capture-render-markdown");
 });
 
 async function handleRequest(request, response) {
@@ -48,6 +48,11 @@ async function handleRequest(request, response) {
       cacheRoot: getCacheRoot(),
       edgePath: findEdgeExecutable() || null
     });
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/shutdown") {
+    handleShutdown(response);
     return;
   }
 
@@ -85,6 +90,20 @@ async function handleRequest(request, response) {
     ok: false,
     error: "Not found"
   });
+}
+
+function handleShutdown(response) {
+  sendJson(response, 200, {
+    ok: true,
+    shuttingDown: true
+  });
+
+  console.log("[advanced-pdf-server] Shutdown requested.");
+  setTimeout(() => {
+    server.close(() => {
+      process.exit(0);
+    });
+  }, 150);
 }
 
 async function handleCapture(request, response) {

@@ -8,11 +8,6 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $scriptPath = Join-Path $repoRoot "scripts\start-local-backend.ps1"
-$logDir = Join-Path $repoRoot "tmp"
-$stdout = Join-Path $logDir "local-backend.out.log"
-$stderr = Join-Path $logDir "local-backend.err.log"
-
-New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 $arguments = @(
   "-NoProfile",
@@ -26,17 +21,29 @@ if ($Headless) {
   $arguments += "-Headless"
 }
 
-$process = Start-Process -FilePath "powershell.exe" `
-  -ArgumentList $arguments `
-  -WorkingDirectory $repoRoot `
-  -WindowStyle Hidden `
-  -RedirectStandardOutput $stdout `
-  -RedirectStandardError $stderr `
-  -PassThru
+$startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName = "powershell.exe"
+$startInfo.WorkingDirectory = [string]$repoRoot
+$startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+
+foreach ($argument in $arguments) {
+  [void]$startInfo.ArgumentList.Add($argument)
+}
+
+$pathValue = $startInfo.EnvironmentVariables["Path"]
+if (-not $pathValue) {
+  $pathValue = $startInfo.EnvironmentVariables["PATH"]
+}
+$startInfo.EnvironmentVariables.Remove("PATH")
+if ($pathValue) {
+  $startInfo.EnvironmentVariables["Path"] = $pathValue
+}
+
+$process = [System.Diagnostics.Process]::Start($startInfo)
 
 Start-Sleep -Seconds 2
 
 Write-Host "Started local backend process: $($process.Id)"
 Write-Host "Health: http://127.0.0.1:$Port/health"
-Write-Host "Stdout: $stdout"
-Write-Host "Stderr: $stderr"

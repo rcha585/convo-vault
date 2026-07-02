@@ -56,6 +56,7 @@ pnpm run server
 The service listens only on `127.0.0.1:38474` by default. It exposes:
 
 - `GET /health` - quick availability check.
+- `POST /shutdown` - stop the local renderer process.
 - `POST /render-pdf` - accepts an `exportPayload` JSON object and returns a PDF
   binary.
 - `POST /render-markdown` - accepts the same `exportPayload` and returns a
@@ -92,7 +93,7 @@ headless printing or Playwright-compatible launch behavior.
 
 ## Backend Edge Capture
 
-The current `0.5.6` codebase can use Microsoft Edge as an independent backend
+The current `0.5.7` codebase can use Microsoft Edge as an independent backend
 capture browser, but this remains experimental. It avoids moving the ChatGPT
 page the user is actively reading, at the cost of a separate browser profile.
 

@@ -1,5 +1,17 @@
+const RENDERER_URL = "http://127.0.0.1:38474";
+const START_COMMAND = "powershell -ExecutionPolicy Bypass -File scripts\\start-local-backend-detached.ps1";
+
 const exportButton = document.getElementById("exportButton");
 const statusEl = document.getElementById("status");
+const backendDot = document.getElementById("backendDot");
+const backendStatus = document.getElementById("backendStatus");
+const checkBackendButton = document.getElementById("checkBackendButton");
+const copyStartButton = document.getElementById("copyStartButton");
+const stopBackendButton = document.getElementById("stopBackendButton");
+
+document.addEventListener("DOMContentLoaded", () => {
+  checkBackend();
+});
 
 exportButton.addEventListener("click", async () => {
   setBusy(true, "Opening selector...");
@@ -25,6 +37,91 @@ exportButton.addEventListener("click", async () => {
     setBusy(false);
   }
 });
+
+checkBackendButton.addEventListener("click", () => {
+  checkBackend({ announce: true });
+});
+
+copyStartButton.addEventListener("click", async () => {
+  const command = `Set-Location -LiteralPath 'F:\\AI\\chatgpt-conversation-exporter'; ${START_COMMAND}`;
+
+  try {
+    await navigator.clipboard.writeText(command);
+    setStatus("Start command copied. Paste it into PowerShell or Windows Terminal.");
+  } catch {
+    setStatus(command);
+  }
+});
+
+stopBackendButton.addEventListener("click", async () => {
+  setBackendBusy(true);
+  setStatus("Stopping local renderer...");
+
+  try {
+    const response = await fetch(`${RENDERER_URL}/shutdown`, {
+      method: "POST"
+    });
+
+    if (!response.ok) {
+      throw new Error(`Stop failed (${response.status}).`);
+    }
+
+    setBackendState("stopped", "Local renderer stopped");
+    setStatus("Local renderer stopped.");
+  } catch (error) {
+    setStatus(error.message || String(error));
+    await checkBackend();
+  } finally {
+    setBackendBusy(false);
+  }
+});
+
+async function checkBackend(options = {}) {
+  setBackendState("checking", "Checking local renderer...");
+  setBackendBusy(true);
+
+  try {
+    const response = await fetch(`${RENDERER_URL}/health`, {
+      method: "GET",
+      cache: "no-store"
+    });
+
+    if (!response.ok) {
+      throw new Error(`Health check failed (${response.status}).`);
+    }
+
+    const health = await response.json();
+    const version = health.version ? ` v${health.version}` : "";
+    setBackendState("running", `Local renderer running${version}`);
+
+    if (options.announce) {
+      setStatus("Local renderer is running.");
+    }
+  } catch {
+    setBackendState("stopped", "Local renderer not running");
+
+    if (options.announce) {
+      setStatus("Local renderer is not running. Copy the start command first.");
+    }
+  } finally {
+    setBackendBusy(false);
+  }
+}
+
+function setBackendState(state, label) {
+  backendDot.classList.toggle("running", state === "running");
+  backendDot.classList.toggle("stopped", state === "stopped");
+  backendStatus.textContent = label;
+  stopBackendButton.disabled = state !== "running";
+}
+
+function setBackendBusy(isBusy) {
+  checkBackendButton.disabled = isBusy;
+  copyStartButton.disabled = false;
+  if (isBusy) {
+    stopBackendButton.disabled = true;
+  }
+}
 
 function isChatGptUrl(url = "") {
   try {
