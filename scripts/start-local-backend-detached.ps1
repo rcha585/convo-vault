@@ -9,6 +9,19 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $scriptPath = Join-Path $repoRoot "scripts\start-local-backend.ps1"
 
+function ConvertTo-CommandLineArgument {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Value
+  )
+
+  if ($Value -notmatch '[\s"]') {
+    return $Value
+  }
+
+  return '"' + ($Value -replace '\\(?=\\*")', '$0$0' -replace '"', '\"') + '"'
+}
+
 $arguments = @(
   "-NoProfile",
   "-ExecutionPolicy", "Bypass",
@@ -44,16 +57,3 @@ Start-Sleep -Seconds 2
 
 Write-Host "Started local backend process: $($process.Id)"
 Write-Host "Health: http://127.0.0.1:$Port/health"
-
-function ConvertTo-CommandLineArgument {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$Value
-  )
-
-  if ($Value -notmatch '[\s"]') {
-    return $Value
-  }
-
-  return '"' + ($Value -replace '\\(?=\\*")', '$0$0' -replace '"', '\"') + '"'
-}
