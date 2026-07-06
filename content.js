@@ -32,6 +32,9 @@
   const MAX_SCAN_MS = 75_000;
   const HYDRATE_RESERVED_MS = 15_000;
   const MISSING_TURN_RECOVERY_MS = 18_000;
+  const MAX_ADAPTIVE_SCAN_MS = 210_000;
+  const MAX_ADAPTIVE_HYDRATE_RESERVED_MS = 60_000;
+  const MAX_ADAPTIVE_MISSING_RECOVERY_MS = 120_000;
   const TURN_HYDRATION_SETTLE_MS = 70;
   const CONVERSATION_TIMESTAMP_FETCH_TIMEOUT_MS = 3500;
   const THINKING_FLYOUT_AUTO_OPEN_LIMIT = 48;
@@ -306,29 +309,33 @@
     const scrollTarget = getBestScrollTarget();
     const originalScrollTop = getScrollTop(scrollTarget);
     const collector = createMessageCollector(debugLog);
-    const scanDeadline = Date.now() + MAX_SCAN_MS;
-    const walkDeadline = scanDeadline - HYDRATE_RESERVED_MS;
+    const scanBudget = getConversationScanBudget();
+    const scanDeadline = Date.now() + scanBudget.maxScanMs;
+    const walkDeadline = scanDeadline - scanBudget.hydrateReservedMs;
     debugLog.setScrollTarget(scrollTarget);
+    debugLog.event("scan.budget", scanBudget);
 
     try {
       // ChatGPT can lazy-load older turns. First move upward until the top is
       // stable, then walk downward and capture each visible batch.
       debugLog.mark("start");
       onProgress("Loading older messages...");
-      await loadOlderMessages(scrollTarget, collector, debugLog, scanDeadline);
+      await loadOlderMessages(scrollTarget, collector, debugLog, scanDeadline, scanBudget);
       debugLog.mark("loadedOlderMessages");
       onProgress("Scanning conversation...");
-      await walkConversation(scrollTarget, collector, debugLog, walkDeadline);
+      await walkConversation(scrollTarget, collector, debugLog, walkDeadline, scanBudget);
       debugLog.mark("walkedConversation");
       onProgress("Hydrating virtualized messages...");
-      const hydrateDeadline = Math.max(scanDeadline, Date.now() + HYDRATE_RESERVED_MS);
-      await hydrateVirtualizedTurns(collector, debugLog, hydrateDeadline);
+      const hydrateDeadline = Math.max(scanDeadline, Date.now() + scanBudget.hydrateReservedMs);
+      await hydrateVirtualizedTurns(collector, debugLog, hydrateDeadline, scanBudget);
       debugLog.mark("hydratedVirtualizedTurns");
       await collector.captureFromDom();
       debugLog.mark("finalCapture");
       onProgress("Recovering missed turns...");
-      const recoveryDeadline = Date.now() + MISSING_TURN_RECOVERY_MS;
-      await recoverMissingTurnMessages(scrollTarget, collector, debugLog, recoveryDeadline);
+      const missingBeforeRecovery = getMissingConversationTurnOrders(collector.getMessages());
+      const recoveryBudgetMs = getMissingRecoveryBudgetMs(missingBeforeRecovery.length, scanBudget.pageTurnCount);
+      const recoveryDeadline = Date.now() + recoveryBudgetMs;
+      await recoverMissingTurnMessages(scrollTarget, collector, debugLog, recoveryDeadline, recoveryBudgetMs);
       debugLog.mark("recoveredMissingTurns");
       await collector.captureFromDom({ settleMs: 0 });
 
@@ -345,7 +352,12 @@
       await enrichVisibleThinkingFlyouts(messages, debugLog);
       debugLog.mark("enrichedThinkingFlyouts");
       debugLog.finish(messages);
-      onProgress(`Found ${messages.length} messages.`);
+      const finalSummary = debugLog.getFinalSummary();
+      if (finalSummary?.missingTurnOrders?.length) {
+        onProgress(`Found ${messages.length}/${finalSummary.expectedTurnCount || finalSummary.pageTurnCount || "?"} messages; ${finalSummary.missingTurnOrders.length} turns may still be missing.`);
+      } else {
+        onProgress(`Found ${messages.length} messages.`);
+      }
       return {
         messages,
         debugLog
@@ -353,6 +365,47 @@
     } finally {
       setScrollTop(scrollTarget, originalScrollTop);
     }
+  }
+
+  function getConversationScanBudget() {
+    const pageTurnDiagnostics = getPageTurnDiagnostics();
+    const availableTurnCount = getAvailableConversationTurnOrders().length;
+    const pageTurnCount = Math.max(
+      pageTurnDiagnostics.dataTurnIdCount || 0,
+      availableTurnCount
+    );
+    const isLargeConversation = pageTurnCount >= 120;
+    const maxScanMs = isLargeConversation
+      ? Math.min(MAX_ADAPTIVE_SCAN_MS, Math.max(MAX_SCAN_MS, pageTurnCount * 1200))
+      : MAX_SCAN_MS;
+    const hydrateReservedMs = isLargeConversation
+      ? Math.min(MAX_ADAPTIVE_HYDRATE_RESERVED_MS, Math.max(HYDRATE_RESERVED_MS, pageTurnCount * 300))
+      : HYDRATE_RESERVED_MS;
+
+    return {
+      pageTurnCount,
+      availableTurnCount,
+      maxScanMs,
+      hydrateReservedMs,
+      adaptive: isLargeConversation
+    };
+  }
+
+  function getMissingRecoveryBudgetMs(missingCount, pageTurnCount = 0) {
+    if (!missingCount) {
+      return MISSING_TURN_RECOVERY_MS;
+    }
+
+    const needsAdaptiveRecovery = pageTurnCount >= 120 || missingCount >= 20;
+
+    if (!needsAdaptiveRecovery) {
+      return MISSING_TURN_RECOVERY_MS;
+    }
+
+    return Math.min(
+      MAX_ADAPTIVE_MISSING_RECOVERY_MS,
+      Math.max(MISSING_TURN_RECOVERY_MS, missingCount * 1800)
+    );
   }
 
   async function exportSelectedMessages(messages, options = {}) {
@@ -865,10 +918,14 @@
         const capturedTurnOrderSet = new Set(capturedTurnOrders);
         const roleSequenceDiagnostics = getRoleSequenceDiagnostics(messages);
         const effectiveTurnCount = messages.length;
-        const missingTurnOrders = effectiveTurnCount
-          ? Array.from({ length: effectiveTurnCount }, (_, index) => index + 1)
-            .filter((order) => !capturedTurnOrderSet.has(order))
-          : [];
+        const availableTurnOrders = getAvailableConversationTurnOrders();
+        const expectedTurnOrders = availableTurnOrders.length
+          ? availableTurnOrders
+          : pageTurnDiagnostics.dataTurnIdCount
+            ? Array.from({ length: pageTurnDiagnostics.dataTurnIdCount }, (_, index) => index + 1)
+            : capturedTurnOrders;
+        const expectedTurnCount = expectedTurnOrders.length || pageTurnDiagnostics.dataTurnIdCount || effectiveTurnCount;
+        const missingTurnOrders = expectedTurnOrders.filter((order) => !capturedTurnOrderSet.has(order));
         finalSummary = {
           totalMessages: messages.length,
           userMessages,
@@ -881,14 +938,22 @@
           systemMessages: messages.filter((message) => message.role === "system").length,
           toolMessages: messages.filter((message) => message.role === "tool").length,
           pageTurnCount: pageTurnDiagnostics.dataTurnIdCount,
+          availableTurnCount: availableTurnOrders.length,
+          expectedTurnCount,
           effectiveTurnCount,
           extractionRateFromDataTurnId: pageTurnDiagnostics.dataTurnIdCount
             ? Number((messages.length / pageTurnDiagnostics.dataTurnIdCount).toFixed(3))
+            : null,
+          extractionRateFromExpectedTurns: expectedTurnCount
+            ? Number((messages.length / expectedTurnCount).toFixed(3))
             : null,
           roleSequenceDiagnostics,
           capturedTurnOrders,
           missingTurnOrders
         };
+      },
+      getFinalSummary() {
+        return finalSummary;
       },
       toJSON() {
         return {
@@ -2085,14 +2150,14 @@
     };
   }
 
-  async function loadOlderMessages(scrollTarget, collector, debugLog = null, deadline = Infinity) {
+  async function loadOlderMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budget = null) {
     let stableAtTopCount = 0;
     let previousSignature = getConversationSignature(scrollTarget);
     await collector.captureFromDom();
 
     for (let attempt = 0; attempt < TOP_LOAD_ATTEMPTS; attempt += 1) {
       if (Date.now() >= deadline) {
-        debugLog?.progress("loadOlder.timeout", { attempt, maxScanMs: MAX_SCAN_MS });
+        debugLog?.progress("loadOlder.timeout", { attempt, maxScanMs: budget?.maxScanMs || MAX_SCAN_MS });
         break;
       }
 
@@ -2132,7 +2197,7 @@
     }
   }
 
-  async function walkConversation(scrollTarget, collector, debugLog = null, deadline = Infinity) {
+  async function walkConversation(scrollTarget, collector, debugLog = null, deadline = Infinity, budget = null) {
     let stuckCount = 0;
     let bottomStableCount = 0;
     let previousSignature = "";
@@ -2142,7 +2207,11 @@
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       if (Date.now() >= deadline) {
-        debugLog?.progress("walk.timeout", { attempt, maxScanMs: MAX_SCAN_MS, hydrateReservedMs: HYDRATE_RESERVED_MS });
+        debugLog?.progress("walk.timeout", {
+          attempt,
+          maxScanMs: budget?.maxScanMs || MAX_SCAN_MS,
+          hydrateReservedMs: budget?.hydrateReservedMs || HYDRATE_RESERVED_MS
+        });
         break;
       }
 
@@ -2167,7 +2236,11 @@
       await waitForScrollAndDomIdle();
 
       if (Date.now() >= deadline) {
-        debugLog?.progress("walk.timeoutAfterWait", { attempt, maxScanMs: MAX_SCAN_MS, hydrateReservedMs: HYDRATE_RESERVED_MS });
+        debugLog?.progress("walk.timeoutAfterWait", {
+          attempt,
+          maxScanMs: budget?.maxScanMs || MAX_SCAN_MS,
+          hydrateReservedMs: budget?.hydrateReservedMs || HYDRATE_RESERVED_MS
+        });
         break;
       }
 
@@ -2203,7 +2276,7 @@
     return Math.min(WALK_ATTEMPTS, Math.max(10, estimated));
   }
 
-  async function hydrateVirtualizedTurns(collector, debugLog = null, deadline = Infinity) {
+  async function hydrateVirtualizedTurns(collector, debugLog = null, deadline = Infinity, budget = null) {
     const allTurns = orderTurnsForHydration(getAllTurnNodes());
     const turns = getTurnsNeedingHydration(allTurns, collector);
 
@@ -2216,7 +2289,12 @@
 
     for (let index = 0; index < turns.length; index += 1) {
       if (Date.now() >= deadline) {
-        debugLog?.progress("hydrate.timeout", { index, totalTurns: turns.length, maxScanMs: MAX_SCAN_MS });
+        debugLog?.progress("hydrate.timeout", {
+          index,
+          totalTurns: turns.length,
+          maxScanMs: budget?.maxScanMs || MAX_SCAN_MS,
+          hydrateReservedMs: budget?.hydrateReservedMs || HYDRATE_RESERVED_MS
+        });
         break;
       }
 
@@ -2286,12 +2364,13 @@
     };
   }
 
-  async function recoverMissingTurnMessages(scrollTarget, collector, debugLog = null, deadline = Infinity) {
+  async function recoverMissingTurnMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budgetMs = MISSING_TURN_RECOVERY_MS) {
     let missingOrders = getMissingConversationTurnOrders(collector.getMessages());
 
     debugLog?.progress("missingRecovery.start", {
       missingOrders,
-      capturedMessages: collector.getMessageCount()
+      capturedMessages: collector.getMessageCount(),
+      recoveryBudgetMs: budgetMs
     });
 
     if (!missingOrders.length) {
@@ -2344,7 +2423,8 @@
 
     debugLog?.progress("missingRecovery.finish", {
       missingOrders,
-      capturedMessages: collector.getMessageCount()
+      capturedMessages: collector.getMessageCount(),
+      recoveryBudgetMs: budgetMs
     });
   }
 
