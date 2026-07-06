@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.5.8";
+  const EXPORTER_VERSION = "0.5.9";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -2041,80 +2041,19 @@
 
   function finalizeCollectedMessages(messages, debugLog = null) {
     const sorted = uniqueMessages(messages).sort((a, b) => a.order - b.order);
-    const { messages: cleanedMessages, removed } = removeAdjacentAssistantVariants(sorted);
-    const roleSequence = getRoleSequenceDiagnostics(cleanedMessages);
-
-    if (removed.length) {
-      debugLog?.event("roleSequence.removedAdjacentAssistantVariants", {
-        removed: removed.map((message) => ({
-          order: message.order,
-          role: message.role,
-          id: message.id,
-          preview: message.preview || makeMessagePreview(message)
-        }))
-      });
-    }
+    const roleSequence = getRoleSequenceDiagnostics(sorted);
 
     if (roleSequence.sameRolePairs.length || !roleSequence.balancedPairs) {
       debugLog?.event("roleSequence.warning", roleSequence);
     }
 
-    cleanedMessages.forEach((message, index) => {
+    sorted.forEach((message) => {
       if (message.originalOrder == null) {
         message.originalOrder = message.order;
       }
-      message.order = index + 1;
     });
 
-    return cleanedMessages;
-  }
-
-  function removeAdjacentAssistantVariants(messages) {
-    const result = [];
-    const removed = [];
-
-    for (let index = 0; index < messages.length; index += 1) {
-      const message = messages[index];
-
-      if (message?.role !== "assistant") {
-        result.push(message);
-        continue;
-      }
-
-      const group = [message];
-      let cursor = index + 1;
-
-      while (cursor < messages.length && messages[cursor]?.role === "assistant") {
-        group.push(messages[cursor]);
-        cursor += 1;
-      }
-
-      if (group.length === 1) {
-        result.push(message);
-      } else {
-        const selected = chooseAssistantVariantToKeep(group);
-        result.push(selected);
-        removed.push(...group.filter((candidate) => candidate !== selected));
-      }
-
-      index = cursor - 1;
-    }
-
-    return { messages: result, removed };
-  }
-
-  function chooseAssistantVariantToKeep(messages) {
-    const visible = messages.filter((message) => !isHiddenCaptureCandidate(message.sourceNode));
-
-    if (visible.length === 1) {
-      return visible[0];
-    }
-
-    if (visible.length > 1) {
-      return visible[visible.length - 1];
-    }
-
-    return messages[messages.length - 1];
+    return sorted;
   }
 
   function getRoleSequenceDiagnostics(messages) {

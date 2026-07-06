@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Conversation Exporter",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "description": "Personal-use extension that exports the current ChatGPT conversation to Markdown or PDF.",
   "permissions": [
     "activeTab",

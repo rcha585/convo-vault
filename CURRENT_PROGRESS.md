@@ -14,7 +14,7 @@ The extension has entered the third major version. The current goal is no longer
 
 ### 2026-07-01 Local Backend Rendering Direction
 
-The project now has a v0.5.8 local backend rendering path:
+The project now has a v0.5.9 local backend rendering path:
 
 - The extension still owns ChatGPT-page permission and message selection.
 - The stable export path keeps capture in the current already signed-in ChatGPT page and sends the structured payload to the local backend for Markdown/PDF rendering.
@@ -39,7 +39,8 @@ The project now has a v0.5.8 local backend rendering path:
 - v0.5.5 closes the extension popup after opening the selector and restores the Markdown link-label cleanup helper used by PDF/Markdown serialization.
 - v0.5.6 makes Thinking flyout capture more resilient by re-locating virtualized turns from conversation order and falling back to globally scored Thinking triggers when the original source node no longer contains the details button.
 - v0.5.7 adds popup-level local renderer controls: health status, copyable start command, and a stop button backed by `POST /shutdown`.
-- v0.5.8 adds role-sequence diagnostics and adjacent assistant-variant cleanup for regenerated ChatGPT answers.
+- v0.5.8 added role-sequence diagnostics and adjacent assistant-variant cleanup for regenerated ChatGPT answers.
+- v0.5.9 keeps the diagnostics but restores faithful export of consecutive ChatGPT responses; adjacent assistant turns are now warnings, not automatic deletions.
 
 This changes the intended architecture: `content.js` should become thinner over time, while Markdown cleanup, PDF layout, Obsidian export, full-conversation archives, and indexes move into the local backend pipeline. Backend recapture can be revisited as an explicit opt-in once login/session handling is designed cleanly.
 
