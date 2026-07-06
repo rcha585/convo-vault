@@ -2105,7 +2105,10 @@
   }
 
   function finalizeCollectedMessages(messages, debugLog = null) {
-    const sorted = dedupeMessagesByContentIdentity(uniqueMessages(messages), debugLog)
+    const sorted = dedupeMessagesByTurnRoleOverlap(
+      dedupeMessagesByContentIdentity(uniqueMessages(messages), debugLog),
+      debugLog
+    )
       .sort((a, b) => a.order - b.order);
     const roleSequence = getRoleSequenceDiagnostics(sorted);
 
@@ -2120,6 +2123,69 @@
     });
 
     return sorted;
+  }
+
+  function dedupeMessagesByTurnRoleOverlap(messages, debugLog = null) {
+    const result = [];
+
+    for (const message of messages) {
+      const duplicateIndex = result.findIndex((existing) => isSameTurnRoleOverlap(message, existing));
+
+      if (duplicateIndex < 0) {
+        result.push(message);
+        continue;
+      }
+
+      const existing = result[duplicateIndex];
+      const merged = chooseDuplicateMessageWinner(message, existing);
+      result[duplicateIndex] = merged;
+      debugLog?.event("message.sameTurnOverlapMerged", {
+        order: message.order,
+        role: message.role,
+        keptId: merged.id,
+        droppedId: merged === message ? existing.id : message.id
+      });
+    }
+
+    return result;
+  }
+
+  function isSameTurnRoleOverlap(nextMessage, previousMessage) {
+    const nextKey = getMessageTurnRoleKey(nextMessage);
+
+    if (!nextKey || nextKey !== getMessageTurnRoleKey(previousMessage)) {
+      return false;
+    }
+
+    return isMessageContentSubset(nextMessage, previousMessage)
+      || isMessageContentSubset(previousMessage, nextMessage);
+  }
+
+  function getMessageTurnRoleKey(message) {
+    const order = Number(message?.order);
+
+    if (!Number.isFinite(order) || order <= 0) {
+      return "";
+    }
+
+    return `${order}|${message.role || "unknown"}`;
+  }
+
+  function isMessageContentSubset(candidate, container) {
+    const candidateMarkdown = normalizeMessageDedupeText(candidate?.markdown);
+    const containerMarkdown = normalizeMessageDedupeText(container?.markdown);
+    const candidateThinking = normalizeMessageDedupeText(candidate?.thinkingMarkdown);
+    const containerThinking = normalizeMessageDedupeText(container?.thinkingMarkdown);
+
+    if (candidateThinking && candidateThinking !== containerThinking && !containerThinking.includes(candidateThinking)) {
+      return false;
+    }
+
+    if (!candidateMarkdown) {
+      return true;
+    }
+
+    return Boolean(containerMarkdown && containerMarkdown.includes(candidateMarkdown));
   }
 
   function dedupeMessagesByContentIdentity(messages, debugLog = null) {
