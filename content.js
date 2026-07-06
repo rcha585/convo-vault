@@ -2105,7 +2105,8 @@
   }
 
   function finalizeCollectedMessages(messages, debugLog = null) {
-    const sorted = uniqueMessages(messages).sort((a, b) => a.order - b.order);
+    const sorted = dedupeMessagesByContentIdentity(uniqueMessages(messages), debugLog)
+      .sort((a, b) => a.order - b.order);
     const roleSequence = getRoleSequenceDiagnostics(sorted);
 
     if (roleSequence.sameRolePairs.length || !roleSequence.balancedPairs) {
@@ -2119,6 +2120,80 @@
     });
 
     return sorted;
+  }
+
+  function dedupeMessagesByContentIdentity(messages, debugLog = null) {
+    const messagesByIdentity = new Map();
+    const messagesWithoutIdentity = [];
+
+    for (const message of messages) {
+      const identity = getMessageContentIdentity(message);
+
+      if (!identity) {
+        messagesWithoutIdentity.push(message);
+        continue;
+      }
+
+      const existing = messagesByIdentity.get(identity);
+
+      if (!existing) {
+        messagesByIdentity.set(identity, message);
+        continue;
+      }
+
+      const merged = chooseDuplicateMessageWinner(message, existing);
+      messagesByIdentity.set(identity, merged);
+      debugLog?.event("message.duplicateContentMerged", {
+        order: message.order,
+        role: message.role,
+        keptId: merged.id,
+        droppedId: merged === message ? existing.id : message.id
+      });
+    }
+
+    return [...messagesByIdentity.values(), ...messagesWithoutIdentity];
+  }
+
+  function getMessageContentIdentity(message) {
+    if (!message) {
+      return "";
+    }
+
+    const order = Number(message.order);
+
+    if (!Number.isFinite(order) || order <= 0) {
+      return "";
+    }
+
+    const role = message.role || "unknown";
+    const markdownHash = hashString(normalizeMessageDedupeText(message.markdown));
+    const thinkingHash = hashString(normalizeMessageDedupeText(message.thinkingMarkdown));
+
+    return `${order}|${role}|${markdownHash}|${thinkingHash}`;
+  }
+
+  function normalizeMessageDedupeText(value) {
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function chooseDuplicateMessageWinner(nextMessage, previousMessage) {
+    const nextIsRicher = isMessageRicher(nextMessage, previousMessage);
+    const previousIsRicher = isMessageRicher(previousMessage, nextMessage);
+
+    if (nextIsRicher && !previousIsRicher) {
+      return mergeMessageAttachments(nextMessage, previousMessage);
+    }
+
+    const nextHasStableId = !String(nextMessage.id || "").startsWith("fingerprint:");
+    const previousHasStableId = !String(previousMessage.id || "").startsWith("fingerprint:");
+
+    if (nextHasStableId && !previousHasStableId) {
+      return mergeMessageAttachments(nextMessage, previousMessage);
+    }
+
+    return mergeMessageAttachments(previousMessage, nextMessage);
   }
 
   function getRoleSequenceDiagnostics(messages) {
