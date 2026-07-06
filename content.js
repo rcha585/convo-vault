@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.5.7";
+  const EXPORTER_VERSION = "0.5.8";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -332,7 +332,7 @@
       debugLog.mark("recoveredMissingTurns");
       await collector.captureFromDom({ settleMs: 0 });
 
-      const messages = collector.getMessages();
+      const messages = finalizeCollectedMessages(collector.getMessages(), debugLog);
 
       if (!messages.length) {
         throw new Error("No conversation messages were found on this page.");
@@ -863,8 +863,10 @@
           .filter((order) => Number.isFinite(order) && order > 0 && order < 1_000_000))]
           .sort((a, b) => a - b);
         const capturedTurnOrderSet = new Set(capturedTurnOrders);
-        const missingTurnOrders = pageTurnDiagnostics.dataTurnIdCount
-          ? Array.from({ length: pageTurnDiagnostics.dataTurnIdCount }, (_, index) => index + 1)
+        const roleSequenceDiagnostics = getRoleSequenceDiagnostics(messages);
+        const effectiveTurnCount = messages.length;
+        const missingTurnOrders = effectiveTurnCount
+          ? Array.from({ length: effectiveTurnCount }, (_, index) => index + 1)
             .filter((order) => !capturedTurnOrderSet.has(order))
           : [];
         finalSummary = {
@@ -879,9 +881,11 @@
           systemMessages: messages.filter((message) => message.role === "system").length,
           toolMessages: messages.filter((message) => message.role === "tool").length,
           pageTurnCount: pageTurnDiagnostics.dataTurnIdCount,
+          effectiveTurnCount,
           extractionRateFromDataTurnId: pageTurnDiagnostics.dataTurnIdCount
             ? Number((messages.length / pageTurnDiagnostics.dataTurnIdCount).toFixed(3))
             : null,
+          roleSequenceDiagnostics,
           capturedTurnOrders,
           missingTurnOrders
         };
@@ -961,6 +965,7 @@
       turnNumber: index + 1,
       order: message?.order ?? index,
       conversationOrder: message?.order ?? index,
+      originalOrder: message?.originalOrder ?? message?.order ?? index,
       sourceMessageId: message?.sourceMessageId || "",
       timestamp: message?.timestamp || "",
       preview: message?.preview || "",
@@ -2034,6 +2039,113 @@
     return result;
   }
 
+  function finalizeCollectedMessages(messages, debugLog = null) {
+    const sorted = uniqueMessages(messages).sort((a, b) => a.order - b.order);
+    const { messages: cleanedMessages, removed } = removeAdjacentAssistantVariants(sorted);
+    const roleSequence = getRoleSequenceDiagnostics(cleanedMessages);
+
+    if (removed.length) {
+      debugLog?.event("roleSequence.removedAdjacentAssistantVariants", {
+        removed: removed.map((message) => ({
+          order: message.order,
+          role: message.role,
+          id: message.id,
+          preview: message.preview || makeMessagePreview(message)
+        }))
+      });
+    }
+
+    if (roleSequence.sameRolePairs.length || !roleSequence.balancedPairs) {
+      debugLog?.event("roleSequence.warning", roleSequence);
+    }
+
+    cleanedMessages.forEach((message, index) => {
+      if (message.originalOrder == null) {
+        message.originalOrder = message.order;
+      }
+      message.order = index + 1;
+    });
+
+    return cleanedMessages;
+  }
+
+  function removeAdjacentAssistantVariants(messages) {
+    const result = [];
+    const removed = [];
+
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index];
+
+      if (message?.role !== "assistant") {
+        result.push(message);
+        continue;
+      }
+
+      const group = [message];
+      let cursor = index + 1;
+
+      while (cursor < messages.length && messages[cursor]?.role === "assistant") {
+        group.push(messages[cursor]);
+        cursor += 1;
+      }
+
+      if (group.length === 1) {
+        result.push(message);
+      } else {
+        const selected = chooseAssistantVariantToKeep(group);
+        result.push(selected);
+        removed.push(...group.filter((candidate) => candidate !== selected));
+      }
+
+      index = cursor - 1;
+    }
+
+    return { messages: result, removed };
+  }
+
+  function chooseAssistantVariantToKeep(messages) {
+    const visible = messages.filter((message) => !isHiddenCaptureCandidate(message.sourceNode));
+
+    if (visible.length === 1) {
+      return visible[0];
+    }
+
+    if (visible.length > 1) {
+      return visible[visible.length - 1];
+    }
+
+    return messages[messages.length - 1];
+  }
+
+  function getRoleSequenceDiagnostics(messages) {
+    const sameRolePairs = [];
+
+    for (let index = 1; index < messages.length; index += 1) {
+      if (messages[index]?.role === messages[index - 1]?.role) {
+        sameRolePairs.push({
+          previousOrder: messages[index - 1].order,
+          order: messages[index].order,
+          role: messages[index].role,
+          previousPreview: messages[index - 1].preview || makeMessagePreview(messages[index - 1]),
+          preview: messages[index].preview || makeMessagePreview(messages[index])
+        });
+      }
+    }
+
+    const userCount = messages.filter((message) => message.role === "user").length;
+    const assistantCount = messages.filter((message) => message.role === "assistant").length;
+
+    return {
+      totalMessages: messages.length,
+      userMessages: userCount,
+      assistantMessages: assistantCount,
+      startsWithUser: messages[0]?.role === "user",
+      endsWithAssistant: messages[messages.length - 1]?.role === "assistant",
+      balancedPairs: userCount === assistantCount && messages[0]?.role === "user" && messages[messages.length - 1]?.role === "assistant",
+      sameRolePairs
+    };
+  }
+
   async function loadOlderMessages(scrollTarget, collector, debugLog = null, deadline = Infinity) {
     let stableAtTopCount = 0;
     let previousSignature = getConversationSignature(scrollTarget);
@@ -2473,10 +2585,20 @@
       debugLog?.selectorHit(selector, elements.length);
 
       for (const element of elements) {
+        if (isHiddenCaptureCandidate(element)) {
+          debugLog?.candidateFiltered(element, selector, "hidden or inactive candidate");
+          continue;
+        }
+
         const normalized = normalizeMessageNode(element);
 
         if (!normalized) {
           debugLog?.candidateFiltered(element, selector, "normalize returned null");
+          continue;
+        }
+
+        if (isHiddenCaptureCandidate(normalized)) {
+          debugLog?.candidateFiltered(element, selector, "normalized candidate is hidden or inactive", normalized);
           continue;
         }
 
@@ -2502,6 +2624,11 @@
     debugLog?.selectorHit("primary-turn-nodes", turns.length);
 
     for (const turn of turns) {
+      if (isHiddenCaptureCandidate(turn)) {
+        debugLog?.candidateFiltered(turn, "primary-turn-nodes", "hidden or inactive turn", turn);
+        continue;
+      }
+
       const potential = getPotentialMessageNodeResult(turn);
 
       if (!potential.ok) {
@@ -2735,7 +2862,7 @@
       ...document.querySelectorAll("[data-turn-id-container]"),
       ...document.querySelectorAll('[data-testid^="conversation-turn-"], [data-testid*="conversation-turn"]')
     ].map((node) => normalizeMessageNode(node) || node))
-      .filter((node) => node?.isConnected && isTurnNode(node))
+      .filter((node) => node?.isConnected && isTurnNode(node) && !isHiddenCaptureCandidate(node))
       .sort(compareDocumentOrder);
   }
 
@@ -4574,6 +4701,35 @@
 
     const style = window.getComputedStyle(element);
     return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0;
+  }
+
+  function isHiddenCaptureCandidate(element) {
+    if (!element?.isConnected) {
+      return true;
+    }
+
+    let current = element;
+    const boundary = document.querySelector("main") || document.body;
+
+    while (current && current !== document.documentElement) {
+      if (current.hidden || current.getAttribute?.("aria-hidden") === "true" || current.hasAttribute?.("inert")) {
+        return true;
+      }
+
+      const style = window.getComputedStyle?.(current);
+
+      if (style && (style.display === "none" || style.visibility === "hidden")) {
+        return true;
+      }
+
+      if (current === boundary || current === document.body) {
+        break;
+      }
+
+      current = current.parentElement;
+    }
+
+    return false;
   }
 
   function isNodeInViewport(node) {
