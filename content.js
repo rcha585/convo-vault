@@ -41,7 +41,7 @@
   const THINKING_FLYOUT_OPEN_TIMEOUT_MS = 1400;
   const DEBUG_EVENT_LIMIT = 500;
   const DETAILED_DEBUG_LOG = false;
-  const ADVANCED_PDF_IMAGE_EMBED_LIMIT = 18;
+  const ADVANCED_PDF_IMAGE_EMBED_LIMIT = 160;
   const ADVANCED_PDF_RENDERER_URL = "http://127.0.0.1:38474";
   const MESSAGE_NODE_SELECTORS = [
     '[data-turn-id]',
@@ -616,6 +616,7 @@
 
   async function embedImagesForPortableMessages(messages, stats) {
     let remaining = ADVANCED_PDF_IMAGE_EMBED_LIMIT;
+    const embeddedImagesByUrl = new Map();
 
     for (const message of messages) {
       if (remaining <= 0) {
@@ -623,7 +624,7 @@
         continue;
       }
 
-      const markdownResult = await embedMarkdownImagesForPdf(message.markdown, remaining, stats);
+      const markdownResult = await embedMarkdownImagesForPdf(message.markdown, remaining, stats, embeddedImagesByUrl);
       message.markdown = markdownResult.markdown;
       remaining = markdownResult.remaining;
 
@@ -632,13 +633,13 @@
         continue;
       }
 
-      const thinkingResult = await embedMarkdownImagesForPdf(message.thinkingMarkdown, remaining, stats);
+      const thinkingResult = await embedMarkdownImagesForPdf(message.thinkingMarkdown, remaining, stats, embeddedImagesByUrl);
       message.thinkingMarkdown = thinkingResult.markdown;
       remaining = thinkingResult.remaining;
     }
   }
 
-  async function embedMarkdownImagesForPdf(markdown, remaining, stats) {
+  async function embedMarkdownImagesForPdf(markdown, remaining, stats, embeddedImagesByUrl = new Map()) {
     const source = String(markdown || "");
 
     if (!source || remaining <= 0) {
@@ -650,7 +651,7 @@
     let lastIndex = 0;
     let match;
 
-    while ((match = imagePattern.exec(source)) && remaining > 0) {
+    while ((match = imagePattern.exec(source))) {
       const [fullMatch, alt, url] = match;
       output += source.slice(lastIndex, match.index);
       lastIndex = match.index + fullMatch.length;
@@ -660,8 +661,20 @@
         continue;
       }
 
+      if (embeddedImagesByUrl.has(url)) {
+        output += `![${alt || "image"}](${embeddedImagesByUrl.get(url)})`;
+        continue;
+      }
+
+      if (remaining <= 0) {
+        output += fullMatch;
+        stats.imagesSkipped += 1;
+        continue;
+      }
+
       try {
         const dataUri = await imageToDataUriFromSrc(url);
+        embeddedImagesByUrl.set(url, dataUri);
         output += `![${alt || "image"}](${dataUri})`;
         stats.imagesEmbedded += 1;
         remaining -= 1;
@@ -672,10 +685,6 @@
     }
 
     output += source.slice(lastIndex);
-
-    if (remaining <= 0) {
-      stats.imagesSkipped += countMarkdownImages(source.slice(lastIndex));
-    }
 
     return {
       markdown: output,
