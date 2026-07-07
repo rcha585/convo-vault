@@ -26,7 +26,7 @@ const server = http.createServer((request, response) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`[advanced-pdf-server] Listening on http://${HOST}:${PORT}`);
-  console.log("[advanced-pdf-server] Endpoints: GET /health, POST /shutdown, POST /render-pdf, POST /render-markdown, POST /render-data, POST /capture-render-pdf, POST /capture-render-markdown");
+  console.log("[advanced-pdf-server] Endpoints: GET /health, POST /shutdown, POST /render-pdf, POST /render-markdown, POST /render-data, POST /render-bundle, POST /capture-render-pdf, POST /capture-render-markdown");
 });
 
 async function handleRequest(request, response) {
@@ -68,6 +68,11 @@ async function handleRequest(request, response) {
 
   if (request.method === "POST" && url.pathname === "/render-data") {
     await handleRenderData(request, response);
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/render-bundle") {
+    await handleRenderBundle(request, response);
     return;
   }
 
@@ -246,6 +251,86 @@ async function handleRenderData(request, response) {
     "X-Data-Engine": "advanced-local-data"
   });
   response.end(bytes);
+}
+
+async function handleRenderBundle(request, response) {
+  const body = await readJsonBody(request);
+  const payload = normalizePayload(body);
+
+  if (!payload.messages.length) {
+    sendJson(response, 400, {
+      ok: false,
+      error: "No messages were provided."
+    });
+    return;
+  }
+
+  const baseName = sanitizeFilename(
+    stripExtension(body.fileName, "zip")
+      || payload.title
+      || "chatgpt-conversation"
+  );
+  const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const requestDir = path.join(WORK_DIR, id);
+  fs.mkdirSync(requestDir, { recursive: true });
+
+  const jsonPath = path.join(requestDir, `${baseName}.payload.json`);
+  const htmlPath = path.join(requestDir, `${baseName}.html`);
+  const pdfPath = path.join(requestDir, `${baseName}.pdf`);
+  const markdownPath = path.join(requestDir, `${baseName}.md`);
+
+  fs.writeFileSync(jsonPath, JSON.stringify(payload, null, 2), "utf8");
+  fs.writeFileSync(markdownPath, buildMarkdownDocument(payload), "utf8");
+  const dataFiles = writeDataSidecars(requestDir, baseName, payload);
+
+  const result = await runRenderer({
+    jsonPath,
+    htmlPath,
+    pdfPath,
+    baseName
+  });
+
+  if (!result.ok) {
+    sendJson(response, 500, {
+      ok: false,
+      error: "Renderer failed.",
+      stdout: result.stdout.slice(-4000),
+      stderr: result.stderr.slice(-4000)
+    });
+    return;
+  }
+
+  const bundleEntries = [
+    {
+      name: `${baseName}.md`,
+      data: fs.readFileSync(markdownPath)
+    },
+    {
+      name: `${baseName}.pdf`,
+      data: fs.readFileSync(pdfPath)
+    },
+    {
+      name: `${baseName}.payload.json`,
+      data: fs.readFileSync(jsonPath)
+    },
+    ...dataFiles.map((filePath) => ({
+      name: path.basename(filePath),
+      data: fs.readFileSync(filePath)
+    }))
+  ];
+  const zipBytes = createZipArchive(bundleEntries);
+  const filename = `${baseName}.zip`;
+
+  response.writeHead(200, {
+    "Content-Type": "application/zip",
+    "Content-Length": zipBytes.length,
+    "Content-Disposition": makeContentDisposition(filename),
+    "X-Bundle-Engine": "advanced-local-bundle",
+    "X-Bundle-Files": encodeHeaderValue(bundleEntries.map((entry) => entry.name).join(",")),
+    "X-Renderer-HTML": encodeHeaderValue(htmlPath.replace(/\\/g, "/")),
+    "X-Data-Dir": encodeHeaderValue(requestDir.replace(/\\/g, "/"))
+  });
+  response.end(zipBytes);
 }
 
 async function renderMarkdownPayload(payload, body, response, captureWarning = "") {
@@ -713,6 +798,123 @@ function isDisplayableTimestamp(value) {
     || /^\d{4}-\d{2}-\d{2}[T\s]\d{1,2}:\d{2}/.test(text)
     || /^[A-Z][a-z]{2,8}\s+\d{1,2},\s+\d{4},?\s+\d{1,2}:\d{2}/.test(text);
 }
+
+function createZipArchive(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const name = normalizeZipEntryName(entry.name);
+    const nameBytes = Buffer.from(name, "utf8");
+    const data = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(String(entry.data || ""), "utf8");
+    const checksum = crc32(data);
+    const { dosTime, dosDate } = getDosDateTime(new Date());
+    const localHeader = Buffer.alloc(30 + nameBytes.length);
+
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0x0800, 6);
+    localHeader.writeUInt16LE(0, 8);
+    localHeader.writeUInt16LE(dosTime, 10);
+    localHeader.writeUInt16LE(dosDate, 12);
+    localHeader.writeUInt32LE(checksum, 14);
+    localHeader.writeUInt32LE(data.length, 18);
+    localHeader.writeUInt32LE(data.length, 22);
+    localHeader.writeUInt16LE(nameBytes.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+    nameBytes.copy(localHeader, 30);
+
+    const centralHeader = Buffer.alloc(46 + nameBytes.length);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0x0800, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt16LE(dosTime, 12);
+    centralHeader.writeUInt16LE(dosDate, 14);
+    centralHeader.writeUInt32LE(checksum, 16);
+    centralHeader.writeUInt32LE(data.length, 20);
+    centralHeader.writeUInt32LE(data.length, 24);
+    centralHeader.writeUInt16LE(nameBytes.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(offset, 42);
+    nameBytes.copy(centralHeader, 46);
+
+    localParts.push(localHeader, data);
+    centralParts.push(centralHeader);
+    offset += localHeader.length + data.length;
+  }
+
+  const centralDirectory = Buffer.concat(centralParts);
+  const localFiles = Buffer.concat(localParts);
+  const endRecord = Buffer.alloc(22);
+
+  endRecord.writeUInt32LE(0x06054b50, 0);
+  endRecord.writeUInt16LE(0, 4);
+  endRecord.writeUInt16LE(0, 6);
+  endRecord.writeUInt16LE(entries.length, 8);
+  endRecord.writeUInt16LE(entries.length, 10);
+  endRecord.writeUInt32LE(centralDirectory.length, 12);
+  endRecord.writeUInt32LE(localFiles.length, 16);
+  endRecord.writeUInt16LE(0, 20);
+
+  return Buffer.concat([localFiles, centralDirectory, endRecord]);
+}
+
+function normalizeZipEntryName(name) {
+  return String(name || "file")
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .replace(/\.\.(?:\/|$)/g, "")
+    || "file";
+}
+
+function getDosDateTime(date) {
+  const year = Math.max(1980, date.getFullYear());
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  const hours = date.getHours();
+  const minutes = date.getMinutes();
+  const seconds = Math.floor(date.getSeconds() / 2);
+
+  return {
+    dosTime: (hours << 11) | (minutes << 5) | seconds,
+    dosDate: ((year - 1980) << 9) | (month << 5) | day
+  };
+}
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+
+  for (let index = 0; index < buffer.length; index += 1) {
+    crc = CRC32_TABLE[(crc ^ buffer[index]) & 0xff] ^ (crc >>> 8);
+  }
+
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function createCrc32Table() {
+  const table = new Uint32Array(256);
+
+  for (let index = 0; index < 256; index += 1) {
+    let value = index;
+
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+
+    table[index] = value >>> 0;
+  }
+
+  return table;
+}
+
+const CRC32_TABLE = createCrc32Table();
 
 function runRenderer({ jsonPath, htmlPath, pdfPath, baseName }) {
   return new Promise((resolve) => {

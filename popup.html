@@ -10,6 +10,31 @@
     <main class="popup">
       <h1>ChatGPT Exporter</h1>
       <button id="exportButton" type="button">Export</button>
+      <section class="settings" aria-label="Local backend settings">
+        <h2>Local setup</h2>
+        <label class="field">
+          <span>Backend folder</span>
+          <input id="backendRootInput" type="text" placeholder="Path containing scripts folder">
+        </label>
+        <div class="field-row">
+          <label class="field">
+            <span>Port</span>
+            <input id="portInput" type="number" min="1024" max="65535" step="1">
+          </label>
+          <label class="field">
+            <span>Cache folder</span>
+            <input id="cacheDirInput" type="text" placeholder="%LOCALAPPDATA%\ChatGPTConversationExporter">
+          </label>
+        </div>
+        <label class="field">
+          <span>Browser path</span>
+          <input id="browserPathInput" type="text" placeholder="Optional chrome.exe or msedge.exe">
+        </label>
+        <div class="settings-actions">
+          <button id="saveSettingsButton" class="secondary" type="button">Save</button>
+          <button id="resetSettingsButton" class="secondary" type="button">Reset</button>
+        </div>
+      </section>
       <section class="backend" aria-label="Local renderer controls">
         <div class="backend-status">
           <span id="backendDot" class="backend-dot" aria-hidden="true"></span>

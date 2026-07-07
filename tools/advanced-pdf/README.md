@@ -2,10 +2,9 @@
 
 Local high-quality PDF renderer for ChatGPT Conversation Exporter.
 
-This is the v0.5.x local backend rendering direction: the extension keeps the
+This is the v0.6.0 local backend rendering direction: the extension keeps the
 page permission and selection UI, captures the currently open ChatGPT page, and
-sends structured data to the local backend for Markdown or polished real-text
-PDF output.
+sends structured data to the local backend for a Markdown/PDF/data zip bundle.
 
 The backend also contains an experimental independent Edge recapture path. That
 path is not the default extension flow because it uses a separate browser
@@ -45,7 +44,7 @@ node tools\advanced-pdf\render.js path\to\export-debug.json --out output\pdf\con
 
 ## Local Renderer Service
 
-For the extension's visible `Markdown` and `PDF` export options, start the local
+For the extension's `Fast` and `Full` bundle export options, start the local
 service first:
 
 ```powershell
@@ -63,6 +62,9 @@ The service listens only on `127.0.0.1:38474` by default. It exposes:
   cleaned Markdown document.
 - `POST /render-data` - accepts the same `exportPayload` and returns a
   normalized JSON bundle for downstream processing.
+- `POST /render-bundle` - accepts the same `exportPayload` and returns one zip
+  containing Markdown, PDF, payload JSON, JSONL, QA pairs, topic/entity sidecars,
+  and a summary file.
 - `POST /capture-render-pdf` - opens the conversation in an independent local
   Edge profile, captures it, then renders PDF. If capture fails and the request
   includes an extension payload, it falls back to that payload and returns
@@ -78,7 +80,7 @@ $env:CGCE_ADVANCED_PDF_PORT=38475
 pnpm run server
 ```
 
-If the port is changed, update `ADVANCED_PDF_RENDERER_URL` in `content.js`.
+If the port is changed, save the same port in the extension popup settings.
 
 The renderer defaults to local Chrome/Edge. To try another Chromium-compatible
 browser, set its executable path before starting the service:
@@ -93,20 +95,20 @@ headless printing or Playwright-compatible launch behavior.
 
 ## Backend Edge Capture
 
-The current `0.5.7 modified` codebase can use Microsoft Edge as an independent backend
+The current `0.6.0` codebase can use Microsoft Edge as an independent backend
 capture browser, but this remains experimental. It avoids moving the ChatGPT
 page the user is actively reading, at the cost of a separate browser profile.
 
-Default local cache/profile location:
+Default local cache/profile location on Windows:
 
 ```powershell
-D:\Programs\ChatGPTConversationExporter
+%LOCALAPPDATA%\ChatGPTConversationExporter
 ```
 
 Override it with:
 
 ```powershell
-$env:CGCE_CACHE_DIR="D:\Programs\ChatGPTConversationExporter"
+$env:CGCE_CACHE_DIR="$env:LOCALAPPDATA\ChatGPTConversationExporter"
 ```
 
 Override Edge path with:
@@ -142,10 +144,11 @@ and is separate from the browser tab where the extension runs.
 
 ## Next Integration Step
 
-The extension now keeps only two visible export choices, `Markdown` and `PDF`.
-Both post the selected structured messages to the localhost service. The next
-packaging step is to turn this service into either a Native Messaging helper or
-a small local desktop companion so users do not have to start it manually.
+The extension now keeps two visible capture choices, `Fast` and `Full`. Both
+post the selected structured messages to the localhost service and download a
+single archive bundle. The next packaging step is to turn this service into
+either a Native Messaging helper or a small local desktop companion so users do
+not have to start it manually.
 
 The same `exportPayload` can also become the stable source for:
 

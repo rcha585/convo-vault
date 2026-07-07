@@ -1,5 +1,10 @@
-const RENDERER_URL = "http://127.0.0.1:38474";
-const START_COMMAND = "powershell -ExecutionPolicy Bypass -File scripts\\start-local-backend-detached.ps1";
+const SETTINGS_STORAGE_KEY = "cgceSettings";
+const DEFAULT_SETTINGS = {
+  backendRoot: "",
+  port: 38474,
+  cacheDir: "",
+  browserPath: ""
+};
 
 const exportButton = document.getElementById("exportButton");
 const statusEl = document.getElementById("status");
@@ -8,8 +13,18 @@ const backendStatus = document.getElementById("backendStatus");
 const checkBackendButton = document.getElementById("checkBackendButton");
 const copyStartButton = document.getElementById("copyStartButton");
 const stopBackendButton = document.getElementById("stopBackendButton");
+const saveSettingsButton = document.getElementById("saveSettingsButton");
+const resetSettingsButton = document.getElementById("resetSettingsButton");
+const backendRootInput = document.getElementById("backendRootInput");
+const portInput = document.getElementById("portInput");
+const cacheDirInput = document.getElementById("cacheDirInput");
+const browserPathInput = document.getElementById("browserPathInput");
 
-document.addEventListener("DOMContentLoaded", () => {
+let currentSettings = { ...DEFAULT_SETTINGS };
+
+document.addEventListener("DOMContentLoaded", async () => {
+  currentSettings = await loadSettings();
+  renderSettings(currentSettings);
   checkBackend();
 });
 
@@ -17,6 +32,7 @@ exportButton.addEventListener("click", async () => {
   setBusy(true, "Opening selector...");
 
   try {
+    await saveSettingsFromForm({ quiet: true });
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
     if (!tab?.id || !isChatGptUrl(tab.url)) {
@@ -38,18 +54,33 @@ exportButton.addEventListener("click", async () => {
   }
 });
 
-checkBackendButton.addEventListener("click", () => {
+checkBackendButton.addEventListener("click", async () => {
+  await saveSettingsFromForm({ quiet: true });
   checkBackend({ announce: true });
 });
 
-copyStartButton.addEventListener("click", async () => {
-  const command = `Set-Location -LiteralPath 'F:\\AI\\chatgpt-conversation-exporter'; ${START_COMMAND}`;
+saveSettingsButton.addEventListener("click", async () => {
+  await saveSettingsFromForm();
+  checkBackend();
+});
 
+resetSettingsButton.addEventListener("click", async () => {
+  currentSettings = { ...DEFAULT_SETTINGS };
+  renderSettings(currentSettings);
+  await saveSettings(currentSettings);
+  setStatus("Settings reset.");
+  checkBackend();
+});
+
+copyStartButton.addEventListener("click", async () => {
   try {
+    await saveSettingsFromForm({ quiet: true });
+    const command = buildStartCommand(currentSettings);
+
     await navigator.clipboard.writeText(command);
     setStatus("Start command copied. Paste it into PowerShell or Windows Terminal.");
-  } catch {
-    setStatus(command);
+  } catch (error) {
+    setStatus(error.message || String(error));
   }
 });
 
@@ -58,7 +89,7 @@ stopBackendButton.addEventListener("click", async () => {
   setStatus("Stopping local renderer...");
 
   try {
-    const response = await fetch(`${RENDERER_URL}/shutdown`, {
+    const response = await fetch(`${getRendererUrl()}/shutdown`, {
       method: "POST"
     });
 
@@ -81,7 +112,7 @@ async function checkBackend(options = {}) {
   setBackendBusy(true);
 
   try {
-    const response = await fetch(`${RENDERER_URL}/health`, {
+    const response = await fetch(`${getRendererUrl()}/health`, {
       method: "GET",
       cache: "no-store"
     });
@@ -106,6 +137,95 @@ async function checkBackend(options = {}) {
   } finally {
     setBackendBusy(false);
   }
+}
+
+async function saveSettingsFromForm(options = {}) {
+  const nextSettings = readSettingsFromForm();
+  currentSettings = nextSettings;
+  await saveSettings(nextSettings);
+
+  if (!options.quiet) {
+    setStatus("Settings saved.");
+  }
+
+  return nextSettings;
+}
+
+function readSettingsFromForm() {
+  const port = Number(portInput.value || DEFAULT_SETTINGS.port);
+
+  return {
+    backendRoot: backendRootInput.value.trim(),
+    port: Number.isFinite(port) && port >= 1024 && port <= 65535 ? Math.floor(port) : DEFAULT_SETTINGS.port,
+    cacheDir: cacheDirInput.value.trim(),
+    browserPath: browserPathInput.value.trim()
+  };
+}
+
+function renderSettings(settings) {
+  backendRootInput.value = settings.backendRoot || "";
+  portInput.value = String(settings.port || DEFAULT_SETTINGS.port);
+  cacheDirInput.value = settings.cacheDir || "";
+  browserPathInput.value = settings.browserPath || "";
+}
+
+function loadSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([SETTINGS_STORAGE_KEY], (result) => {
+      resolve(normalizeSettings(result?.[SETTINGS_STORAGE_KEY]));
+    });
+  });
+}
+
+function saveSettings(settings) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({
+      [SETTINGS_STORAGE_KEY]: normalizeSettings(settings)
+    }, resolve);
+  });
+}
+
+function normalizeSettings(settings = {}) {
+  const port = Number(settings.port || DEFAULT_SETTINGS.port);
+
+  return {
+    backendRoot: String(settings.backendRoot || "").trim(),
+    port: Number.isFinite(port) && port >= 1024 && port <= 65535 ? Math.floor(port) : DEFAULT_SETTINGS.port,
+    cacheDir: String(settings.cacheDir || "").trim(),
+    browserPath: String(settings.browserPath || "").trim()
+  };
+}
+
+function getRendererUrl(settings = currentSettings) {
+  const port = normalizeSettings(settings).port;
+  return `http://127.0.0.1:${port}`;
+}
+
+function buildStartCommand(settings) {
+  const normalized = normalizeSettings(settings);
+
+  if (!normalized.backendRoot) {
+    throw new Error("Set the backend folder first.");
+  }
+
+  const parts = [
+    `Set-Location -LiteralPath ${quotePowerShellSingle(normalized.backendRoot)}`,
+    `powershell -ExecutionPolicy Bypass -File scripts\\start-local-backend-detached.ps1 -Port ${normalized.port}`
+  ];
+
+  if (normalized.cacheDir) {
+    parts[1] += ` -CacheDir ${quotePowerShellSingle(normalized.cacheDir)}`;
+  }
+
+  if (normalized.browserPath) {
+    parts[1] += ` -BrowserPath ${quotePowerShellSingle(normalized.browserPath)}`;
+  }
+
+  return parts.join("; ");
+}
+
+function quotePowerShellSingle(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
 }
 
 function setBackendState(state, label) {

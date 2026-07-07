@@ -2,7 +2,21 @@
 
 ## Current Status
 
-The extension has entered the third major version. The current goal is no longer only "one-click export", but a workflow similar to mature paid exporters:
+The extension has entered the third major version. As of v0.6.0, the visible
+workflow has shifted from choosing an output format to choosing a capture
+strategy:
+
+- `Fast` uses the current ChatGPT conversation JSON endpoint to build the active
+  conversation branch quickly.
+- `Full` keeps the virtualization-aware DOM scan for slower but more faithful
+  extraction.
+- Both modes now send the selected structured payload to the local backend and
+  download one zip bundle containing Markdown, PDF, JSONL, data sidecars, and a
+  summary file.
+- The popup now stores backend folder, port, cache folder, and browser path in
+  `chrome.storage.local` and generates a portable PowerShell start command.
+
+The current goal is no longer only "one-click export", but a workflow similar to mature paid exporters:
 
 - Click `EXPORT` in the popup.
 - Inject a right-side message selection panel into the ChatGPT page.

@@ -1,6 +1,7 @@
 param(
-  [string]$CacheDir = "D:\Programs\ChatGPTConversationExporter",
+  [string]$CacheDir = "",
   [int]$Port = 38474,
+  [string]$BrowserPath = "",
   [switch]$Headless
 )
 
@@ -26,9 +27,18 @@ $arguments = @(
   "-NoProfile",
   "-ExecutionPolicy", "Bypass",
   "-File", $scriptPath,
-  "-CacheDir", $CacheDir,
   "-Port", "$Port"
 )
+
+if ($CacheDir) {
+  $arguments += "-CacheDir"
+  $arguments += $CacheDir
+}
+
+if ($BrowserPath) {
+  $arguments += "-BrowserPath"
+  $arguments += $BrowserPath
+}
 
 if ($Headless) {
   $arguments += "-Headless"

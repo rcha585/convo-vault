@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.5.8";
+  const EXPORTER_VERSION = "0.6.0";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -37,12 +37,17 @@
   const MAX_ADAPTIVE_MISSING_RECOVERY_MS = 120_000;
   const TURN_HYDRATION_SETTLE_MS = 70;
   const CONVERSATION_TIMESTAMP_FETCH_TIMEOUT_MS = 3500;
+  const CONVERSATION_API_FETCH_TIMEOUT_MS = 15_000;
   const THINKING_FLYOUT_AUTO_OPEN_LIMIT = 48;
   const THINKING_FLYOUT_OPEN_TIMEOUT_MS = 1400;
   const DEBUG_EVENT_LIMIT = 500;
   const DETAILED_DEBUG_LOG = false;
   const ADVANCED_PDF_IMAGE_EMBED_LIMIT = 160;
-  const ADVANCED_PDF_RENDERER_URL = "http://127.0.0.1:38474";
+  const SETTINGS_STORAGE_KEY = "cgceSettings";
+  const DEFAULT_EXPORTER_SETTINGS = {
+    port: 38474
+  };
+  const DEFAULT_ADVANCED_PDF_RENDERER_URL = "http://127.0.0.1:38474";
   const MESSAGE_NODE_SELECTORS = [
     '[data-turn-id]',
     '[data-turn-container]',
@@ -285,8 +290,8 @@
 
   async function openMessageSelectorPanel() {
     return messageSelectorUI.open({
-      loadMessages: async (onProgress) => {
-        return messageExtractor.collect({ onProgress });
+      loadMessages: async (onProgress, options = {}) => {
+        return messageExtractor.collect({ onProgress, captureMode: options.captureMode });
       },
       exportMessages: (messages, options) => exportSelectedMessages(messages, options)
     });
@@ -305,7 +310,34 @@
 
   async function collectConversationMessages(options = {}) {
     const onProgress = typeof options.onProgress === "function" ? options.onProgress : () => {};
+    const captureMode = normalizeCaptureMode(options.captureMode);
     const debugLog = createDebugLog();
+    debugLog.event("capture.mode", { captureMode });
+
+    if (captureMode === "fast") {
+      try {
+        onProgress("Loading conversation data...");
+        const messages = await collectFastConversationMessages(debugLog);
+
+        if (messages.length) {
+          debugLog.finish(messages);
+          onProgress(`Found ${messages.length} messages with Fast capture.`);
+          return {
+            messages,
+            debugLog,
+            captureMode
+          };
+        }
+
+        debugLog.event("fastCapture.empty", {});
+      } catch (error) {
+        debugLog.event("fastCapture.failed", {
+          error: error?.message || String(error)
+        });
+        onProgress("Fast capture failed; falling back to Full scan...");
+      }
+    }
+
     const scrollTarget = getBestScrollTarget();
     const originalScrollTop = getScrollTop(scrollTarget);
     const collector = createMessageCollector(debugLog);
@@ -360,7 +392,8 @@
       }
       return {
         messages,
-        debugLog
+        debugLog,
+        captureMode: "full"
       };
     } finally {
       setScrollTop(scrollTarget, originalScrollTop);
@@ -408,6 +441,19 @@
     );
   }
 
+  function normalizeCaptureMode(value) {
+    return String(value || "").toLowerCase() === "full" ? "full" : "fast";
+  }
+
+  function formatCaptureMode(value) {
+    return normalizeCaptureMode(value) === "full" ? "Full" : "Fast";
+  }
+
+  function normalizeTurnNumber(value, index = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.floor(number) : index + 1;
+  }
+
   async function exportSelectedMessages(messages, options = {}) {
     if (!messages.length) {
       throw new Error("Select at least one message to export.");
@@ -416,12 +462,41 @@
     const exportedAt = new Date();
     const metadata = markdownBuilder.metadata(messages, exportedAt);
     const requestedFormat = options.format;
-    const format = requestedFormat === "pdf"
+    const format = requestedFormat === "bundle"
+      ? "bundle"
+      : requestedFormat === "pdf"
       ? "advanced-pdf"
       : requestedFormat === "advanced-pdf" || requestedFormat === "advanced-markdown"
         ? requestedFormat
         : "markdown";
     let filename = "";
+
+    if (format === "bundle") {
+      const bundleResult = await downloadExportBundle(metadata, messages, exportedAt, {
+        captureMode: options.captureMode
+      });
+      filename = bundleResult.filename;
+
+      if (options.debugLog) {
+        options.debugLog.event?.("bundle.generated", {
+          filename,
+          rendererUrl: bundleResult.rendererUrl,
+          exporterVersion: EXPORTER_VERSION,
+          captureMode: normalizeCaptureMode(options.captureMode)
+        });
+        downloadDebugLog(options.debugLog, filename.replace(/\.zip$/i, "-debug.json"));
+      }
+
+      return {
+        ok: true,
+        format,
+        filename,
+        messageCount: messages.length,
+        imagesEmbedded: bundleResult.imagesEmbedded || 0,
+        imagesFailed: bundleResult.imagesFailed || 0,
+        bundleFiles: bundleResult.bundleFiles || ""
+      };
+    }
 
     if (format === "advanced-markdown") {
       const markdownResult = await downloadAdvancedMarkdown(metadata, messages, exportedAt);
@@ -431,7 +506,7 @@
         options.debugLog.event?.("advancedMarkdown.generated", {
           engine: markdownResult.markdownEngine,
           filename,
-          rendererUrl: ADVANCED_PDF_RENDERER_URL,
+          rendererUrl: markdownResult.rendererUrl,
           exporterVersion: EXPORTER_VERSION,
           captureWarning: markdownResult.captureWarning || ""
         });
@@ -458,7 +533,7 @@
         options.debugLog.event?.("advancedPdf.generated", {
           engine: pdfResult.pdfEngine,
           filename,
-          rendererUrl: ADVANCED_PDF_RENDERER_URL,
+          rendererUrl: pdfResult.rendererUrl,
           exporterVersion: EXPORTER_VERSION,
           dataDir: pdfResult.dataDir || "",
           dataFiles: pdfResult.dataFiles || "",
@@ -535,13 +610,47 @@
     };
   }
 
-  async function downloadAdvancedMarkdown(metadata, messages, exportedAt = new Date()) {
-    const defaultFileName = markdownBuilder.filename(metadata.title, exportedAt, "md");
-    const payload = await createStructuredExportPayload(messages, exportedAt);
+  async function getExporterSettings() {
+    if (typeof chrome === "undefined" || !chrome.storage?.local) {
+      return { ...DEFAULT_EXPORTER_SETTINGS };
+    }
 
+    return new Promise((resolve) => {
+      chrome.storage.local.get([SETTINGS_STORAGE_KEY], (result) => {
+        resolve(normalizeExporterSettings(result?.[SETTINGS_STORAGE_KEY]));
+      });
+    });
+  }
+
+  function normalizeExporterSettings(settings = {}) {
+    const port = Number(settings.port || DEFAULT_EXPORTER_SETTINGS.port);
+
+    return {
+      port: Number.isFinite(port) && port >= 1024 && port <= 65535
+        ? Math.floor(port)
+        : DEFAULT_EXPORTER_SETTINGS.port
+    };
+  }
+
+  async function getAdvancedPdfRendererUrl() {
+    const settings = await getExporterSettings();
+    return settings.port === DEFAULT_EXPORTER_SETTINGS.port
+      ? DEFAULT_ADVANCED_PDF_RENDERER_URL
+      : `http://127.0.0.1:${settings.port}`;
+  }
+
+  async function downloadExportBundle(metadata, messages, exportedAt = new Date(), options = {}) {
+    const defaultFileName = markdownBuilder.filename(metadata.title, exportedAt, "zip");
+    const payload = await createStructuredExportPayload(messages, exportedAt, {
+      embedImages: true
+    });
+    payload.captureMode = normalizeCaptureMode(options.captureMode);
+
+    const rendererUrl = await getAdvancedPdfRendererUrl();
     let response;
+
     try {
-      response = await fetch(`${ADVANCED_PDF_RENDERER_URL}/render-markdown`, {
+      response = await fetch(`${rendererUrl}/render-bundle`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -552,7 +661,46 @@
         })
       });
     } catch (error) {
-      throw new Error(`Local renderer is not running. Start it with: node tools\\advanced-pdf\\server.js. Details: ${error.message || error}`);
+      throw new Error(`Local renderer is not running at ${rendererUrl}. Details: ${error.message || error}`);
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(`Bundle renderer failed (${response.status}). ${errorText || response.statusText}`);
+    }
+
+    const blob = await response.blob();
+    const filename = getFilenameFromContentDisposition(response.headers.get("content-disposition")) || defaultFileName;
+    downloadBlob(filename, blob);
+
+    return {
+      filename,
+      rendererUrl,
+      bundleFiles: decodeHeaderValue(response.headers.get("x-bundle-files")),
+      imagesEmbedded: payload.assetStats?.imagesEmbedded || 0,
+      imagesFailed: payload.assetStats?.imagesFailed || 0
+    };
+  }
+
+  async function downloadAdvancedMarkdown(metadata, messages, exportedAt = new Date()) {
+    const defaultFileName = markdownBuilder.filename(metadata.title, exportedAt, "md");
+    const payload = await createStructuredExportPayload(messages, exportedAt);
+
+    const rendererUrl = await getAdvancedPdfRendererUrl();
+    let response;
+    try {
+      response = await fetch(`${rendererUrl}/render-markdown`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          exportPayload: payload,
+          fileName: defaultFileName
+        })
+      });
+    } catch (error) {
+      throw new Error(`Local renderer is not running at ${rendererUrl}. Details: ${error.message || error}`);
     }
 
     if (!response.ok) {
@@ -566,6 +714,7 @@
 
     return {
       filename,
+      rendererUrl,
       markdownEngine: response.headers.get("x-markdown-engine") || "advanced-local",
       captureWarning: response.headers.get("x-capture-warning") || ""
     };
@@ -577,9 +726,10 @@
       embedImages: true
     });
 
+    const rendererUrl = await getAdvancedPdfRendererUrl();
     let response;
     try {
-      response = await fetch(`${ADVANCED_PDF_RENDERER_URL}/render-pdf`, {
+      response = await fetch(`${rendererUrl}/render-pdf`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -590,7 +740,7 @@
         })
       });
     } catch (error) {
-      throw new Error(`Local renderer is not running. Start it with: node tools\\advanced-pdf\\server.js. Details: ${error.message || error}`);
+      throw new Error(`Local renderer is not running at ${rendererUrl}. Details: ${error.message || error}`);
     }
 
     if (!response.ok) {
@@ -604,6 +754,7 @@
 
     return {
       filename,
+      rendererUrl,
       pageCount: Number(response.headers.get("x-page-count")) || null,
       pdfEngine: response.headers.get("x-pdf-engine") || "advanced-local-chrome",
       captureWarning: response.headers.get("x-capture-warning") || "",
@@ -1036,7 +1187,7 @@
     return {
       id: message?.id || `message-${index + 1}`,
       role: message?.role || "unknown",
-      turnNumber: index + 1,
+      turnNumber: normalizeTurnNumber(message?.turnNumber, index),
       order: message?.order ?? index,
       conversationOrder: message?.order ?? index,
       originalOrder: message?.originalOrder ?? message?.order ?? index,
@@ -1384,6 +1535,7 @@
     let selectedIds = new Set();
     let api = null;
     let currentDebugLog = null;
+    let currentCaptureMode = "fast";
 
     return {
       open(nextApi) {
@@ -1440,8 +1592,12 @@
       shadow.querySelector("[data-action='export']").addEventListener("click", () => {
         exportCheckedMessages();
       });
-      shadow.querySelector("[data-option='export-format']").addEventListener("change", () => {
+      shadow.querySelector("[data-option='capture-mode']").addEventListener("change", () => {
+        currentCaptureMode = getSelectedCaptureMode();
         updateExportButtonLabel();
+        if (api) {
+          reloadMessages();
+        }
       });
       shadow.querySelector(".cgce-list").addEventListener("change", (event) => {
         const checkbox = event.target.closest("input[type='checkbox'][data-message-id]");
@@ -1489,13 +1645,16 @@
       setPanelBusy(true, "Reloading conversation...");
 
       try {
-        const result = await api.loadMessages((message) => setPanelStatus(message));
+        currentCaptureMode = getSelectedCaptureMode();
+        const result = await api.loadMessages((message) => setPanelStatus(message), {
+          captureMode: currentCaptureMode
+        });
         messages = result.messages || result;
         currentDebugLog = result.debugLog || null;
         selectedIds = new Set(messages.map((message) => message.id));
         renderMessageList();
         updateSelectionSummary();
-        setPanelBusy(false, `Ready. ${messages.length} messages found.`);
+        setPanelBusy(false, `Ready. ${messages.length} messages found with ${formatCaptureMode(currentCaptureMode)}.`);
       } catch (error) {
         setPanelBusy(false, error.message || String(error), true);
       }
@@ -1605,12 +1764,8 @@
       return messages.filter((message) => selectedIds.has(message.id));
     }
 
-    function getSelectedFormat() {
-      return shadow.querySelector("[data-option='export-format']")?.value === "pdf" ? "pdf" : "markdown";
-    }
-
-    function getExportBackendFormat(format) {
-      return format === "pdf" ? "advanced-pdf" : "advanced-markdown";
+    function getSelectedCaptureMode() {
+      return normalizeCaptureMode(shadow.querySelector("[data-option='capture-mode']")?.value);
     }
 
     function exportCheckedMessages() {
@@ -1621,22 +1776,18 @@
         return;
       }
 
-      const format = getSelectedFormat();
       runExport(selected, {
-        format: getExportBackendFormat(format),
+        format: "bundle",
+        captureMode: getSelectedCaptureMode(),
         debugLog: shouldDownloadDebugLog() ? currentDebugLog : null
       });
     }
 
     async function runExport(selected, options) {
       try {
-        const busyLabel = options.format === "advanced-pdf"
-          ? "Generating PDF..."
-          : options.format === "advanced-markdown"
-            ? "Generating Markdown..."
-            : options.format === "pdf"
-              ? "Generating PDF..."
-              : "Exporting selected messages...";
+        const busyLabel = options.format === "bundle"
+          ? "Generating export bundle..."
+          : "Exporting selected messages...";
         setPanelBusy(true, busyLabel);
         const result = await api.exportMessages(selected, options);
         setPanelBusy(false, formatExportResult(result));
@@ -1646,6 +1797,11 @@
     }
 
     function formatExportResult(result) {
+      if (result.format === "bundle") {
+        const failedSummary = result.imagesFailed ? `, ${result.imagesFailed} image(s) left as links` : "";
+        return `Saved ${result.filename}. ${result.messageCount} message(s), Markdown + PDF + data files${failedSummary}.`;
+      }
+
       if (result.format === "pdf" || result.format === "advanced-pdf") {
         const pageSummary = result.pageCount ? `, ${result.pageCount} page(s)` : "";
         const imageSummary = result.imageLinks ? `, ${result.imageLinks} image attachment(s)` : "";
@@ -1660,8 +1816,7 @@
 
     function updateExportButtonLabel() {
       const exportButton = shadow.querySelector("[data-action='export']");
-      const format = getSelectedFormat();
-      exportButton.textContent = format === "pdf" ? "Export PDF" : "Export Markdown";
+      exportButton.textContent = `Export ${formatCaptureMode(getSelectedCaptureMode())} Bundle`;
     }
 
     function shouldDownloadDebugLog() {
@@ -1969,7 +2124,7 @@
           <header class="cgce-header">
             <div>
               <h2 class="cgce-title">Select messages</h2>
-              <p class="cgce-subtitle">Review extracted turns, adjust selection, then choose an export format.</p>
+              <p class="cgce-subtitle">Review extracted turns, adjust selection, then choose a capture mode.</p>
             </div>
             <div class="cgce-icon-buttons">
               <button class="cgce-icon-button" type="button" data-action="refresh" title="Reload messages" aria-label="Reload messages">R</button>
@@ -1987,10 +2142,10 @@
             <div class="cgce-status" role="status" aria-live="polite"></div>
             <div class="cgce-footer-row">
               <label class="cgce-format">
-                <span>Format</span>
-                <select class="cgce-select" data-option="export-format">
-                  <option value="markdown">Markdown</option>
-                  <option value="pdf">PDF</option>
+                <span>Mode</span>
+                <select class="cgce-select" data-option="capture-mode">
+                  <option value="fast">Fast</option>
+                  <option value="full">Full</option>
                 </select>
               </label>
               <label class="cgce-option">
@@ -1998,7 +2153,7 @@
                 <span>Debug log</span>
               </label>
             </div>
-            <button class="cgce-export" type="button" data-action="export">Export Markdown</button>
+            <button class="cgce-export" type="button" data-action="export">Export Fast Bundle</button>
           </footer>
         </aside>
       `;
@@ -4110,6 +4265,237 @@
     return timeMatch ? timeMatch[0].trim() : "";
   }
 
+  async function collectFastConversationMessages(debugLog = null) {
+    const conversationId = getCurrentConversationId();
+
+    if (!conversationId) {
+      throw new Error("No conversation id was found in the current URL.");
+    }
+
+    const data = await fetchConversationData(conversationId, {
+      timeoutMs: CONVERSATION_API_FETCH_TIMEOUT_MS
+    });
+    const messages = buildMessagesFromConversationApi(data, debugLog);
+
+    debugLog?.event("fastCapture.loaded", {
+      conversationId,
+      mappingCount: data?.mapping && typeof data.mapping === "object" ? Object.keys(data.mapping).length : 0,
+      messageCount: messages.length
+    });
+
+    return messages;
+  }
+
+  function buildMessagesFromConversationApi(data, debugLog = null) {
+    const pathNodes = getConversationApiCurrentPath(data);
+    const messages = [];
+
+    for (const node of pathNodes) {
+      const message = node?.message;
+      const role = normalizeApiRole(message?.author?.role);
+
+      if (!message || !role) {
+        continue;
+      }
+
+      const markdown = cleanMarkdown([
+        extractApiContentMarkdown(message.content),
+        extractApiAttachmentMarkdown(message)
+      ].filter(Boolean).join("\n\n"));
+      const thinkingMarkdown = cleanMarkdown(extractApiThinkingMarkdown(message));
+
+      if (!markdown && !thinkingMarkdown) {
+        continue;
+      }
+
+      const turnNumber = messages.length + 1;
+      const id = message.id || node.id || `api-message-${turnNumber}`;
+
+      messages.push({
+        id,
+        role,
+        order: turnNumber,
+        turnNumber,
+        conversationOrder: turnNumber,
+        timestamp: formatConversationTimestamp(
+          message.create_time ??
+          message.update_time ??
+          message.metadata?.create_time ??
+          message.metadata?.timestamp
+        ),
+        markdown,
+        thinkingMarkdown,
+        preview: truncatePreview(cleanMarkdown(`${markdown}\n${thinkingMarkdown}`), 180),
+        sourceMessageId: message.id || "",
+        sourceTurnId: node.id || "",
+        sourceNode: null,
+        codeBlockCount: getCodeBlockDiagnostics(markdown, thinkingMarkdown).length,
+        fileCount: countApiFileAttachments(message),
+        imageCount: countMarkdownImages(markdown),
+        imagesEmbedded: 0,
+        imagesFailed: 0,
+        captureMode: "fast"
+      });
+    }
+
+    debugLog?.event("fastCapture.path", {
+      pathNodeCount: pathNodes.length,
+      exportedMessageCount: messages.length
+    });
+
+    return messages;
+  }
+
+  function getConversationApiCurrentPath(data) {
+    const mapping = data?.mapping && typeof data.mapping === "object" ? data.mapping : {};
+    const currentNode = data?.current_node || data?.currentNode || "";
+    const path = [];
+    const seen = new Set();
+    let nodeId = currentNode;
+
+    while (nodeId && mapping[nodeId] && !seen.has(nodeId)) {
+      seen.add(nodeId);
+      const node = mapping[nodeId];
+      path.push(node);
+      nodeId = node.parent || node.parent_id || "";
+    }
+
+    if (path.length) {
+      return path.reverse();
+    }
+
+    return Object.values(mapping);
+  }
+
+  function normalizeApiRole(role) {
+    const normalized = String(role || "").toLowerCase();
+
+    if (normalized === "user" || normalized === "assistant") {
+      return normalized;
+    }
+
+    return "";
+  }
+
+  function extractApiContentMarkdown(content) {
+    if (!content || typeof content !== "object") {
+      return "";
+    }
+
+    const parts = Array.isArray(content.parts) ? content.parts : [];
+
+    if (parts.length) {
+      return cleanMarkdown(parts
+        .map((part) => apiContentPartToMarkdown(part))
+        .filter(Boolean)
+        .join("\n\n"));
+    }
+
+    const candidates = [
+      content.text,
+      content.result,
+      content.summary,
+      content.value
+    ].filter((value) => typeof value === "string" && value.trim());
+
+    return cleanMarkdown(candidates.join("\n\n"));
+  }
+
+  function apiContentPartToMarkdown(part) {
+    if (typeof part === "string") {
+      return part;
+    }
+
+    if (!part || typeof part !== "object") {
+      return "";
+    }
+
+    const textCandidates = [
+      part.text,
+      part.content,
+      part.transcript,
+      part.caption,
+      part.name
+    ].filter((value) => typeof value === "string" && value.trim());
+
+    if (textCandidates.length) {
+      return textCandidates.join("\n\n");
+    }
+
+    const assetPointer = part.asset_pointer || part.assetPointer || part.url || "";
+
+    if (/image|img|picture/i.test(`${part.content_type || ""} ${part.mime_type || ""} ${assetPointer}`)) {
+      return `[Image: ${assetPointer || "image attachment"}]`;
+    }
+
+    if (assetPointer) {
+      return `[Attachment: ${assetPointer}]`;
+    }
+
+    return "";
+  }
+
+  function extractApiAttachmentMarkdown(message) {
+    const attachments = getApiAttachmentObjects(message);
+    const lines = attachments
+      .map((attachment) => formatApiAttachmentMarkdown(attachment))
+      .filter(Boolean);
+
+    return uniqueStrings(lines).join("\n");
+  }
+
+  function getApiAttachmentObjects(message) {
+    const metadata = message?.metadata || {};
+    const candidates = [
+      metadata.attachments,
+      metadata.files,
+      metadata.uploaded_files,
+      metadata.uploadedFiles
+    ];
+
+    return candidates
+      .filter(Array.isArray)
+      .flat()
+      .filter((attachment) => attachment && typeof attachment === "object");
+  }
+
+  function formatApiAttachmentMarkdown(attachment) {
+    const name = attachment.name
+      || attachment.file_name
+      || attachment.filename
+      || attachment.title
+      || attachment.id
+      || "";
+    const url = attachment.url || attachment.download_url || attachment.file_url || "";
+
+    if (!name && !url) {
+      return "";
+    }
+
+    return url
+      ? `[File: ${sanitizeFileAttachmentName(name || filenameFromUrl(url) || "attachment")}](${url})`
+      : `[File: ${sanitizeFileAttachmentName(name)}]`;
+  }
+
+  function countApiFileAttachments(message) {
+    return getApiAttachmentObjects(message).length;
+  }
+
+  function extractApiThinkingMarkdown(message) {
+    const metadata = message?.metadata || {};
+    const candidates = [
+      metadata.reasoning,
+      metadata.reasoning_content,
+      metadata.thinking,
+      metadata.thinking_text,
+      metadata.thoughts
+    ];
+
+    return candidates
+      .filter((value) => typeof value === "string" && value.trim())
+      .join("\n\n");
+  }
+
   async function enrichMessageTimestamps(messages, debugLog = null) {
     const messagesNeedingApiTime = messages.filter((message) => message?.sourceMessageId);
 
@@ -4173,10 +4559,11 @@
     }
   }
 
-  async function fetchConversationData(conversationId) {
+  async function fetchConversationData(conversationId, options = {}) {
     const url = new URL(`/backend-api/conversation/${encodeURIComponent(conversationId)}`, location.origin);
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), CONVERSATION_TIMESTAMP_FETCH_TIMEOUT_MS);
+    const timeoutMs = Number(options.timeoutMs || CONVERSATION_TIMESTAMP_FETCH_TIMEOUT_MS);
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
 
     const response = await fetch(url.href, {
       credentials: "include",
@@ -6487,6 +6874,10 @@
 
   function uniqueElements(elements) {
     return [...new Set(elements.filter(Boolean))];
+  }
+
+  function uniqueStrings(values) {
+    return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
   }
 
   function uniqueTopLevelElements(elements) {

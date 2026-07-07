@@ -2,7 +2,10 @@ const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright-core");
 
-const DEFAULT_CACHE_ROOT = "D:\\Programs\\ChatGPTConversationExporter";
+const DEFAULT_CACHE_ROOT = path.join(
+  process.env.LOCALAPPDATA || process.env.HOME || process.cwd(),
+  "ChatGPTConversationExporter"
+);
 
 async function captureConversationWithEdge(options = {}) {
   const url = String(options.url || "").trim();

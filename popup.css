@@ -5,7 +5,7 @@
 
 body {
   margin: 0;
-  min-width: 320px;
+  min-width: 380px;
   background: Canvas;
   color: CanvasText;
 }
@@ -19,6 +19,12 @@ body {
 h1 {
   margin: 0;
   font-size: 16px;
+  font-weight: 700;
+}
+
+h2 {
+  margin: 0;
+  font-size: 13px;
   font-weight: 700;
 }
 
@@ -36,6 +42,53 @@ button {
 button:disabled {
   cursor: wait;
   opacity: 0.7;
+}
+
+.settings {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #d5dde8;
+  border-radius: 8px;
+  background: rgba(16, 163, 127, 0.06);
+}
+
+.field,
+.field-row {
+  min-width: 0;
+}
+
+.field {
+  display: grid;
+  gap: 4px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.field-row {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 8px;
+}
+
+input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 31px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: Canvas;
+  color: CanvasText;
+  font: inherit;
+  font-size: 12px;
+}
+
+.settings-actions {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
 }
 
 .backend {
@@ -117,6 +170,15 @@ button.danger {
     background: #1f2937;
     color: #e5e7eb;
     border-color: #475569;
+  }
+
+  .settings {
+    border-color: #334155;
+    background: rgba(16, 163, 127, 0.1);
+  }
+
+  .field {
+    color: #cbd5e1;
   }
 
   button.danger {

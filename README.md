@@ -1,41 +1,65 @@
 # ChatGPT Conversation Exporter
 
-Personal-use Manifest V3 Chrome extension for exporting the current ChatGPT
-conversation to Markdown or PDF.
+Local-first Chrome extension for exporting the current ChatGPT conversation as a
+portable archive. This is an alpha learning project: it favors transparency,
+debuggability, and local processing over store-ready polish.
 
-The extension now has two visible export formats. Both use the currently open
-and already signed-in ChatGPT page for capture, then hand the structured payload
-to the local renderer when it is running:
+Version `0.6.0` adds two capture modes and a single bundle export:
 
-- `Markdown` - sends the selected messages to the local service and returns
-  cleaned Markdown.
-- `PDF` - sends the same selected-message payload and returns a polished
-  true-text PDF generated through the local Chrome/Edge print engine.
+- `Fast` - reads the current conversation through ChatGPT's signed-in
+  conversation JSON endpoint, then converts the active branch into the local
+  export schema. This is much faster, but it may miss some UI-only details.
+- `Full` - uses the older virtualization-aware DOM scan, including scroll
+  walking, hydration, and missing-turn recovery. This is slower but more
+  faithful when the page contains details that the API payload does not expose.
+
+Every export downloads one `.zip` bundle containing Markdown, PDF, payload JSON,
+JSONL messages, QA pairs, topic/entity sidecars, and a summary file.
+
+## Status
+
+This project is not a polished alternative to mature exporters yet. It is a
+local research/workflow tool for:
+
+- reliable long-conversation capture experiments,
+- true-text PDF rendering,
+- Markdown archives,
+- future Obsidian/RAG-friendly sidecars.
+
+Known tradeoffs:
+
+- ChatGPT's internal web API and DOM can change without notice.
+- `Fast` mode depends on the current logged-in ChatGPT page.
+- `Full` mode can still be slow on very large or heavily virtualized chats.
+- Images and attachments are best-effort.
+- The extension still requests broad image-fetching host permission for PDF
+  previews; this should move further into the local backend over time.
 
 ## Files
 
-- `manifest.json` - MV3 manifest, popup, content script, and background helper registration.
-- `popup.html`, `popup.css`, `popup.js` - Simple extension popup with the export button.
-- `content.js` - ChatGPT page access, message selection, lightweight payload capture, and download handoff.
-- `background.js` - Image-fetching helper used by PDF export to render image previews when ChatGPT image URLs are reachable.
-- `tools/advanced-pdf/` - Local advanced renderer and localhost service.
+- `manifest.json` - MV3 extension manifest.
+- `popup.html`, `popup.css`, `popup.js` - popup, local backend settings, health
+  checks, and startup-command generation.
+- `content.js` - ChatGPT page access, Fast/Full capture, message selector, and
+  bundle download handoff.
+- `background.js` - image-fetch helper used by PDF export.
+- `tools/advanced-pdf/` - local renderer service and PDF/data pipeline.
+- `scripts/` - PowerShell helpers for starting and checking the local backend.
 
 ## Load In Chrome
 
 1. Open Chrome and go to `chrome://extensions`.
 2. Turn on **Developer mode**.
 3. Click **Load unpacked**.
-4. Select this folder: `chatgpt-conversation-exporter`.
+4. Select this repository folder.
 5. Open a conversation on `https://chatgpt.com` or `https://chat.openai.com`.
-6. Click the extension icon, then click **Export**.
-7. In the message selector, choose **Markdown** or **PDF**.
+6. Click the extension icon.
+7. Set the backend folder, save settings, and copy the start command.
+8. Start the local backend in PowerShell.
+9. Click **Export**, choose `Fast` or `Full`, adjust message selection, then
+   export the bundle.
 
-Chrome will show a broad host-permission warning because `<all_urls>` is
-available for image-fetching helpers. Message scanning stays passive, while PDF
-export may fetch image references at export time to render previews when
-available.
-
-## Local Backend Renderer
+## First-Time Local Setup
 
 Install the local renderer once:
 
@@ -44,19 +68,24 @@ cd tools\advanced-pdf
 pnpm install
 ```
 
-Start the local renderer before exporting **Markdown** or **PDF** in the extension:
+The popup stores these settings in `chrome.storage.local`:
 
-```powershell
-pnpm run server
-```
+- backend folder - the repository folder containing `scripts\`.
+- port - default `38474`.
+- cache folder - optional; defaults to
+  `%LOCALAPPDATA%\ChatGPTConversationExporter` on Windows.
+- browser path - optional path to a Chromium-compatible browser executable.
 
-Or from the repository root:
+The extension cannot directly launch a local process by itself. The popup
+generates a PowerShell start command from the saved settings.
+
+You can also start the backend from the repository root:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\start-local-backend.ps1
 ```
 
-To start it hidden in the background:
+Start it hidden in the background:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\start-local-backend-detached.ps1
@@ -68,53 +97,83 @@ Check whether it is reachable:
 powershell -ExecutionPolicy Bypass -File scripts\check-local-backend.ps1
 ```
 
-The extension popup also shows local renderer status. It can copy the hidden
-start command and can stop a running renderer. Browser security does not allow
-the extension to directly launch local scripts without a separate native helper.
+The backend listens on `http://127.0.0.1:38474` unless you choose another port.
 
-The service listens on `http://127.0.0.1:38474`. The stable extension path sends
-the selected structured payload to:
+## Backend Endpoints
 
+Stable extension flow:
+
+- `GET /health`
+- `POST /shutdown`
+- `POST /render-bundle`
 - `POST /render-markdown`
 - `POST /render-pdf`
 - `POST /render-data`
 
-The local backend returns Markdown, PDF, or a normalized JSON data bundle. PDF
-exports also write local sidecar files next to the rendered PDF request cache:
-`*.data.json`, `*.messages.jsonl`, `*.qa-pairs.json`, `*.topics.json`,
-`*.entities.json`, and `*.summary.md`. This default path does not open a
-separate browser and does not require a second ChatGPT login.
+Experimental backend recapture flow:
 
-Backend cache defaults to:
+- `POST /capture-render-pdf`
+- `POST /capture-render-markdown`
 
-```powershell
-D:\Programs\ChatGPTConversationExporter
-```
+The default extension flow captures from the current already signed-in ChatGPT
+tab. The experimental backend recapture flow uses an independent browser profile
+and may require a separate login.
 
-The experimental backend recapture endpoints can open a separate Edge profile
-under that cache folder. If that experimental route is enabled later, the first
-capture may ask for ChatGPT login because the backend profile is separate from
-the browser tab you already have open.
+## Bundle Contents
 
-If the extension says `Local renderer is not running` or `Failed to fetch`, the
-server is not listening on `127.0.0.1:38474`.
+A bundle normally includes:
 
-For command-line debugging with a fresh debug JSON:
+- `*.md`
+- `*.pdf`
+- `*.payload.json`
+- `*.data.json`
+- `*.conversation.json`
+- `*.messages.jsonl`
+- `*.qa-pairs.json`
+- `*.topics.json`
+- `*.entities.json`
+- `*.summary.md`
 
-```powershell
-node tools\advanced-pdf\render.js path\to\export-debug.json --out output\pdf\conversation.pdf
-```
+If the debug-log checkbox is enabled, the extension downloads a separate
+`*-debug.json` next to the bundle.
+
+## Capture Strategy
+
+`Fast` mode:
+
+1. Reads the conversation id from the current URL.
+2. Requests `/backend-api/conversation/{id}` with the current ChatGPT session.
+3. Walks the active conversation branch from `current_node`.
+4. Converts user/assistant messages into the shared export schema.
+5. Sends the selected messages to the local backend bundle renderer.
+
+`Full` mode:
+
+1. Finds ChatGPT turn nodes in the current page.
+2. Walks the real scroll container.
+3. Hydrates virtualized turns by scrolling them into view.
+4. Recovers missing turn numbers when possible.
+5. Serializes mounted DOM content, code blocks, images, files, and Thinking
+   flyouts where visible.
 
 ## Testing Checklist
 
-1. Test a short text-only conversation.
-2. Test a conversation with fenced code blocks and confirm the exported Markdown keeps language hints.
-3. Test a long conversation and confirm older messages are included.
-4. Test Markdown export with uploaded or generated images and confirm image references are preserved as links.
-5. Test a conversation with uploaded files and confirm file attachments are preserved as `[File: ...]` blocks.
-6. Test PDF export with the local backend stopped and confirm the UI reports that the local renderer must be started.
-7. Start `tools/advanced-pdf` with `pnpm run server`, choose **Markdown**, and confirm the downloaded Markdown is generated by the local renderer from the selected extension payload.
-8. Choose **PDF** and confirm the downloaded PDF is selectable/searchable text rather than a page screenshot.
-9. Test a ChatGPT turn with an uploaded/generated image and confirm `button > img` attachments are preserved and rendered as PDF previews when fetchable.
-10. Test a conversation with Thinking entries and confirm the debug log includes `features.autoOpenThinkingFlyouts: true` plus `thinkingFlyout.autoStart` / `thinkingFlyout.autoResult` events.
-11. If a file exports with missing messages after a ChatGPT UI change, inspect the DOM for updated message containers and adjust `getCandidateMessageNodes`, `detectRole`, or `getMessageBody` in `content.js`.
+1. Reload the unpacked extension after code changes.
+2. Save popup settings and copy the generated start command.
+3. Start the backend and confirm the popup reports it as running.
+4. Export a short text-only conversation with `Fast`.
+5. Export the same conversation with `Full`.
+6. Confirm the downloaded zip opens and includes Markdown, PDF, and JSONL.
+7. Test a conversation with code blocks and tables.
+8. Test a long conversation and compare Fast vs Full message counts.
+9. Enable debug log and confirm a separate `*-debug.json` downloads.
+
+## Roadmap
+
+- Make `Fast` mode enrich attachments and Thinking content with targeted DOM
+  lookups.
+- Move image fetching fully into the backend to reduce extension permissions.
+- Split `content.js` into modules and bundle it for MV3.
+- Add fixture-based tests for API parsing, Markdown normalization, data sidecars,
+  and ZIP bundle creation.
+- Add Obsidian vault export and RAG chunking from the canonical data schema.
