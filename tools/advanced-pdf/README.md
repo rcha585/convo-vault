@@ -1,6 +1,6 @@
-# Advanced PDF Renderer
+# Convo Vault Backend Renderer
 
-Local high-quality PDF renderer for ChatGPT Conversation Exporter.
+Local high-quality PDF renderer for Convo Vault.
 
 This is the v0.6.0 local backend rendering direction: the extension keeps the
 page permission and selection UI, captures the currently open ChatGPT page, and
@@ -99,16 +99,16 @@ The current `0.6.0` codebase can use Microsoft Edge as an independent backend
 capture browser, but this remains experimental. It avoids moving the ChatGPT
 page the user is actively reading, at the cost of a separate browser profile.
 
-Default local cache/profile location on Windows:
+Default local cache/profile location:
 
 ```powershell
-%LOCALAPPDATA%\ChatGPTConversationExporter
+<repo>\.convo-vault
 ```
 
 Override it with:
 
 ```powershell
-$env:CGCE_CACHE_DIR="$env:LOCALAPPDATA\ChatGPTConversationExporter"
+$env:CGCE_CACHE_DIR="C:\Path\To\convo-vault\.convo-vault"
 ```
 
 Override Edge path with:

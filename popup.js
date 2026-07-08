@@ -1,4 +1,4 @@
-const SETTINGS_STORAGE_KEY = "cgceSettings";
+const SETTINGS_STORAGE_KEY = "convoVaultSettings";
 const DEFAULT_SETTINGS = {
   backendRoot: "",
   port: 38474,
@@ -205,7 +205,7 @@ function buildStartCommand(settings) {
   const normalized = normalizeSettings(settings);
 
   if (!normalized.backendRoot) {
-    throw new Error("Set the backend folder first.");
+    throw new Error("Set the Convo Vault folder first.");
   }
 
   const parts = [

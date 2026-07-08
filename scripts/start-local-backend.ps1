@@ -17,8 +17,7 @@ if (-not (Test-Path $serverScript)) {
 $node = (Get-Command node -ErrorAction Stop).Source
 
 if (-not $CacheDir) {
-  $localAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { $HOME }
-  $CacheDir = Join-Path $localAppData "ChatGPTConversationExporter"
+  $CacheDir = Join-Path $repoRoot ".convo-vault"
 }
 
 $env:CGCE_CACHE_DIR = $CacheDir
@@ -40,7 +39,7 @@ if ($Headless) {
 
 New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
 
-Write-Host "Starting ChatGPT Conversation Exporter local backend"
+Write-Host "Starting Convo Vault local backend"
 Write-Host "Repo:      $repoRoot"
 Write-Host "Cache:     $CacheDir"
 Write-Host "Endpoint:  http://127.0.0.1:$Port"

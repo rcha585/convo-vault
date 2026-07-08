@@ -620,7 +620,7 @@ function buildMarkdownDocument(payload) {
   const lines = [
     `# ${payload.title || "ChatGPT Conversation"}`,
     "",
-    `**Exporter:** ChatGPT Conversation Exporter ${payload.exporterVersion || ""}`.trim(),
+    `**Exporter:** Convo Vault ${payload.exporterVersion || ""}`.trim(),
     `**Exported:** ${formatMarkdownDateTime(payload.exportedAt)}`,
     `**Messages:** ${payload.messages.length}`,
     ""

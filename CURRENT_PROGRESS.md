@@ -1,4 +1,4 @@
-# ChatGPT Long Conversation Exporter V3 Progress
+# Convo Vault V3 Progress
 
 ## Current Status
 
@@ -15,6 +15,11 @@ strategy:
   summary file.
 - The popup now stores backend folder, port, cache folder, and browser path in
   `chrome.storage.local` and generates a portable PowerShell start command.
+- Runtime cache now defaults to the repository-local `.convo-vault/` directory,
+  which is ignored by Git.
+- The extension can be packaged into `dist/convo-vault-extension/` with
+  `scripts/build-extension.ps1`, so Chrome no longer needs to load the whole
+  repository as the extension folder.
 
 The current goal is no longer only "one-click export", but a workflow similar to mature paid exporters:
 

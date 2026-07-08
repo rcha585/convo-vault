@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "ChatGPT Conversation Exporter",
+  "name": "Convo Vault",
   "version": "0.6.0",
   "description": "Local-first ChatGPT conversation exporter with Fast and Full capture modes.",
   "permissions": [
@@ -14,7 +14,7 @@
     "<all_urls>"
   ],
   "action": {
-    "default_title": "Export ChatGPT conversation",
+    "default_title": "Convo Vault",
     "default_popup": "popup.html"
   },
   "background": {

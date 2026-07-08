@@ -1,4 +1,4 @@
-# ChatGPT Conversation Exporter
+# Convo Vault
 
 Local-first Chrome extension for exporting the current ChatGPT conversation as a
 portable archive. This is an alpha learning project: it favors transparency,
@@ -46,12 +46,30 @@ Known tradeoffs:
 - `tools/advanced-pdf/` - local renderer service and PDF/data pipeline.
 - `scripts/` - PowerShell helpers for starting and checking the local backend.
 
+## Build The Extension Package
+
+Build a small extension-only folder and zip:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-extension.ps1
+```
+
+This creates:
+
+- `dist\convo-vault-extension\` - load this folder with Chrome's **Load unpacked**.
+- `dist\convo-vault-extension.zip` - archive/share this file, then unzip before
+  loading as an unpacked extension.
+
+Chrome development mode cannot load a zip directly with **Load unpacked**. The
+zip is for distribution or backup; the unpacked folder is the convenient local
+install target.
+
 ## Load In Chrome
 
 1. Open Chrome and go to `chrome://extensions`.
 2. Turn on **Developer mode**.
 3. Click **Load unpacked**.
-4. Select this repository folder.
+4. Select `dist\convo-vault-extension\`.
 5. Open a conversation on `https://chatgpt.com` or `https://chat.openai.com`.
 6. Click the extension icon.
 7. Set the backend folder, save settings, and copy the start command.
@@ -73,7 +91,7 @@ The popup stores these settings in `chrome.storage.local`:
 - backend folder - the repository folder containing `scripts\`.
 - port - default `38474`.
 - cache folder - optional; defaults to
-  `%LOCALAPPDATA%\ChatGPTConversationExporter` on Windows.
+  `.convo-vault` inside the repository.
 - browser path - optional path to a Chromium-compatible browser executable.
 
 The extension cannot directly launch a local process by itself. The popup
@@ -98,6 +116,10 @@ powershell -ExecutionPolicy Bypass -File scripts\check-local-backend.ps1
 ```
 
 The backend listens on `http://127.0.0.1:38474` unless you choose another port.
+
+Runtime data stays under `.convo-vault/` by default. This directory is ignored
+by Git and may contain browser profiles, exports, cached payloads, and other
+private local data.
 
 ## Backend Endpoints
 

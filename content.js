@@ -43,7 +43,7 @@
   const DEBUG_EVENT_LIMIT = 500;
   const DETAILED_DEBUG_LOG = false;
   const ADVANCED_PDF_IMAGE_EMBED_LIMIT = 160;
-  const SETTINGS_STORAGE_KEY = "cgceSettings";
+  const SETTINGS_STORAGE_KEY = "convoVaultSettings";
   const DEFAULT_EXPORTER_SETTINGS = {
     port: 38474
   };
@@ -6523,7 +6523,7 @@
       `title: "${escapeYaml(metadata.title)}"`,
       `source: "${escapeYaml(metadata.source)}"`,
       `exported_at: "${metadata.exportedAt.toISOString()}"`,
-      `exporter: "ChatGPT Conversation Exporter ${metadata.exporterVersion}"`,
+      `exporter: "Convo Vault ${metadata.exporterVersion}"`,
       `message_count: ${metadata.messageCount}`,
       "---",
       "",
