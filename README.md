@@ -1,39 +1,48 @@
 # Convo Vault
 
-Local-first Chrome extension for exporting the current ChatGPT conversation as a
-portable archive. This is an alpha learning project: it favors transparency,
-debuggability, and local processing over store-ready polish.
+如果在 ChatGPT 里遇到一段值得长期保存的对话，怎么办？
+如果担心把对话交给陌生云端工具会泄露隐私，怎么办？
+如果长对话、代码块、表格、附件线索和思考过程只靠手动复制太痛苦，怎么办？
 
-Version `0.6.0` adds two capture modes and a single bundle export:
+现在你有了 **Convo Vault**。
 
-- `Fast` - reads the current conversation through ChatGPT's signed-in
-  conversation JSON endpoint, then converts the active branch into the local
-  export schema. This is much faster, but it may miss some UI-only details.
-- `Full` - uses the older virtualization-aware DOM scan, including scroll
-  walking, hydration, and missing-turn recovery. This is slower but more
-  faithful when the page contains details that the API payload does not expose.
+Convo Vault 是一个本地优先的 Chrome 扩展，专注于把当前 ChatGPT
+对话导出成可以长期保存、检索和二次处理的本地档案。捕获、整理、渲染和打包都在你自己的机器上完成：
+对话内容不需要上传到第三方服务，也不需要交给陌生的在线转换器。
 
-Every export downloads one `.zip` bundle containing Markdown, PDF, payload JSON,
-JSONL messages, QA pairs, topic/entity sidecars, and a summary file.
+这个工具的目标很简单：让重要对话从浏览器里的临时页面，变成你真正拥有的 Markdown、PDF、JSONL
+和结构化数据包。它适合做个人知识库、项目记录、研究材料、代码问答归档，以及未来接入
+Obsidian 或 RAG 流程的本地资料源。
+
+当前版本 `0.6.0` 已经有两种捕获模式，并统一导出为一个便携的 `.zip` 包：
+
+- `Fast` - 通过当前已登录的 ChatGPT 页面读取对话 JSON，把当前活跃分支快速转换成
+  Convo Vault 的本地导出结构。它速度更快，适合日常保存。
+- `Full` - 使用更细致的 DOM 扫描流程，包含滚动遍历、虚拟化内容加载和缺失消息恢复。
+  它更慢，但在页面里有 API 没暴露的细节时会更忠实。
+
+每次导出都会下载一个 `.zip` bundle，里面包含 Markdown、PDF、payload JSON、JSONL
+messages、QA pairs、topic/entity sidecars 和 summary 文件。
 
 ## Status
 
-This project is not a polished alternative to mature exporters yet. It is a
-local research/workflow tool for:
+Convo Vault 现在处在早期正式使用阶段：已经能支撑真实的本地工作流，同时仍然诚实地面对那些还在快速变化的部分。
+它优先照顾隐私、透明度和可调试性，而不是急着做成一个商店级的漂亮外壳。
 
-- reliable long-conversation capture experiments,
-- true-text PDF rendering,
-- Markdown archives,
-- future Obsidian/RAG-friendly sidecars.
+它目前专注于：
 
-Known tradeoffs:
+- 可靠捕获长对话，
+- 渲染真正可复制、可搜索文本的 PDF，
+- 生成适合长期保存的 Markdown 档案，
+- 为未来的 Obsidian / RAG 工作流准备结构化 sidecar 数据。
 
-- ChatGPT's internal web API and DOM can change without notice.
-- `Fast` mode depends on the current logged-in ChatGPT page.
-- `Full` mode can still be slow on very large or heavily virtualized chats.
-- Images and attachments are best-effort.
-- The extension still requests broad image-fetching host permission for PDF
-  previews; this should move further into the local backend over time.
+目前已知取舍：
+
+- ChatGPT 的内部网页 API 和 DOM 结构可能随时变化。
+- `Fast` 模式依赖当前已经登录的 ChatGPT 页面。
+- `Full` 模式在超长或高度虚拟化的对话中仍然可能比较慢。
+- 图片和附件仍是 best-effort 支持。
+- 扩展目前还会为了 PDF 预览请求较宽的图片抓取权限；后续会继续把这部分能力迁移到本地后端里。
 
 ## Files
 
