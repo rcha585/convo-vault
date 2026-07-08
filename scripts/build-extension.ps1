@@ -39,6 +39,19 @@ foreach ($file in $extensionFiles) {
   Copy-Item -LiteralPath $source -Destination (Join-Path $extensionDir $file)
 }
 
+$iconSourceDir = Join-Path $repoRoot "assets\icons"
+$iconOutputDir = Join-Path $extensionDir "assets\icons"
+
+if (-not (Test-Path $iconSourceDir)) {
+  throw "Missing extension icon directory: $iconSourceDir"
+}
+
+New-Item -ItemType Directory -Force -Path $iconOutputDir | Out-Null
+Copy-Item -LiteralPath (Join-Path $iconSourceDir "icon-16.png") -Destination $iconOutputDir -Force
+Copy-Item -LiteralPath (Join-Path $iconSourceDir "icon-32.png") -Destination $iconOutputDir -Force
+Copy-Item -LiteralPath (Join-Path $iconSourceDir "icon-48.png") -Destination $iconOutputDir -Force
+Copy-Item -LiteralPath (Join-Path $iconSourceDir "icon-128.png") -Destination $iconOutputDir -Force
+
 if (Test-Path $zipPath) {
   Remove-Item -LiteralPath $zipPath -Force
 }
