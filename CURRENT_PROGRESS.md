@@ -2,7 +2,7 @@
 
 ## Current Status
 
-The extension has entered the third major version. As of v0.6.0, the visible
+The extension has entered the third major version. As of v0.6.1, the visible
 workflow has shifted from choosing an output format to choosing a capture
 strategy:
 
@@ -14,12 +14,17 @@ strategy:
   download one zip bundle containing Markdown, PDF, JSONL, data sidecars, and a
   summary file.
 - The popup now stores backend folder, port, cache folder, and browser path in
-  `chrome.storage.local` and generates a portable PowerShell start command.
+  `chrome.storage.local` and generates an operating-system-specific terminal
+  command backed by the shared Node startup script.
 - Runtime cache now defaults to the repository-local `.convo-vault/` directory,
   which is ignored by Git.
 - The extension can be packaged into `dist/convo-vault-extension/` with
-  `scripts/build-extension.ps1`, so Chrome no longer needs to load the whole
+  `npm run build:extension`, so Chrome no longer needs to load the whole
   repository as the extension folder.
+- v0.6.1 adds root npm scripts, cross-platform Node wrappers for backend start,
+  health checks, and extension packaging, plus a GitHub Actions CI workflow that
+  runs syntax checks, tests, and the extension build on Windows, macOS, and
+  Linux.
 
 The current goal is no longer only "one-click export", but a workflow similar to mature paid exporters:
 

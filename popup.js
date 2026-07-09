@@ -78,7 +78,7 @@ copyStartButton.addEventListener("click", async () => {
     const command = buildStartCommand(currentSettings);
 
     await navigator.clipboard.writeText(command);
-    setStatus("Start command copied. Paste it into PowerShell or Windows Terminal.");
+    setStatus("Start command copied. Paste it into your terminal.");
   } catch (error) {
     setStatus(error.message || String(error));
   }
@@ -208,24 +208,50 @@ function buildStartCommand(settings) {
     throw new Error("Set the Convo Vault folder first.");
   }
 
-  const parts = [
-    `Set-Location -LiteralPath ${quotePowerShellSingle(normalized.backendRoot)}`,
-    `powershell -ExecutionPolicy Bypass -File scripts\\start-local-backend-detached.ps1 -Port ${normalized.port}`
+  const args = [
+    "node",
+    "scripts/start-local-backend.mjs",
+    "--detached",
+    "--port",
+    String(normalized.port)
   ];
 
   if (normalized.cacheDir) {
-    parts[1] += ` -CacheDir ${quotePowerShellSingle(normalized.cacheDir)}`;
+    args.push("--cache-dir", normalized.cacheDir);
   }
 
   if (normalized.browserPath) {
-    parts[1] += ` -BrowserPath ${quotePowerShellSingle(normalized.browserPath)}`;
+    args.push("--browser-path", normalized.browserPath);
   }
 
-  return parts.join("; ");
+  if (getPreferredShellKind() === "powershell") {
+    const command = args
+      .map((arg, index) => index < 4 ? arg : quotePowerShellSingle(arg))
+      .join(" ");
+
+    return `Set-Location -LiteralPath ${quotePowerShellSingle(normalized.backendRoot)}; ${command}`;
+  }
+
+  const command = args.map(quotePosixSingle).join(" ");
+  return `cd ${quotePosixSingle(normalized.backendRoot)} && ${command}`;
 }
 
 function quotePowerShellSingle(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function quotePosixSingle(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function getPreferredShellKind() {
+  const platform = String(
+    navigator.userAgentData?.platform ||
+    navigator.platform ||
+    ""
+  ).toLowerCase();
+
+  return platform.includes("win") ? "powershell" : "posix";
 }
 
 function setBackendState(state, label) {

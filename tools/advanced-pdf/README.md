@@ -2,7 +2,7 @@
 
 Local high-quality PDF renderer for Convo Vault.
 
-This is the v0.6.0 local backend rendering direction: the extension keeps the
+This is the v0.6.1 local backend rendering direction: the extension keeps the
 page permission and selection UI, captures the currently open ChatGPT page, and
 sends structured data to the local backend for a Markdown/PDF/data zip bundle.
 
@@ -21,7 +21,7 @@ and avoids a remote PDF service.
 
 From this directory:
 
-```powershell
+```bash
 pnpm install
 ```
 
@@ -32,24 +32,23 @@ do not support pnpm symlinks.
 
 Export a fresh debug JSON from the extension with exporter `0.5.0` or later, then:
 
-```powershell
-node tools\advanced-pdf\render.js path\to\export-debug.json --out output\pdf\conversation.pdf
+```bash
+node tools/advanced-pdf/render.js path/to/export-debug.json --out output/pdf/conversation.pdf
 ```
 
 You can also save the intermediate HTML:
 
-```powershell
-node tools\advanced-pdf\render.js path\to\export-debug.json --out output\pdf\conversation.pdf --html tmp\conversation.html
+```bash
+node tools/advanced-pdf/render.js path/to/export-debug.json --out output/pdf/conversation.pdf --html tmp/conversation.html
 ```
 
 ## Local Renderer Service
 
 For the extension's `Fast` and `Full` bundle export options, start the local
-service first:
+service first from the repository root:
 
-```powershell
-cd tools\advanced-pdf
-pnpm run server
+```bash
+npm run backend
 ```
 
 The service listens only on `127.0.0.1:38474` by default. It exposes:
@@ -77,7 +76,7 @@ You can change the port with:
 
 ```powershell
 $env:CGCE_ADVANCED_PDF_PORT=38475
-pnpm run server
+npm run backend
 ```
 
 If the port is changed, save the same port in the extension popup settings.
@@ -87,7 +86,7 @@ browser, set its executable path before starting the service:
 
 ```powershell
 $env:CGCE_RENDER_BROWSER_PATH="C:\Path\To\Browser.exe"
-pnpm run server
+npm run backend
 ```
 
 Huawei Browser can be used this way if the installed build supports Chromium
@@ -95,7 +94,7 @@ headless printing or Playwright-compatible launch behavior.
 
 ## Backend Edge Capture
 
-The current `0.6.0` codebase can use Microsoft Edge as an independent backend
+The current `0.6.1` codebase can use Microsoft Edge as an independent backend
 capture browser, but this remains experimental. It avoids moving the ChatGPT
 page the user is actively reading, at the cost of a separate browser profile.
 

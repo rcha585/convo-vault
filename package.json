@@ -1,0 +1,17 @@
+{
+  "name": "convo-vault",
+  "version": "0.6.1",
+  "private": true,
+  "description": "Local-first ChatGPT conversation exporter with local rendering and portable archives.",
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "build:extension": "node scripts/build-extension.mjs",
+    "backend": "node scripts/start-local-backend.mjs",
+    "backend:detached": "node scripts/start-local-backend.mjs --detached",
+    "backend:check": "node scripts/check-local-backend.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -4,11 +4,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$uri = "http://127.0.0.1:$Port/health"
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$nodeScript = Join-Path $repoRoot "scripts\check-local-backend.mjs"
+$node = (Get-Command node -ErrorAction Stop).Source
 
-try {
-  $response = Invoke-WebRequest -UseBasicParsing -Uri $uri -TimeoutSec 5
-  $response.Content
-} catch {
-  Write-Error "Local backend is not reachable at $uri. Start it with: powershell -ExecutionPolicy Bypass -File scripts\start-local-backend.ps1"
-}
+Set-Location $repoRoot
+& $node $nodeScript --port "$Port"
