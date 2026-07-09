@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.3";
+  const EXPORTER_VERSION = "0.7.4";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -44,6 +44,7 @@
   const DEBUG_EVENT_LIMIT = 500;
   const DETAILED_DEBUG_LOG = false;
   const ADVANCED_PDF_IMAGE_EMBED_LIMIT = 160;
+  const ADVANCED_PDF_IMAGE_EMBED_CONCURRENCY = 4;
   const SETTINGS_STORAGE_KEY = "convoVaultSettings";
   const DEFAULT_EXPORTER_SETTINGS = {
     port: 38474
@@ -475,7 +476,8 @@
 
     if (format === "bundle") {
       const bundleResult = await downloadExportBundle(metadata, messages, exportedAt, {
-        captureMode: options.captureMode
+        captureMode: options.captureMode,
+        debugLog: options.debugLog
       });
       filename = bundleResult.filename;
 
@@ -485,7 +487,8 @@
           rendererUrl: bundleResult.rendererUrl,
           exporterVersion: EXPORTER_VERSION,
           captureMode: normalizeCaptureMode(options.captureMode),
-          assetCount: bundleResult.assetCount || 0
+          assetCount: bundleResult.assetCount || 0,
+          rendererTimings: bundleResult.rendererTimings || null
         });
         downloadDebugLog(options.debugLog, filename.replace(/\.zip$/i, "-debug.json"));
       }
@@ -600,7 +603,21 @@
     };
 
     if (options.embedImages) {
+      const embedStartedAt = Date.now();
+      const imageReferenceCount = countPortableMarkdownImages(portableMessages);
+      options.debugLog?.event?.("assetEmbed.start", {
+        captureMode,
+        imageReferenceCount,
+        concurrency: ADVANCED_PDF_IMAGE_EMBED_CONCURRENCY,
+        limit: ADVANCED_PDF_IMAGE_EMBED_LIMIT
+      });
       await embedImagesForPortableMessages(portableMessages, assetStats);
+      options.debugLog?.event?.("assetEmbed.done", {
+        captureMode,
+        imageReferenceCount,
+        durationMs: Date.now() - embedStartedAt,
+        ...assetStats
+      });
     }
 
     return {
@@ -628,13 +645,9 @@
     });
   }
 
-  function normalizeExporterSettings(settings = {}) {
-    const port = Number(settings.port || DEFAULT_EXPORTER_SETTINGS.port);
-
+  function normalizeExporterSettings() {
     return {
-      port: Number.isFinite(port) && port >= 1024 && port <= 65535
-        ? Math.floor(port)
-        : DEFAULT_EXPORTER_SETTINGS.port
+      port: DEFAULT_EXPORTER_SETTINGS.port
     };
   }
 
@@ -649,7 +662,8 @@
     const defaultFileName = markdownBuilder.filename(metadata.title, exportedAt, "zip");
     const payload = await createStructuredExportPayload(messages, exportedAt, {
       embedImages: true,
-      captureMode: options.captureMode
+      captureMode: options.captureMode,
+      debugLog: options.debugLog
     });
 
     const rendererUrl = await getAdvancedPdfRendererUrl();
@@ -683,6 +697,7 @@
       filename,
       rendererUrl,
       bundleFiles: decodeHeaderValue(response.headers.get("x-bundle-files")),
+      rendererTimings: parseEncodedJsonHeader(response.headers.get("x-bundle-timings")),
       assetCount: Number(response.headers.get("x-asset-count")) || 0,
       imagesEmbedded: payload.assetStats?.imagesEmbedded || 0,
       imagesFailed: payload.assetStats?.imagesFailed || 0
@@ -773,81 +788,106 @@
   }
 
   async function embedImagesForPortableMessages(messages, stats) {
-    let remaining = ADVANCED_PDF_IMAGE_EMBED_LIMIT;
-    const embeddedImagesByUrl = new Map();
+    const plan = collectImageEmbeddingPlan(messages, ADVANCED_PDF_IMAGE_EMBED_LIMIT);
+    stats.imagesSkipped += plan.skipped;
+
+    if (!plan.urls.length) {
+      return;
+    }
+
+    const embeddedImagesByUrl = await fetchImageDataUrisForEmbedding(plan.urls, stats);
 
     for (const message of messages) {
-      if (remaining <= 0) {
-        stats.imagesSkipped += countMarkdownImages(message.markdown) + countMarkdownImages(message.thinkingMarkdown);
-        continue;
-      }
-
-      const markdownResult = await embedMarkdownImagesForPdf(message.markdown, remaining, stats, embeddedImagesByUrl);
-      message.markdown = markdownResult.markdown;
-      remaining = markdownResult.remaining;
-
-      if (remaining <= 0) {
-        stats.imagesSkipped += countMarkdownImages(message.thinkingMarkdown);
-        continue;
-      }
-
-      const thinkingResult = await embedMarkdownImagesForPdf(message.thinkingMarkdown, remaining, stats, embeddedImagesByUrl);
-      message.thinkingMarkdown = thinkingResult.markdown;
-      remaining = thinkingResult.remaining;
+      message.markdown = replaceEmbeddedMarkdownImages(message.markdown, embeddedImagesByUrl);
+      message.thinkingMarkdown = replaceEmbeddedMarkdownImages(message.thinkingMarkdown, embeddedImagesByUrl);
     }
   }
 
-  async function embedMarkdownImagesForPdf(markdown, remaining, stats, embeddedImagesByUrl = new Map()) {
-    const source = String(markdown || "");
+  function collectImageEmbeddingPlan(messages, limit) {
+    const urls = [];
+    const seen = new Set();
+    let skipped = 0;
 
-    if (!source || remaining <= 0) {
-      return { markdown: source, remaining };
+    for (const message of messages) {
+      for (const url of [
+        ...extractEmbeddableMarkdownImageUrls(message.markdown),
+        ...extractEmbeddableMarkdownImageUrls(message.thinkingMarkdown)
+      ]) {
+        if (seen.has(url)) {
+          continue;
+        }
+
+        seen.add(url);
+
+        if (urls.length >= limit) {
+          skipped += 1;
+          continue;
+        }
+
+        urls.push(url);
+      }
     }
 
+    return { urls, skipped };
+  }
+
+  function extractEmbeddableMarkdownImageUrls(markdown) {
+    const urls = [];
+    const source = String(markdown || "");
     const imagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
-    let output = "";
-    let lastIndex = 0;
     let match;
 
     while ((match = imagePattern.exec(source))) {
-      const [fullMatch, alt, url] = match;
-      output += source.slice(lastIndex, match.index);
-      lastIndex = match.index + fullMatch.length;
-
-      if (!/^https?:\/\//i.test(url) || url.startsWith("data:image/")) {
-        output += fullMatch;
-        continue;
-      }
-
-      if (embeddedImagesByUrl.has(url)) {
-        output += `![${alt || "image"}](${embeddedImagesByUrl.get(url)})`;
-        continue;
-      }
-
-      if (remaining <= 0) {
-        output += fullMatch;
-        stats.imagesSkipped += 1;
-        continue;
-      }
-
-      try {
-        const dataUri = await imageToDataUriFromSrc(url);
-        embeddedImagesByUrl.set(url, dataUri);
-        output += `![${alt || "image"}](${dataUri})`;
-        stats.imagesEmbedded += 1;
-        remaining -= 1;
-      } catch (error) {
-        output += fullMatch;
-        stats.imagesFailed += 1;
+      const url = match[2] || "";
+      if (isEmbeddableImageUrl(url)) {
+        urls.push(url);
       }
     }
 
-    output += source.slice(lastIndex);
+    return urls;
+  }
 
-    return {
-      markdown: output,
-      remaining
-    };
+  async function fetchImageDataUrisForEmbedding(urls, stats) {
+    const embeddedImagesByUrl = new Map();
+    let cursor = 0;
+    const workerCount = Math.min(ADVANCED_PDF_IMAGE_EMBED_CONCURRENCY, urls.length);
+
+    async function worker() {
+      while (cursor < urls.length) {
+        const url = urls[cursor];
+        cursor += 1;
+
+        try {
+          const dataUri = await imageToDataUriFromSrc(url);
+          embeddedImagesByUrl.set(url, dataUri);
+          stats.imagesEmbedded += 1;
+        } catch (_) {
+          stats.imagesFailed += 1;
+        }
+      }
+    }
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return embeddedImagesByUrl;
+  }
+
+  function replaceEmbeddedMarkdownImages(markdown, embeddedImagesByUrl) {
+    const source = String(markdown || "");
+    const imagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+    return source.replace(imagePattern, (fullMatch, alt, url) => {
+      const embedded = embeddedImagesByUrl.get(url);
+      return embedded ? `![${alt || "image"}](${embedded})` : fullMatch;
+    });
+  }
+
+  function isEmbeddableImageUrl(url) {
+    return /^https?:\/\//i.test(url) || /^file-service:\/\//i.test(url);
+  }
+
+  function countPortableMarkdownImages(messages) {
+    return messages.reduce((sum, message) => {
+      return sum + countMarkdownImages(message.markdown) + countMarkdownImages(message.thinkingMarkdown);
+    }, 0);
   }
 
   function countMarkdownImages(markdown) {
@@ -881,6 +921,20 @@
       return decodeURIComponent(value);
     } catch (_) {
       return value;
+    }
+  }
+
+  function parseEncodedJsonHeader(value) {
+    const decoded = decodeHeaderValue(value);
+
+    if (!decoded) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(decoded);
+    } catch (_) {
+      return null;
     }
   }
 
@@ -4616,6 +4670,24 @@
       return "";
     }
 
+    const assetPointer = part.asset_pointer || part.assetPointer || part.url || "";
+
+    if (assetPointer) {
+      const label = sanitizeApiMarkdownLabel(
+        part.name
+        || part.file_name
+        || part.filename
+        || part.title
+        || "Image"
+      );
+
+      if (/image|img|picture/i.test(`${part.content_type || ""} ${part.mime_type || ""} ${assetPointer}`)) {
+        return `![${label}](${assetPointer})`;
+      }
+
+      return `[Attachment: ${assetPointer}]`;
+    }
+
     const textCandidates = [
       part.text,
       part.content,
@@ -4628,26 +4700,46 @@
       return textCandidates.join("\n\n");
     }
 
-    const assetPointer = part.asset_pointer || part.assetPointer || part.url || "";
-
-    if (/image|img|picture/i.test(`${part.content_type || ""} ${part.mime_type || ""} ${assetPointer}`)) {
-      return `[Image: ${assetPointer || "image attachment"}]`;
-    }
-
-    if (assetPointer) {
-      return `[Attachment: ${assetPointer}]`;
-    }
-
     return "";
   }
 
   function extractApiAttachmentMarkdown(message) {
     const attachments = getApiAttachmentObjects(message);
+    const hasImageAssetPointer = getApiMessageImageAssetPointers(message).length > 0;
     const lines = attachments
-      .map((attachment) => formatApiAttachmentMarkdown(attachment))
+      .map((attachment) => hasImageAssetPointer && isApiImageAttachment(attachment)
+        ? ""
+        : formatApiAttachmentMarkdown(attachment)
+      )
       .filter(Boolean);
 
     return uniqueStrings(lines).join("\n");
+  }
+
+  function getApiMessageImageAssetPointers(message) {
+    const parts = Array.isArray(message?.content?.parts) ? message.content.parts : [];
+
+    return parts
+      .filter((part) => part && typeof part === "object")
+      .map((part) => {
+        const assetPointer = part.asset_pointer || part.assetPointer || part.url || "";
+        const descriptor = [
+          part.content_type,
+          part.contentType,
+          part.mime_type,
+          part.mimeType,
+          part.name,
+          part.file_name,
+          part.filename,
+          part.title,
+          assetPointer
+        ].join(" ");
+
+        return /image|img|picture|\bpng\b|\bjpe?g\b|\bwebp\b|\bgif\b/i.test(descriptor)
+          ? assetPointer
+          : "";
+      })
+      .filter(Boolean);
   }
 
   function getApiAttachmentObjects(message) {
@@ -4684,7 +4776,37 @@
   }
 
   function countApiFileAttachments(message) {
-    return getApiAttachmentObjects(message).length;
+    const hasImageAssetPointer = getApiMessageImageAssetPointers(message).length > 0;
+    return getApiAttachmentObjects(message)
+      .filter((attachment) => !(hasImageAssetPointer && isApiImageAttachment(attachment)))
+      .length;
+  }
+
+  function isApiImageAttachment(attachment) {
+    const haystack = [
+      attachment?.mime_type,
+      attachment?.mimeType,
+      attachment?.content_type,
+      attachment?.contentType,
+      attachment?.name,
+      attachment?.file_name,
+      attachment?.filename,
+      attachment?.title,
+      attachment?.url,
+      attachment?.download_url,
+      attachment?.file_url
+    ].join(" ");
+
+    return /\bimage\//i.test(haystack) || /\.(?:png|jpe?g|gif|webp|avif|bmp|svg)(?:$|[?#])/i.test(haystack);
+  }
+
+  function sanitizeApiMarkdownLabel(value) {
+    return String(value || "Image")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 160)
+      .replace(/[[\]\\]/g, "\\$&")
+      || "Image";
   }
 
   function extractApiThinkingMarkdown(message) {

@@ -337,6 +337,24 @@
       return "";
     }
 
+    const assetPointer = part.asset_pointer || part.assetPointer || part.url || "";
+
+    if (assetPointer) {
+      const label = sanitizeApiMarkdownLabel(
+        part.name
+        || part.file_name
+        || part.filename
+        || part.title
+        || "Image"
+      );
+
+      if (/image|img|picture/i.test(`${part.content_type || ""} ${part.mime_type || ""} ${assetPointer}`)) {
+        return `![${label}](${assetPointer})`;
+      }
+
+      return `[Attachment: ${assetPointer}]`;
+    }
+
     const textCandidates = [
       part.text,
       part.content,
@@ -349,26 +367,46 @@
       return textCandidates.join("\n\n");
     }
 
-    const assetPointer = part.asset_pointer || part.assetPointer || part.url || "";
-
-    if (/image|img|picture/i.test(`${part.content_type || ""} ${part.mime_type || ""} ${assetPointer}`)) {
-      return `[Image: ${assetPointer || "image attachment"}]`;
-    }
-
-    if (assetPointer) {
-      return `[Attachment: ${assetPointer}]`;
-    }
-
     return "";
   }
 
   function extractApiAttachmentMarkdown(message) {
     const attachments = getApiAttachmentObjects(message);
+    const hasImageAssetPointer = getApiMessageImageAssetPointers(message).length > 0;
     const lines = attachments
-      .map((attachment) => formatApiAttachmentMarkdown(attachment))
+      .map((attachment) => hasImageAssetPointer && isApiImageAttachment(attachment)
+        ? ""
+        : formatApiAttachmentMarkdown(attachment)
+      )
       .filter(Boolean);
 
     return uniqueStrings(lines).join("\n");
+  }
+
+  function getApiMessageImageAssetPointers(message) {
+    const parts = Array.isArray(message?.content?.parts) ? message.content.parts : [];
+
+    return parts
+      .filter((part) => part && typeof part === "object")
+      .map((part) => {
+        const assetPointer = part.asset_pointer || part.assetPointer || part.url || "";
+        const descriptor = [
+          part.content_type,
+          part.contentType,
+          part.mime_type,
+          part.mimeType,
+          part.name,
+          part.file_name,
+          part.filename,
+          part.title,
+          assetPointer
+        ].join(" ");
+
+        return /image|img|picture|\bpng\b|\bjpe?g\b|\bwebp\b|\bgif\b/i.test(descriptor)
+          ? assetPointer
+          : "";
+      })
+      .filter(Boolean);
   }
 
   function getApiAttachmentObjects(message) {
@@ -405,7 +443,37 @@
   }
 
   function countApiFileAttachments(message) {
-    return getApiAttachmentObjects(message).length;
+    const hasImageAssetPointer = getApiMessageImageAssetPointers(message).length > 0;
+    return getApiAttachmentObjects(message)
+      .filter((attachment) => !(hasImageAssetPointer && isApiImageAttachment(attachment)))
+      .length;
+  }
+
+  function isApiImageAttachment(attachment) {
+    const haystack = [
+      attachment?.mime_type,
+      attachment?.mimeType,
+      attachment?.content_type,
+      attachment?.contentType,
+      attachment?.name,
+      attachment?.file_name,
+      attachment?.filename,
+      attachment?.title,
+      attachment?.url,
+      attachment?.download_url,
+      attachment?.file_url
+    ].join(" ");
+
+    return /\bimage\//i.test(haystack) || /\.(?:png|jpe?g|gif|webp|avif|bmp|svg)(?:$|[?#])/i.test(haystack);
+  }
+
+  function sanitizeApiMarkdownLabel(value) {
+    return String(value || "Image")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 160)
+      .replace(/[[\]\\]/g, "\\$&")
+      || "Image";
   }
 
   function extractApiThinkingMarkdown(message) {

@@ -255,8 +255,10 @@ async function handleRenderData(request, response) {
 }
 
 async function handleRenderBundle(request, response) {
+  const timings = createTimings();
   const body = await readJsonBody(request);
   const payload = normalizePayload(body);
+  timings.mark("payloadNormalized");
 
   if (!payload.messages.length) {
     sendJson(response, 400, {
@@ -283,9 +285,12 @@ async function handleRenderBundle(request, response) {
 
   fs.writeFileSync(jsonPath, JSON.stringify(payload, null, 2), "utf8");
   fs.writeFileSync(markdownPath, buildMarkdownDocument(payload), "utf8");
+  timings.mark("documentsWritten");
   const assetManifest = buildAssetManifest(payload, { cacheRoot: getCacheRoot() });
   fs.writeFileSync(assetManifestPath, JSON.stringify(assetManifest, null, 2), "utf8");
+  timings.mark("assetManifestWritten");
   const dataFiles = writeDataSidecars(requestDir, baseName, payload);
+  timings.mark("dataSidecarsWritten");
 
   const result = await runRenderer({
     jsonPath,
@@ -293,6 +298,7 @@ async function handleRenderBundle(request, response) {
     pdfPath,
     baseName
   });
+  timings.mark("pdfRendered");
 
   if (!result.ok) {
     sendJson(response, 500, {
@@ -327,6 +333,7 @@ async function handleRenderBundle(request, response) {
     }))
   ];
   const zipBytes = createZipArchive(bundleEntries);
+  timings.mark("zipCreated");
   const filename = `${baseName}.zip`;
 
   response.writeHead(200, {
@@ -337,7 +344,8 @@ async function handleRenderBundle(request, response) {
     "X-Bundle-Files": encodeHeaderValue(bundleEntries.map((entry) => entry.name).join(",")),
     "X-Asset-Count": String(assetManifest.counts.total),
     "X-Renderer-HTML": encodeHeaderValue(htmlPath.replace(/\\/g, "/")),
-    "X-Data-Dir": encodeHeaderValue(requestDir.replace(/\\/g, "/"))
+    "X-Data-Dir": encodeHeaderValue(requestDir.replace(/\\/g, "/")),
+    "X-Bundle-Timings": encodeHeaderValue(JSON.stringify(timings.toJSON()))
   });
   response.end(zipBytes);
 }
@@ -492,8 +500,8 @@ function buildDataBundle(payload) {
     messageCount: messages.length,
     roles: countBy(messages, (message) => message.role),
     thinkingCount: messages.filter((message) => message.thinkingMarkdown).length,
-    imageCount: messages.reduce((sum, message) => sum + (message.imageCount || 0), 0),
-    fileCount: messages.reduce((sum, message) => sum + (message.fileCount || 0), 0)
+    imageCount: messages.reduce((sum, message) => sum + (message.counts?.images || 0), 0),
+    fileCount: messages.reduce((sum, message) => sum + (message.counts?.files || 0), 0)
   };
   const qaPairs = buildQaPairs(messages);
   const topics = buildTopics(messages);
@@ -1013,7 +1021,8 @@ function setCorsHeaders(request, response) {
     "X-Data-Files",
     "X-Page-Count",
     "X-Capture-Warning",
-    "X-Asset-Count"
+    "X-Asset-Count",
+    "X-Bundle-Timings"
   ].join(", "));
 }
 
@@ -1033,6 +1042,23 @@ function makeContentDisposition(filename) {
 
 function encodeHeaderValue(value) {
   return encodeURIComponent(String(value || ""));
+}
+
+function createTimings() {
+  const startedAt = Date.now();
+  const marks = {};
+
+  return {
+    mark(name) {
+      marks[name] = Date.now() - startedAt;
+    },
+    toJSON() {
+      return {
+        totalMs: Date.now() - startedAt,
+        marks
+      };
+    }
+  };
 }
 
 function stripPdfExtension(filename) {

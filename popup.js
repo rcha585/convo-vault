@@ -13,12 +13,7 @@ const backendStatus = document.getElementById("backendStatus");
 const checkBackendButton = document.getElementById("checkBackendButton");
 const copyStartButton = document.getElementById("copyStartButton");
 const stopBackendButton = document.getElementById("stopBackendButton");
-const saveSettingsButton = document.getElementById("saveSettingsButton");
-const resetSettingsButton = document.getElementById("resetSettingsButton");
 const backendRootInput = document.getElementById("backendRootInput");
-const portInput = document.getElementById("portInput");
-const cacheDirInput = document.getElementById("cacheDirInput");
-const browserPathInput = document.getElementById("browserPathInput");
 
 let currentSettings = { ...DEFAULT_SETTINGS };
 
@@ -57,19 +52,6 @@ exportButton.addEventListener("click", async () => {
 checkBackendButton.addEventListener("click", async () => {
   await saveSettingsFromForm({ quiet: true });
   checkBackend({ announce: true });
-});
-
-saveSettingsButton.addEventListener("click", async () => {
-  await saveSettingsFromForm();
-  checkBackend();
-});
-
-resetSettingsButton.addEventListener("click", async () => {
-  currentSettings = { ...DEFAULT_SETTINGS };
-  renderSettings(currentSettings);
-  await saveSettings(currentSettings);
-  setStatus("Settings reset.");
-  checkBackend();
 });
 
 copyStartButton.addEventListener("click", async () => {
@@ -152,21 +134,16 @@ async function saveSettingsFromForm(options = {}) {
 }
 
 function readSettingsFromForm() {
-  const port = Number(portInput.value || DEFAULT_SETTINGS.port);
-
   return {
     backendRoot: backendRootInput.value.trim(),
-    port: Number.isFinite(port) && port >= 1024 && port <= 65535 ? Math.floor(port) : DEFAULT_SETTINGS.port,
-    cacheDir: cacheDirInput.value.trim(),
-    browserPath: browserPathInput.value.trim()
+    port: DEFAULT_SETTINGS.port,
+    cacheDir: DEFAULT_SETTINGS.cacheDir,
+    browserPath: DEFAULT_SETTINGS.browserPath
   };
 }
 
 function renderSettings(settings) {
   backendRootInput.value = settings.backendRoot || "";
-  portInput.value = String(settings.port || DEFAULT_SETTINGS.port);
-  cacheDirInput.value = settings.cacheDir || "";
-  browserPathInput.value = settings.browserPath || "";
 }
 
 function loadSettings() {
@@ -186,13 +163,11 @@ function saveSettings(settings) {
 }
 
 function normalizeSettings(settings = {}) {
-  const port = Number(settings.port || DEFAULT_SETTINGS.port);
-
   return {
     backendRoot: String(settings.backendRoot || "").trim(),
-    port: Number.isFinite(port) && port >= 1024 && port <= 65535 ? Math.floor(port) : DEFAULT_SETTINGS.port,
-    cacheDir: String(settings.cacheDir || "").trim(),
-    browserPath: String(settings.browserPath || "").trim()
+    port: DEFAULT_SETTINGS.port,
+    cacheDir: DEFAULT_SETTINGS.cacheDir,
+    browserPath: DEFAULT_SETTINGS.browserPath
   };
 }
 
@@ -211,18 +186,8 @@ function buildStartCommand(settings) {
   const args = [
     "node",
     "scripts/start-local-backend.mjs",
-    "--detached",
-    "--port",
-    String(normalized.port)
+    "--detached"
   ];
-
-  if (normalized.cacheDir) {
-    args.push("--cache-dir", normalized.cacheDir);
-  }
-
-  if (normalized.browserPath) {
-    args.push("--browser-path", normalized.browserPath);
-  }
 
   if (getPreferredShellKind() === "powershell") {
     const command = args

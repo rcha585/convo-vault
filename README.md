@@ -14,7 +14,7 @@ Convo Vault 是一个本地优先的 Chrome 扩展，专注于把当前 ChatGPT
 和结构化数据包。它适合做个人知识库、项目记录、研究材料、代码问答归档，以及未来接入
 Obsidian 或 RAG 流程的本地资料源。
 
-当前版本 `0.7.3` 已经有两种捕获模式，并统一导出为一个便携的 `.zip` 包。本版继续增强 Fast 的 API-first 读取路径：会读取当前 ChatGPT session token，探测多个 conversation API 形态，并过滤 ChatGPT API 中隐藏的搜索、代码执行和工具调用节点。
+当前版本 `0.7.4` 已经有两种捕获模式，并统一导出为一个便携的 `.zip` 包。本版继续增强 Fast 的 API-first 读取路径：会读取当前 ChatGPT session token，探测多个 conversation API 形态，并过滤 ChatGPT API 中隐藏的搜索、代码执行和工具调用节点。
 
 - `Fast` - 通过当前已登录的 ChatGPT 页面读取对话 JSON，把当前活跃分支快速转换成
   Convo Vault 的本地导出结构。它速度更快，适合日常保存。
@@ -84,8 +84,8 @@ install target.
 4. Select `dist\convo-vault-extension\`.
 5. Open a conversation on `https://chatgpt.com` or `https://chat.openai.com`.
 6. Click the extension icon.
-7. Set the backend folder, save settings, and copy the start command.
-8. Start the local backend in PowerShell.
+7. Set the backend folder and copy the start command.
+8. Start the local backend in your terminal.
 9. Click **Open Selector**, choose `Fast` or `Full`, adjust message selection, then
    export the bundle.
 
@@ -107,13 +107,9 @@ npm run build:extension
 npm run backend
 ```
 
-The popup stores these settings in `chrome.storage.local`:
+The popup stores the backend folder in `chrome.storage.local`:
 
 - backend folder - the repository folder containing `scripts/`.
-- port - default `38474`.
-- cache folder - optional; defaults to
-  `.convo-vault` inside the repository.
-- browser path - optional path to a Chromium-compatible browser executable.
 
 The extension cannot directly launch a local process by itself. The popup
 generates a start command for the current operating system from the saved
@@ -141,7 +137,7 @@ npm run backend:check
 The PowerShell scripts in `scripts/` remain available as Windows compatibility
 wrappers, but the Node scripts are the primary cross-platform entrypoints.
 
-The backend listens on `http://127.0.0.1:38474` unless you choose another port.
+The backend listens on `http://127.0.0.1:38474` by default.
 
 Runtime data stays under `.convo-vault/` by default. This directory is ignored
 by Git and may contain browser profiles, exports, cached payloads, cached

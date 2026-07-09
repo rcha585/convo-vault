@@ -53,8 +53,7 @@ button:disabled {
   background: rgba(16, 163, 127, 0.06);
 }
 
-.field,
-.field-row {
+.field {
   min-width: 0;
 }
 
@@ -64,12 +63,6 @@ button:disabled {
   color: #475569;
   font-size: 12px;
   line-height: 1.35;
-}
-
-.field-row {
-  display: grid;
-  grid-template-columns: 84px minmax(0, 1fr);
-  gap: 8px;
 }
 
 input {
@@ -83,12 +76,6 @@ input {
   color: CanvasText;
   font: inherit;
   font-size: 12px;
-}
-
-.settings-actions {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 6px;
 }
 
 .backend {

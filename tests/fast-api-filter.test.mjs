@@ -97,6 +97,49 @@ test("Fast API parser keeps final assistant code answers", async () => {
   assert.match(messages[1].markdown, /```python/);
 });
 
+test("Fast API parser emits image asset pointers as markdown images", async () => {
+  const fast = await loadFastCaptureModule();
+  const data = {
+    current_node: "prompt",
+    mapping: {
+      root: { id: "root", parent: "", message: null },
+      prompt: {
+        id: "prompt",
+        parent: "root",
+        message: makeMessage("user", "", {
+          contentType: "multimodal_text",
+          parts: [
+            "Please review this.",
+            {
+              asset_pointer: "file-service://file-image-123",
+              content_type: "image/png",
+              name: "diagram.png"
+            }
+          ],
+          metadata: {
+            attachments: [
+              {
+                id: "file-image-123",
+                name: "diagram.png",
+                mime_type: "image/png"
+              }
+            ]
+          }
+        })
+      }
+    }
+  };
+
+  const messages = fast.buildMessagesFromConversationApi(data);
+
+  assert.equal(messages.length, 1);
+  assert.match(messages[0].markdown, /Please review this\./);
+  assert.match(messages[0].markdown, /!\[diagram\.png]\(file-service:\/\/file-image-123\)/);
+  assert.doesNotMatch(messages[0].markdown, /\[File: diagram\.png]/);
+  assert.equal(messages[0].imageCount, 1);
+  assert.equal(messages[0].fileCount, 0);
+});
+
 async function loadFastCaptureModule() {
   const source = await readFile(path.join(repoRoot, "src", "content", "capture-fast.js"), "utf8");
   const context = vm.createContext({
@@ -123,7 +166,7 @@ function makeMessage(role, text, options = {}) {
     author: { role },
     content: {
       content_type: options.contentType || "text",
-      parts: [text]
+      parts: options.parts || [text]
     },
     channel: options.channel || "",
     end_turn: options.end_turn,
