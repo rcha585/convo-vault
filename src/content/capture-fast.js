@@ -26,6 +26,10 @@
     const pathNodes = getConversationApiCurrentPath(data);
     const messages = [];
     const filterStats = {};
+    let pendingAssistantThinking = [];
+    let pendingThinkingApplied = 0;
+    let directThinkingMessageCount = 0;
+    let skippedThinkingCandidateCount = 0;
 
     for (const node of pathNodes) {
       const message = node?.message;
@@ -33,18 +37,35 @@
 
       const structuralSkipReason = getApiMessageStructuralSkipReason(message, role);
       if (structuralSkipReason) {
+        const skippedThinking = extractSkippedApiThinkingMarkdown(message, role, structuralSkipReason);
+        if (skippedThinking) {
+          pendingAssistantThinking.push(skippedThinking);
+          skippedThinkingCandidateCount += 1;
+        }
         incrementReasonCount(filterStats, structuralSkipReason);
         continue;
       }
 
-      const markdown = cleanMarkdown([
+      const directThinkingMarkdown = role === "assistant" ? extractApiThinkingMarkdown(message) : "";
+      if (directThinkingMarkdown) {
+        directThinkingMessageCount += 1;
+      }
+
+      const markdown = cleanApiMarkdown([
         extractApiContentMarkdown(message.content),
         extractApiAttachmentMarkdown(message)
       ].filter(Boolean).join("\n\n"));
-      const thinkingMarkdown = cleanMarkdown(extractApiThinkingMarkdown(message));
+      const thinkingMarkdown = cleanApiMarkdown([
+        role === "assistant" ? pendingAssistantThinking.join("\n\n") : "",
+        directThinkingMarkdown
+      ].filter(Boolean).join("\n\n"));
 
       if (!markdown && !thinkingMarkdown) {
         continue;
+      }
+
+      if (role === "user" && pendingAssistantThinking.length) {
+        pendingAssistantThinking = [];
       }
 
       const contentSkipReason = getApiMessageContentSkipReason(message, role, markdown);
@@ -55,6 +76,11 @@
 
       const turnNumber = messages.length + 1;
       const id = message.id || node.id || `api-message-${turnNumber}`;
+
+      if (role === "assistant" && pendingAssistantThinking.length) {
+        pendingThinkingApplied += 1;
+        pendingAssistantThinking = [];
+      }
 
       messages.push({
         id,
@@ -91,6 +117,20 @@
     if (Object.keys(filterStats).length) {
       debugLog?.event("fastCapture.filteredSummary", {
         filtered: filterStats
+      });
+    }
+
+    if (pendingThinkingApplied) {
+      debugLog?.event("fastCapture.thinkingMerged", {
+        applied: pendingThinkingApplied
+      });
+    }
+
+    if (directThinkingMessageCount || skippedThinkingCandidateCount || pendingThinkingApplied) {
+      debugLog?.event("fastCapture.thinkingSummary", {
+        directMetadataMessages: directThinkingMessageCount,
+        skippedThinkingCandidates: skippedThinkingCandidateCount,
+        mergedIntoFinalAssistant: pendingThinkingApplied
       });
     }
 
@@ -213,6 +253,37 @@
       || /^\{\s*"queries"\s*:/i.test(text);
   }
 
+  function extractSkippedApiThinkingMarkdown(message, role, skipReason) {
+    if (role !== "assistant" || !isPotentialApiThinkingSkipReason(skipReason)) {
+      return "";
+    }
+
+    const explicitThinking = cleanApiMarkdown(extractApiThinkingMarkdown(message));
+    if (explicitThinking) {
+      return explicitThinking;
+    }
+
+    const markdown = cleanApiMarkdown(extractApiContentMarkdown(message?.content));
+    if (!markdown || looksLikeInternalApiToolCall(markdown) || looksLikeApiJsonPayload(markdown)) {
+      return "";
+    }
+
+    return markdown;
+  }
+
+  function isPotentialApiThinkingSkipReason(reason) {
+    return reason === "assistant-not-final"
+      || reason === "channel:analysis"
+      || reason === "channel:reasoning"
+      || reason === "content-type:thoughts"
+      || reason === "content-type:reasoning";
+  }
+
+  function looksLikeApiJsonPayload(markdown) {
+    const text = String(markdown || "").trim();
+    return /^[{[]/.test(text) && /["'}\]]$/.test(text);
+  }
+
   function incrementReasonCount(stats, reason) {
     if (!isReportableApiSkipReason(reason)) {
       return;
@@ -302,6 +373,17 @@
     }
 
     return "";
+  }
+
+  function cleanApiMarkdown(value) {
+    return cleanMarkdown(removeApiPrivateUseArtifacts(value));
+  }
+
+  function removeApiPrivateUseArtifacts(value) {
+    return String(value || "")
+      .replace(/[\uE000-\uF8FF]*cite(?:[\uE000-\uF8FF]+turn[0-9A-Za-z_-]+)+[\uE000-\uF8FF]*/gi, "")
+      .replace(/[\uE000-\uF8FF]+/g, "")
+      .replace(/[ \t]+\n/g, "\n");
   }
 
   function extractApiContentMarkdown(content) {

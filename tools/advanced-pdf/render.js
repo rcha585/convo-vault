@@ -239,7 +239,7 @@ function createMarkdownRenderer() {
       const highlighted = lang && hljs.getLanguage(lang)
         ? hljs.highlight(code, { language: lang, ignoreIllegals: true }).value
         : hljs.highlightAuto(code).value;
-      const label = lang ? `<div class="code-label">${escapeHtml(lang)}</div>` : "";
+      const label = shouldShowCodeLabel(lang) ? `<div class="code-label">${escapeHtml(lang)}</div>` : "";
       return `${label}<pre class="hljs"><code>${highlighted}</code></pre>`;
     }
   });
@@ -287,7 +287,7 @@ function renderMessage(md, message, index, imageRegistry) {
   const anchorId = getMessageAnchorId(message, index);
   const time = message.timestamp ? `<time>${escapeHtml(message.timestamp)}</time>` : "";
   const turnHeading = renderTurnHeading(message, index);
-  const content = renderMessageMarkdown(md, isUser ? stripLeadingAttachmentLines(message.markdown) : message.markdown, imageRegistry);
+  const content = renderMessageMarkdown(md, isUser ? stripAttachmentOnlyLines(message.markdown) : message.markdown, imageRegistry);
   const thinking = isAssistant && message.thinkingMarkdown
     ? renderThinking(md, message.thinkingMarkdown, imageRegistry)
     : "";
@@ -306,13 +306,15 @@ function renderMessage(md, message, index, imageRegistry) {
 
   return `<article id="${escapeAttr(anchorId)}" class="message assistant-message" data-turn-number="${escapeAttr(message.turnNumber)}">
     <div class="assistant-header">
-      ${renderAssistantAvatar()}
-      ${turnHeading}
+      <div class="assistant-title">
+        ${renderAssistantAvatar()}
+        ${turnHeading}
+        ${time ? `<div class="message-time assistant-time">${time}</div>` : ""}
+      </div>
     </div>
     <div class="assistant-body">
       ${thinking}
       <div class="assistant-content">${content}</div>
-      ${time ? `<div class="message-time assistant-time">${time}</div>` : ""}
     </div>
   </article>`;
 }
@@ -434,21 +436,33 @@ function renderAttachmentLead(markdown, imageRegistry) {
 }
 
 function extractLeadingAttachments(markdown) {
-  const lines = String(markdown || "").split(/\r?\n/).slice(0, 6);
+  const lines = String(markdown || "").split(/\r?\n/);
   const result = [];
 
   for (const line of lines) {
-    const image = line.match(/^!\[([^\]]*)\]\(([^)]+)\)/);
-    const file = line.match(/^\[File:\s*([^\]]+)\]/i);
+    const trimmed = line.trim();
+
+    if (!trimmed || /^<!--[\s\S]*-->$/.test(trimmed)) {
+      continue;
+    }
+
+    const image = trimmed.match(/^!\[([^\]]*)\]\(([^)]+)\)/);
+    const file = trimmed.match(/^\[File:\s*([^\]]+)\]/i);
 
     if (image) {
       result.push({ type: "image", label: image[1] || "Image", url: image[2] || "" });
     } else if (file) {
       result.push({ type: "file", label: file[1] || "Attachment" });
+    } else {
+      break;
+    }
+
+    if (result.length >= 4) {
+      break;
     }
   }
 
-  return result.slice(0, 4);
+  return result;
 }
 
 function buildTocRows(messages) {
@@ -552,7 +566,7 @@ function getMessageAnchorId(message, index) {
 }
 
 function getMessageLabel(message, index) {
-  const markdownSource = stripLeadingAttachmentLines(cleanMarkdownForHtml(message.markdown || ""));
+  const markdownSource = stripAttachmentOnlyLines(cleanMarkdownForHtml(message.markdown || ""));
   const source = markdownSource || cleanMarkdownForHtml(message.preview || message.thinkingMarkdown || "");
   const text = stripMarkdown(source).replace(/\s+/g, " ").trim();
   return `${formatTurnNumber(message, index)}. ${text.slice(0, 82) || formatRole(message.role)}`;
@@ -584,32 +598,22 @@ function cleanMarkdownForHtml(markdown) {
   return String(markdown || "")
     .replace(/\r\n?/g, "\n")
     .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/[\uE000-\uF8FF]*cite(?:[\uE000-\uF8FF]+turn[0-9A-Za-z_-]+)+[\uE000-\uF8FF]*/gi, "")
+    .replace(/[\uE000-\uF8FF]+/g, "")
     .replace(/!\[(image-\d+|Image-\d+)\]\((https?:\/\/[^)]+)\)\s*/gi, "")
     .replace(/\[Image:\s*([^\]]+)\]\((https?:\/\/[^)]+)\)/gi, "[$1]($2)")
     .trim();
 }
 
-function stripLeadingAttachmentLines(markdown) {
-  const lines = String(markdown || "").split(/\r?\n/);
-  let index = 0;
-
-  while (index < lines.length) {
-    const line = lines[index].trim();
-
-    if (!line) {
-      index += 1;
-      continue;
-    }
-
-    if (/^!\[[^\]]*]\([^)]+\)$/.test(line) || /^\[File:\s*[^\]]+]/i.test(line)) {
-      index += 1;
-      continue;
-    }
-
-    break;
-  }
-
-  return lines.slice(index).join("\n");
+function stripAttachmentOnlyLines(markdown) {
+  return String(markdown || "")
+    .split(/\r?\n/)
+    .filter((line) => {
+      const trimmed = line.trim();
+      return !(/^!\[[^\]]*]\([^)]+\)$/.test(trimmed) || /^\[File:\s*[^\]]+]/i.test(trimmed));
+    })
+    .join("\n")
+    .trim();
 }
 
 function stripMarkdown(markdown) {
@@ -634,6 +638,10 @@ function normalizeLanguage(language) {
     yml: "yaml"
   };
   return aliases[value] || value;
+}
+
+function shouldShowCodeLabel(language) {
+  return Boolean(language) && !["text", "txt", "plain", "plaintext"].includes(language);
 }
 
 async function renderPdfWithChrome({ htmlPath, outputPath, chromePath }) {
@@ -672,13 +680,13 @@ async function renderPdfWithChrome({ htmlPath, outputPath, chromePath }) {
       outline: true,
       preferCSSPageSize: true,
       margin: {
-        top: "54px",
-        right: "46px",
-        bottom: "54px",
-        left: "46px"
+        top: "44px",
+        right: "34px",
+        bottom: "44px",
+        left: "34px"
       },
-      headerTemplate: `<div style="width:100%;font-size:8px;color:#6b7280;padding:0 46px;font-family:Arial,sans-serif;display:flex;justify-content:space-between;"><span></span><span></span></div>`,
-      footerTemplate: `<div style="width:100%;font-size:9px;color:#6b7280;padding:0 46px;font-family:Arial,sans-serif;display:flex;justify-content:center;gap:4px;"><span>Page</span><span class="pageNumber"></span><span>/</span><span class="totalPages"></span></div>`
+      headerTemplate: `<div style="width:100%;font-size:8px;color:#6b7280;padding:0 34px;font-family:Arial,sans-serif;display:flex;justify-content:space-between;"><span></span><span></span></div>`,
+      footerTemplate: `<div style="width:100%;font-size:9px;color:#6b7280;padding:0 34px;font-family:Arial,sans-serif;display:flex;justify-content:center;gap:4px;"><span>Page</span><span class="pageNumber"></span><span>/</span><span class="totalPages"></span></div>`
     });
   } finally {
     await browser.close();
@@ -698,7 +706,7 @@ function buildPdfOutlineItems(messages) {
 }
 
 function getMessageOutlineTitle(message, index) {
-  const markdownSource = stripLeadingAttachmentLines(cleanMarkdownForHtml(message.markdown || ""));
+  const markdownSource = stripAttachmentOnlyLines(cleanMarkdownForHtml(message.markdown || ""));
   const source = markdownSource || cleanMarkdownForHtml(message.preview || message.thinkingMarkdown || "");
   const preview = stripMarkdown(source).trim().slice(0, 76);
   const heading = formatTurnHeading(message, index);
@@ -944,7 +952,7 @@ function buildCss() {
   return `
 @page {
   size: A4;
-  margin: 54px 46px;
+  margin: 44px 34px;
 }
 
 * {
@@ -960,8 +968,8 @@ body {
   color: #111827;
   background: #ffffff;
   font-family: Inter, "Noto Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
-  font-size: 13px;
-  line-height: 1.62;
+  font-size: 12.8px;
+  line-height: 1.56;
   letter-spacing: 0;
 }
 
@@ -1108,18 +1116,25 @@ a {
 }
 
 .user-message {
-  display: flex;
-  justify-content: flex-end;
-  break-inside: avoid;
+  display: block;
+  break-inside: auto;
   margin: 0 0 9px;
 }
 
 .user-stack {
-  width: min(78%, 560px);
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
+  width: min(84%, 600px);
+  display: block;
+  margin-left: auto;
+  break-inside: auto;
+  text-align: right;
+}
+
+.user-stack > * {
+  margin-top: 8px;
+}
+
+.user-stack > :first-child {
+  margin-top: 0;
 }
 
 .turn-heading {
@@ -1133,7 +1148,6 @@ a {
 }
 
 .user-turn-heading {
-  align-self: flex-end;
   text-align: right;
 }
 
@@ -1166,7 +1180,8 @@ a {
 }
 
 .user-avatar {
-  align-self: flex-end;
+  display: flex;
+  margin-left: auto;
 }
 
 .bubble {
@@ -1180,12 +1195,19 @@ a {
 
 .user-bubble {
   border-bottom-right-radius: 6px;
+  margin-left: auto;
+  text-align: left;
 }
 
 .message-time {
   color: #a0a7b2;
   font-size: 10px;
   font-style: italic;
+}
+
+.user-time {
+  display: block;
+  text-align: right;
 }
 
 .assistant-message {
@@ -1201,6 +1223,14 @@ a {
 .assistant-header {
   margin: 0 0 7px;
   display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.assistant-title {
+  min-width: 0;
+  display: inline-flex;
   gap: 8px;
   align-items: center;
   justify-content: flex-start;
@@ -1398,10 +1428,9 @@ a {
 }
 
 .user-attachments {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: flex-end;
+  display: block;
+  break-inside: auto;
+  text-align: right;
 }
 
 .attachment-card {
@@ -1417,18 +1446,46 @@ a {
 }
 
 .attachment-card.with-thumb {
+  display: flex;
   min-width: 0;
-  width: min(285px, 100%);
-  max-width: 285px;
+  width: min(340px, 100%);
+  max-width: 340px;
   padding: 8px;
   flex-direction: column;
   align-items: stretch;
   gap: 7px;
+  margin-left: auto;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.user-attachments .attachment-card-link,
+.user-attachments .attachment-card {
+  margin-left: auto;
+  text-align: left;
+}
+
+.user-attachments .attachment-card-link {
+  display: block;
+  width: min(340px, 100%);
+}
+
+.user-attachments > .attachment-card {
+  display: flex;
+  width: max-content;
+  max-width: 100%;
+}
+
+.user-attachments .attachment-card-link + .attachment-card-link,
+.user-attachments .attachment-card-link + .attachment-card,
+.user-attachments .attachment-card + .attachment-card-link,
+.user-attachments .attachment-card + .attachment-card {
+  margin-top: 8px;
 }
 
 .attachment-thumb {
   width: 100%;
-  max-height: 260px;
+  max-height: 320px;
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid #dbeafe;
@@ -1440,7 +1497,7 @@ a {
 .attachment-thumb img {
   width: 100%;
   height: auto;
-  max-height: 260px;
+  max-height: 320px;
   object-fit: contain;
   display: block;
 }

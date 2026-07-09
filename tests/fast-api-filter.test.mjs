@@ -140,6 +140,104 @@ test("Fast API parser emits image asset pointers as markdown images", async () =
   assert.equal(messages[0].fileCount, 0);
 });
 
+test("Fast API parser keeps sediment image pointers for embedding", async () => {
+  const fast = await loadFastCaptureModule();
+  const data = {
+    current_node: "prompt",
+    mapping: {
+      root: { id: "root", parent: "", message: null },
+      prompt: {
+        id: "prompt",
+        parent: "root",
+        message: makeMessage("user", "", {
+          contentType: "multimodal_text",
+          parts: [
+            {
+              asset_pointer: "sediment://file_00000000c1e071fa9d934c60d95d7f69",
+              content_type: "image/jpeg"
+            },
+            "What can you see?"
+          ]
+        })
+      }
+    }
+  };
+
+  const messages = fast.buildMessagesFromConversationApi(data);
+
+  assert.equal(messages.length, 1);
+  assert.match(messages[0].markdown, /!\[Image]\(sediment:\/\/file_00000000c1e071fa9d934c60d95d7f69\)/);
+  assert.equal(messages[0].imageCount, 1);
+});
+
+test("Fast API parser cleans citation control markers", async () => {
+  const fast = await loadFastCaptureModule();
+  const data = {
+    current_node: "answer",
+    mapping: {
+      root: { id: "root", parent: "", message: null },
+      answer: {
+        id: "answer",
+        parent: "root",
+        message: makeMessage("assistant", "This supports images. \uE200cite\uE202turn0search21\uE202turn0search2\uE201", {
+          end_turn: true,
+          recipient: "all"
+        })
+      }
+    }
+  };
+
+  const messages = fast.buildMessagesFromConversationApi(data);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].markdown, "This supports images.");
+});
+
+test("Fast API parser merges non-final assistant thinking into final answers", async () => {
+  const fast = await loadFastCaptureModule();
+  const events = [];
+  const data = {
+    current_node: "answer",
+    mapping: {
+      root: { id: "root", parent: "", message: null },
+      prompt: {
+        id: "prompt",
+        parent: "root",
+        message: makeMessage("user", "Please analyze this.")
+      },
+      thinking: {
+        id: "thinking",
+        parent: "prompt",
+        message: makeMessage("assistant", "Checking the uploaded file and comparing the visible details.", {
+          end_turn: false,
+          channel: "analysis"
+        })
+      },
+      answer: {
+        id: "answer",
+        parent: "thinking",
+        message: makeMessage("assistant", "The file looks relevant.", {
+          end_turn: true,
+          recipient: "all"
+        })
+      }
+    }
+  };
+
+  const messages = fast.buildMessagesFromConversationApi(data, {
+    event(name, payload) {
+      events.push({ name, payload });
+    }
+  });
+
+  assert.equal(messages.length, 2);
+  assert.equal(messages[1].markdown, "The file looks relevant.");
+  assert.equal(messages[1].thinkingMarkdown, "Checking the uploaded file and comparing the visible details.");
+  assert.deepEqual(JSON.parse(JSON.stringify(events.find((event) => event.name === "fastCapture.thinkingMerged")?.payload)), {
+    applied: 1
+  });
+});
+
 async function loadFastCaptureModule() {
   const source = await readFile(path.join(repoRoot, "src", "content", "capture-fast.js"), "utf8");
   const context = vm.createContext({

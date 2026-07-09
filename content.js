@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.4";
+  const EXPORTER_VERSION = "0.7.7";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -40,6 +40,7 @@
   const CONVERSATION_API_FETCH_TIMEOUT_MS = 15_000;
   const CONVERSATION_API_ATTEMPT_TIMEOUT_MS = 4500;
   const THINKING_FLYOUT_AUTO_OPEN_LIMIT = 48;
+  const FAST_THINKING_FLYOUT_AUTO_OPEN_LIMIT = 0;
   const THINKING_FLYOUT_OPEN_TIMEOUT_MS = 1400;
   const DEBUG_EVENT_LIMIT = 500;
   const DETAILED_DEBUG_LOG = false;
@@ -322,6 +323,13 @@
         const messages = await collectFastConversationMessages(debugLog);
 
         if (messages.length) {
+          onProgress("Checking visible thinking details...");
+          await enrichVisibleThinkingFlyouts(messages, debugLog, {
+            autoOpenLimit: FAST_THINKING_FLYOUT_AUTO_OPEN_LIMIT,
+            allowGlobalFallback: false,
+            requireMountedRoot: true
+          });
+          debugLog.mark("enrichedFastThinkingFlyouts");
           debugLog.finish(messages);
           onProgress(`Found ${messages.length} messages with Fast capture.`);
           return {
@@ -611,7 +619,10 @@
         concurrency: ADVANCED_PDF_IMAGE_EMBED_CONCURRENCY,
         limit: ADVANCED_PDF_IMAGE_EMBED_LIMIT
       });
-      await embedImagesForPortableMessages(portableMessages, assetStats);
+      await embedImagesForPortableMessages(portableMessages, assetStats, {
+        captureMode,
+        debugLog: options.debugLog
+      });
       options.debugLog?.event?.("assetEmbed.done", {
         captureMode,
         imageReferenceCount,
@@ -787,7 +798,16 @@
     };
   }
 
-  async function embedImagesForPortableMessages(messages, stats) {
+  async function embedImagesForPortableMessages(messages, stats, options = {}) {
+    const domFallbackStats = await embedInternalAssetImagesFromMountedDom(messages, stats);
+
+    if (domFallbackStats.attempted || domFallbackStats.embedded || domFallbackStats.failed) {
+      options.debugLog?.event?.("assetEmbed.domFallback", {
+        captureMode: options.captureMode || "",
+        ...domFallbackStats
+      });
+    }
+
     const plan = collectImageEmbeddingPlan(messages, ADVANCED_PDF_IMAGE_EMBED_LIMIT);
     stats.imagesSkipped += plan.skipped;
 
@@ -795,12 +815,124 @@
       return;
     }
 
-    const embeddedImagesByUrl = await fetchImageDataUrisForEmbedding(plan.urls, stats);
+    const embeddedImagesByUrl = await fetchImageDataUrisForEmbedding(plan.urls, stats, options);
 
     for (const message of messages) {
       message.markdown = replaceEmbeddedMarkdownImages(message.markdown, embeddedImagesByUrl);
       message.thinkingMarkdown = replaceEmbeddedMarkdownImages(message.thinkingMarkdown, embeddedImagesByUrl);
     }
+  }
+
+  async function embedInternalAssetImagesFromMountedDom(messages, stats) {
+    const result = {
+      attempted: 0,
+      embedded: 0,
+      failed: 0,
+      missingNode: 0,
+      missingDomImage: 0
+    };
+
+    for (const message of messages) {
+      const refs = [
+        ...extractInternalAssetMarkdownImageRefs(message.markdown, "markdown"),
+        ...extractInternalAssetMarkdownImageRefs(message.thinkingMarkdown, "thinkingMarkdown")
+      ];
+
+      if (!refs.length) {
+        continue;
+      }
+
+      result.attempted += refs.length;
+      const node = resolveMountedMessageNodeForPortableMessage(message);
+
+      if (!node) {
+        result.missingNode += refs.length;
+        continue;
+      }
+
+      const candidates = getCandidateDomImagesForEmbedding(node);
+
+      if (!candidates.length) {
+        result.missingDomImage += refs.length;
+        continue;
+      }
+
+      const replacements = new Map();
+
+      for (let index = 0; index < refs.length; index += 1) {
+        const ref = refs[index];
+        const candidate = candidates[index] || candidates[candidates.length - 1];
+
+        try {
+          const dataUri = await imageToDataUri(candidate.image, candidate.src);
+          replacements.set(ref.url, dataUri);
+          result.embedded += 1;
+          stats.imagesEmbedded += 1;
+        } catch (_) {
+          result.failed += 1;
+        }
+      }
+
+      if (replacements.size) {
+        message.markdown = replaceEmbeddedMarkdownImages(message.markdown, replacements);
+        message.thinkingMarkdown = replaceEmbeddedMarkdownImages(message.thinkingMarkdown, replacements);
+      }
+    }
+
+    return result;
+  }
+
+  function extractInternalAssetMarkdownImageRefs(markdown, field) {
+    return extractEmbeddableMarkdownImageUrls(markdown)
+      .filter(isInternalAssetImageUrl)
+      .map((url) => ({ field, url }));
+  }
+
+  function resolveMountedMessageNodeForPortableMessage(message) {
+    const candidates = [
+      message?.sourceMessageId
+        ? document.querySelector(`[data-message-id="${cssString(message.sourceMessageId)}"]`)
+        : null,
+      message?.sourceTurnId
+        ? document.querySelector(`[data-turn-id="${cssString(message.sourceTurnId)}"]`)
+        : null,
+      message?.sourceTurnContainer
+        ? document.querySelector(`[data-turn-id-container="${cssString(message.sourceTurnContainer)}"], [data-turn-container="${cssString(message.sourceTurnContainer)}"]`)
+        : null,
+      findTurnNodeByConversationOrder(message?.order ?? message?.turnNumber)
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      const turn = candidate.closest?.("[data-turn-id], [data-turn-container], [data-turn-id-container], [data-testid^='conversation-turn-'], [data-testid*='conversation-turn']");
+      if (turn) {
+        return turn;
+      }
+
+      return candidate;
+    }
+
+    return null;
+  }
+
+  function getCandidateDomImagesForEmbedding(root) {
+    return Array.from(root.querySelectorAll?.("img") || [])
+      .map((image) => ({
+        image,
+        src: image.currentSrc || image.src || image.getAttribute("src") || "",
+        width: getMediaWidth(image),
+        height: getMediaHeight(image)
+      }))
+      .filter((candidate) => {
+        if (!candidate.src || isLikelyDecorativeImage(candidate.image)) {
+          return false;
+        }
+
+        if (/google\.com\/s2\/favicons|favicon|avatar|openai/i.test(candidate.src)) {
+          return false;
+        }
+
+        return Math.max(candidate.width || 0, candidate.height || 0) >= 72;
+      });
   }
 
   function collectImageEmbeddingPlan(messages, limit) {
@@ -847,8 +979,9 @@
     return urls;
   }
 
-  async function fetchImageDataUrisForEmbedding(urls, stats) {
+  async function fetchImageDataUrisForEmbedding(urls, stats, options = {}) {
     const embeddedImagesByUrl = new Map();
+    const failures = [];
     let cursor = 0;
     const workerCount = Math.min(ADVANCED_PDF_IMAGE_EMBED_CONCURRENCY, urls.length);
 
@@ -861,14 +994,39 @@
           const dataUri = await imageToDataUriFromSrc(url);
           embeddedImagesByUrl.set(url, dataUri);
           stats.imagesEmbedded += 1;
-        } catch (_) {
+        } catch (error) {
           stats.imagesFailed += 1;
+          if (failures.length < 12) {
+            failures.push({
+              url: summarizeImageUrlForDebug(url),
+              error: error?.message || String(error)
+            });
+          }
         }
       }
     }
 
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+    if (failures.length) {
+      options.debugLog?.event?.("assetEmbed.fetchFailures", {
+        captureMode: options.captureMode || "",
+        failureCount: stats.imagesFailed,
+        samples: failures
+      });
+    }
+
     return embeddedImagesByUrl;
+  }
+
+  function summarizeImageUrlForDebug(url) {
+    const value = String(url || "");
+
+    if (/^data:/i.test(value)) {
+      return `${value.slice(0, 40)}...`;
+    }
+
+    return value.length > 240 ? `${value.slice(0, 220)}...` : value;
   }
 
   function replaceEmbeddedMarkdownImages(markdown, embeddedImagesByUrl) {
@@ -881,7 +1039,11 @@
   }
 
   function isEmbeddableImageUrl(url) {
-    return /^https?:\/\//i.test(url) || /^file-service:\/\//i.test(url);
+    return /^https?:\/\//i.test(url) || isInternalAssetImageUrl(url);
+  }
+
+  function isInternalAssetImageUrl(url) {
+    return /^(?:file-service|sediment):\/\//i.test(String(url || ""));
   }
 
   function countPortableMarkdownImages(messages) {
@@ -1273,6 +1435,8 @@
       order: message?.order ?? index,
       conversationOrder: message?.order ?? index,
       originalOrder: message?.originalOrder ?? message?.order ?? index,
+      sourceTurnId: message?.sourceTurnId || "",
+      sourceTurnContainer: message?.sourceTurnContainer || "",
       sourceMessageId: message?.sourceMessageId || "",
       timestamp: message?.timestamp || "",
       preview: message?.preview || "",
@@ -4359,6 +4523,10 @@
     const pathNodes = getConversationApiCurrentPath(data);
     const messages = [];
     const filterStats = {};
+    let pendingAssistantThinking = [];
+    let pendingThinkingApplied = 0;
+    let directThinkingMessageCount = 0;
+    let skippedThinkingCandidateCount = 0;
 
     for (const node of pathNodes) {
       const message = node?.message;
@@ -4366,18 +4534,35 @@
 
       const structuralSkipReason = getApiMessageStructuralSkipReason(message, role);
       if (structuralSkipReason) {
+        const skippedThinking = extractSkippedApiThinkingMarkdown(message, role, structuralSkipReason);
+        if (skippedThinking) {
+          pendingAssistantThinking.push(skippedThinking);
+          skippedThinkingCandidateCount += 1;
+        }
         incrementReasonCount(filterStats, structuralSkipReason);
         continue;
       }
 
-      const markdown = cleanMarkdown([
+      const directThinkingMarkdown = role === "assistant" ? extractApiThinkingMarkdown(message) : "";
+      if (directThinkingMarkdown) {
+        directThinkingMessageCount += 1;
+      }
+
+      const markdown = cleanApiMarkdown([
         extractApiContentMarkdown(message.content),
         extractApiAttachmentMarkdown(message)
       ].filter(Boolean).join("\n\n"));
-      const thinkingMarkdown = cleanMarkdown(extractApiThinkingMarkdown(message));
+      const thinkingMarkdown = cleanApiMarkdown([
+        role === "assistant" ? pendingAssistantThinking.join("\n\n") : "",
+        directThinkingMarkdown
+      ].filter(Boolean).join("\n\n"));
 
       if (!markdown && !thinkingMarkdown) {
         continue;
+      }
+
+      if (role === "user" && pendingAssistantThinking.length) {
+        pendingAssistantThinking = [];
       }
 
       const contentSkipReason = getApiMessageContentSkipReason(message, role, markdown);
@@ -4388,6 +4573,11 @@
 
       const turnNumber = messages.length + 1;
       const id = message.id || node.id || `api-message-${turnNumber}`;
+
+      if (role === "assistant" && pendingAssistantThinking.length) {
+        pendingThinkingApplied += 1;
+        pendingAssistantThinking = [];
+      }
 
       messages.push({
         id,
@@ -4424,6 +4614,20 @@
     if (Object.keys(filterStats).length) {
       debugLog?.event("fastCapture.filteredSummary", {
         filtered: filterStats
+      });
+    }
+
+    if (pendingThinkingApplied) {
+      debugLog?.event("fastCapture.thinkingMerged", {
+        applied: pendingThinkingApplied
+      });
+    }
+
+    if (directThinkingMessageCount || skippedThinkingCandidateCount || pendingThinkingApplied) {
+      debugLog?.event("fastCapture.thinkingSummary", {
+        directMetadataMessages: directThinkingMessageCount,
+        skippedThinkingCandidates: skippedThinkingCandidateCount,
+        mergedIntoFinalAssistant: pendingThinkingApplied
       });
     }
 
@@ -4546,6 +4750,37 @@
       || /^\{\s*"queries"\s*:/i.test(text);
   }
 
+  function extractSkippedApiThinkingMarkdown(message, role, skipReason) {
+    if (role !== "assistant" || !isPotentialApiThinkingSkipReason(skipReason)) {
+      return "";
+    }
+
+    const explicitThinking = cleanApiMarkdown(extractApiThinkingMarkdown(message));
+    if (explicitThinking) {
+      return explicitThinking;
+    }
+
+    const markdown = cleanApiMarkdown(extractApiContentMarkdown(message?.content));
+    if (!markdown || looksLikeInternalApiToolCall(markdown) || looksLikeApiJsonPayload(markdown)) {
+      return "";
+    }
+
+    return markdown;
+  }
+
+  function isPotentialApiThinkingSkipReason(reason) {
+    return reason === "assistant-not-final"
+      || reason === "channel:analysis"
+      || reason === "channel:reasoning"
+      || reason === "content-type:thoughts"
+      || reason === "content-type:reasoning";
+  }
+
+  function looksLikeApiJsonPayload(markdown) {
+    const text = String(markdown || "").trim();
+    return /^[{[]/.test(text) && /["'}\]]$/.test(text);
+  }
+
   function incrementReasonCount(stats, reason) {
     if (!isReportableApiSkipReason(reason)) {
       return;
@@ -4635,6 +4870,17 @@
     }
 
     return "";
+  }
+
+  function cleanApiMarkdown(value) {
+    return cleanMarkdown(removeApiPrivateUseArtifacts(value));
+  }
+
+  function removeApiPrivateUseArtifacts(value) {
+    return String(value || "")
+      .replace(/[\uE000-\uF8FF]*cite(?:[\uE000-\uF8FF]+turn[0-9A-Za-z_-]+)+[\uE000-\uF8FF]*/gi, "")
+      .replace(/[\uE000-\uF8FF]+/g, "")
+      .replace(/[ \t]+\n/g, "\n");
   }
 
   function extractApiContentMarkdown(content) {
@@ -5176,7 +5422,7 @@
     return String(value).padStart(2, "0");
   }
 
-  async function enrichVisibleThinkingFlyouts(messages, debugLog = null) {
+  async function enrichVisibleThinkingFlyouts(messages, debugLog = null, options = {}) {
     const snapshots = getVisibleThinkingFlyoutSnapshots();
     let applied = 0;
 
@@ -5190,7 +5436,7 @@
       applied += applyThinkingFlyoutSnapshot(snapshot, messages) ? 1 : 0;
     }
 
-    const opened = await enrichThinkingFlyoutsByOpeningTriggers(messages, debugLog);
+    const opened = await enrichThinkingFlyoutsByOpeningTriggers(messages, debugLog, options);
 
     debugLog?.event("thinkingFlyout.enriched", {
       available: snapshots.length,
@@ -5200,23 +5446,27 @@
     });
   }
 
-  async function enrichThinkingFlyoutsByOpeningTriggers(messages, debugLog = null) {
-    const assistantMessages = messages.filter((message) => message.role === "assistant" && isThinThinkingMarkdown(message.thinkingMarkdown));
+  async function enrichThinkingFlyoutsByOpeningTriggers(messages, debugLog = null, options = {}) {
+    const limit = Number.isFinite(options.autoOpenLimit) ? options.autoOpenLimit : THINKING_FLYOUT_AUTO_OPEN_LIMIT;
+    const assistantMessages = messages
+      .filter((message) => message.role === "assistant" && isThinThinkingMarkdown(message.thinkingMarkdown))
+      .filter((message) => !options.requireMountedRoot || hasMountedThinkingSearchRoot(message));
     let attempted = 0;
     let applied = 0;
 
     debugLog?.event("thinkingFlyout.autoStart", {
       assistantMessages: messages.filter((message) => message.role === "assistant").length,
       thinThinkingMessages: assistantMessages.length,
-      limit: THINKING_FLYOUT_AUTO_OPEN_LIMIT
+      limit,
+      requireMountedRoot: Boolean(options.requireMountedRoot)
     });
 
     for (const message of assistantMessages) {
-      if (attempted >= THINKING_FLYOUT_AUTO_OPEN_LIMIT) {
+      if (attempted >= limit) {
         break;
       }
 
-      const triggerResult = await findMountedThinkingTriggerForMessage(message);
+      const triggerResult = await findMountedThinkingTriggerForMessage(message, options);
       const trigger = triggerResult.trigger;
 
       if (!trigger) {
@@ -5267,7 +5517,17 @@
     };
   }
 
-  async function findMountedThinkingTriggerForMessage(message) {
+  function hasMountedThinkingSearchRoot(message) {
+    return Boolean(
+      message.sourceNode?.isConnected
+      || (message.sourceTurnId && document.querySelector(`[data-turn-id="${cssString(message.sourceTurnId)}"]`))
+      || (message.sourceTurnContainer && document.querySelector(`[data-turn-id-container="${cssString(message.sourceTurnContainer)}"], [data-turn-container="${cssString(message.sourceTurnContainer)}"]`))
+      || (message.sourceMessageId && document.querySelector(`[data-message-id="${cssString(message.sourceMessageId)}"]`))
+      || findTurnNodeByConversationOrder(message.order)
+    );
+  }
+
+  async function findMountedThinkingTriggerForMessage(message, options = {}) {
     const candidates = [
       message.sourceNode,
       message.sourceNode?.closest?.("[data-turn-id-container], [data-turn-container], [data-turn-id], [data-testid*='conversation-turn']"),
@@ -5322,6 +5582,14 @@
           candidates: diagnostics
         };
       }
+    }
+
+    if (options.allowGlobalFallback === false) {
+      return {
+        trigger: null,
+        reason: "no thinking trigger inside mounted source nodes",
+        candidates: diagnostics
+      };
     }
 
     const globalResult = await findGlobalThinkingTriggerForMessage(message);

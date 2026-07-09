@@ -14,6 +14,7 @@ test("content script is generated from modular Fast and Full sources", async () 
   const fullModule = await readFile(path.join(repoRoot, "src", "content", "capture-full.js"), "utf8");
   const background = await readFile(path.join(repoRoot, "background.js"), "utf8");
   const backendServer = await readFile(path.join(repoRoot, "tools", "advanced-pdf", "server.js"), "utf8");
+  const backendRender = await readFile(path.join(repoRoot, "tools", "advanced-pdf", "render.js"), "utf8");
   const popupHtml = await readFile(path.join(repoRoot, "popup.html"), "utf8");
   const popupJs = await readFile(path.join(repoRoot, "popup.js"), "utf8");
 
@@ -28,17 +29,28 @@ test("content script is generated from modular Fast and Full sources", async () 
   assert.match(generated, /Switch to Full mode if you want to scan the page/);
   assert.doesNotMatch(generated, /falling back to Full scan/);
   assert.match(generated, /assetEmbed\.start/);
+  assert.match(generated, /assetEmbed\.domFallback/);
+  assert.match(generated, /resolveMountedMessageNodeForPortableMessage/);
+  assert.match(generated, /sediment/);
   assert.match(generated, /ADVANCED_PDF_IMAGE_EMBED_CONCURRENCY/);
   assert.match(debugModule, /function downloadDebugLog/);
   assert.match(fastModule, /function buildMessagesFromConversationApi/);
   assert.match(fastModule, /function getApiMessageStructuralSkipReason/);
   assert.match(fastModule, /asset_pointer/);
+  assert.match(fastModule, /fastCapture\.thinkingMerged/);
+  assert.match(fastModule, /removeApiPrivateUseArtifacts/);
   assert.match(fullModule, /async function hydrateVirtualizedTurns/);
   assert.match(background, /file-service/);
+  assert.match(background, /sediment/);
   assert.match(background, /\/backend-api\/files\/\$\{encodedId\}\/content/);
+  assert.match(background, /extractImageUrlsFromMetadata/);
   assert.match(backendServer, /captureMode: payload\.captureMode \|\| ""/);
   assert.match(backendServer, /X-Bundle-Timings/);
   assert.match(backendServer, /message\.counts\?\.images/);
+  assert.match(backendRender, /margin: 44px 34px/);
+  assert.match(backendRender, /assistant-title/);
+  assert.match(backendRender, /stripAttachmentOnlyLines/);
+  assert.match(backendRender, /shouldShowCodeLabel/);
   assert.doesNotMatch(popupHtml, /portInput|cacheDirInput|browserPathInput|saveSettingsButton|resetSettingsButton/);
   assert.doesNotMatch(popupJs, /portInput|cacheDirInput|browserPathInput|saveSettingsButton|resetSettingsButton/);
   assert.doesNotMatch(popupJs, /--port|--cache-dir|--browser-path/);

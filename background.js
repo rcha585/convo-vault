@@ -25,10 +25,11 @@ async function fetchImageAsDataUri(src, pageUrl) {
 
   const candidates = buildImageFetchCandidates(src, pageUrl);
   const errors = [];
+  const seen = new Set();
 
   for (const candidate of candidates) {
     try {
-      return await fetchImageCandidateAsDataUri(candidate, pageUrl);
+      return await fetchImageCandidateAsDataUri(candidate, pageUrl, seen);
     } catch (error) {
       errors.push(`${candidate.label}: ${error.message || error}`);
     }
@@ -37,9 +38,21 @@ async function fetchImageAsDataUri(src, pageUrl) {
   throw new Error(`Image fetch failed. ${errors.slice(0, 4).join("; ")}`);
 }
 
-async function fetchImageCandidateAsDataUri(candidate, pageUrl) {
+async function fetchImageCandidateAsDataUri(candidate, pageUrl, seen = new Set()) {
+  if (!candidate?.url || seen.has(candidate.url)) {
+    throw new Error("duplicate or missing candidate URL");
+  }
+
+  if (/^data:image\//i.test(candidate.url)) {
+    return candidate.url;
+  }
+
+  seen.add(candidate.url);
+
   const headers = {
-    accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+    accept: candidate.kind === "metadata"
+      ? "application/json,*/*;q=0.8"
+      : "image/avif,image/webp,image/apng,image/svg+xml,image/*,application/json,*/*;q=0.8"
   };
   const origin = getUrlOrigin(candidate.url);
 
@@ -64,6 +77,24 @@ async function fetchImageCandidateAsDataUri(candidate, pageUrl) {
 
   const contentType = response.headers.get("content-type") || "";
 
+  if (/json/i.test(contentType)) {
+    const metadata = await response.json();
+    const nestedCandidates = extractImageUrlsFromMetadata(metadata)
+      .flatMap((url) => buildImageFetchCandidates(url, pageUrl))
+      .filter((next) => next.url && !seen.has(next.url));
+    const nestedErrors = [];
+
+    for (const nextCandidate of nestedCandidates) {
+      try {
+        return await fetchImageCandidateAsDataUri(nextCandidate, pageUrl, seen);
+      } catch (error) {
+        nestedErrors.push(`${nextCandidate.label}: ${error.message || error}`);
+      }
+    }
+
+    throw new Error(`metadata did not resolve to image${nestedErrors.length ? ` (${nestedErrors.slice(0, 3).join("; ")})` : ""}`);
+  }
+
   if (contentType && !/^image\//i.test(contentType) && !/octet-stream/i.test(contentType)) {
     throw new Error(`unexpected content-type ${contentType}`);
   }
@@ -77,36 +108,100 @@ async function fetchImageCandidateAsDataUri(candidate, pageUrl) {
 function buildImageFetchCandidates(src, pageUrl) {
   const value = String(src || "").trim();
 
+  if (/^data:image\//i.test(value)) {
+    return [{ label: "direct:data", url: value }];
+  }
+
   if (/^https?:\/\//i.test(value)) {
     return [{ label: "direct", url: value }];
   }
 
-  const fileId = getFileServiceId(value);
+  const origin = getTrustedChatGptOrigin(pageUrl) || "https://chatgpt.com";
 
-  if (!fileId) {
+  if (/^\//.test(value)) {
+    return [{ label: "relative", url: new URL(value, origin).href }];
+  }
+
+  const pointer = getInternalAssetPointer(value);
+
+  if (!pointer.fileId) {
     return [{ label: "direct", url: value }];
   }
 
-  const origin = getTrustedChatGptOrigin(pageUrl) || "https://chatgpt.com";
-  const encodedId = encodeURIComponent(fileId);
+  const encodedId = encodeURIComponent(pointer.fileId);
+  const labelPrefix = pointer.scheme || "asset";
   const paths = [
     `/backend-api/files/${encodedId}/content`,
     `/backend-api/files/${encodedId}/download`,
+    `/backend-api/files/${encodedId}/image`,
+    `/backend-api/files/${encodedId}/thumbnail`,
     `/backend-api/files/${encodedId}`,
+    `/backend-api/files/${encodedId}?download=1`,
     `/backend-api/estuary/content?id=${encodedId}&p=fs`,
-    `/backend-api/estuary/content?id=${encodedId}&p=fs&v=0`
+    `/backend-api/estuary/content?id=${encodedId}&p=fs&v=0`,
+    `/backend-api/sediment/files/${encodedId}/content`,
+    `/backend-api/sediment/files/${encodedId}/download`,
+    `/backend-api/sediment/files/${encodedId}`
   ];
 
   return paths.map((path, index) => ({
-    label: `file-service:${index + 1}`,
-    url: new URL(path, origin).href
+    label: `${labelPrefix}:${index + 1}`,
+    url: new URL(path, origin).href,
+    kind: isMetadataAssetPath(path, encodedId) ? "metadata" : "image"
   }));
 }
 
-function getFileServiceId(value) {
+function isMetadataAssetPath(path, encodedId) {
+  return path.endsWith(`/${encodedId}`) && !/(?:content|download|image|thumbnail|\?)/i.test(path);
+}
+
+function getInternalAssetPointer(value) {
   const text = String(value || "").trim();
-  const match = text.match(/^file-service:\/\/([^/?#]+)/i);
-  return match?.[1] || "";
+  const match = text.match(/^(file-service|sediment):\/\/([^/?#]+)/i);
+  return {
+    scheme: match?.[1] || "",
+    fileId: match?.[2] || ""
+  };
+}
+
+function extractImageUrlsFromMetadata(metadata) {
+  const urls = [];
+  const seen = new Set();
+  const preferredKey = /(?:url|href|uri|download|content|image|thumbnail|preview|signed|asset)/i;
+
+  function visit(value, key = "", depth = 0) {
+    if (depth > 5 || value == null) {
+      return;
+    }
+
+    if (typeof value === "string") {
+      const text = value.trim();
+      if (
+        text
+        && preferredKey.test(key)
+        && /^(?:https?:\/\/|\/|file-service:\/\/|sediment:\/\/|data:image\/)/i.test(text)
+        && !seen.has(text)
+      ) {
+        seen.add(text);
+        urls.push(text);
+      }
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, key, depth + 1));
+      return;
+    }
+
+    if (typeof value === "object") {
+      Object.entries(value).forEach(([childKey, childValue]) => {
+        visit(childValue, childKey, depth + 1);
+      });
+    }
+  }
+
+  visit(metadata);
+  return urls;
 }
 
 async function getChatGptAccessToken(origin) {

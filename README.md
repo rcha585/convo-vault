@@ -1,236 +1,135 @@
 # Convo Vault
 
-如果在 ChatGPT 里遇到一段值得长期保存的对话，怎么办？
-如果担心把对话交给陌生云端工具会泄露隐私，怎么办？
-如果长对话、代码块、表格、附件线索和思考过程只靠手动复制太痛苦，怎么办？
+Convo Vault is a local-first Chrome extension for exporting ChatGPT conversations into a portable archive. It captures the current conversation, renders readable Markdown and PDF, and keeps the useful structured data beside them for later search, notes, Obsidian, or RAG workflows.
 
-现在你有了 **Convo Vault**。
+Convo Vault 是一个本地优先的 Chrome 扩展，用来把 ChatGPT 对话导出成可以长期保存的本地档案。它会抓取当前对话，生成可读的 Markdown 和 PDF，并把结构化数据一起打包，方便之后检索、整理笔记、放进 Obsidian，或继续接入 RAG 流程。
 
-Convo Vault 是一个本地优先的 Chrome 扩展，专注于把当前 ChatGPT
-对话导出成可以长期保存、检索和二次处理的本地档案。捕获、整理、渲染和打包都在你自己的机器上完成：
-对话内容不需要上传到第三方服务，也不需要交给陌生的在线转换器。
-
-这个工具的目标很简单：让重要对话从浏览器里的临时页面，变成你真正拥有的 Markdown、PDF、JSONL
-和结构化数据包。它适合做个人知识库、项目记录、研究材料、代码问答归档，以及未来接入
-Obsidian 或 RAG 流程的本地资料源。
-
-当前版本 `0.7.4` 已经有两种捕获模式，并统一导出为一个便携的 `.zip` 包。本版继续增强 Fast 的 API-first 读取路径：会读取当前 ChatGPT session token，探测多个 conversation API 形态，并过滤 ChatGPT API 中隐藏的搜索、代码执行和工具调用节点。
-
-- `Fast` - 通过当前已登录的 ChatGPT 页面读取对话 JSON，把当前活跃分支快速转换成
-  Convo Vault 的本地导出结构。它速度更快，适合日常保存。
-- `Full` - 使用更细致的 DOM 扫描流程，包含滚动遍历、虚拟化内容加载和缺失消息恢复。
-  它更慢，但在页面里有 API 没暴露的细节时会更忠实。
-
-每次导出都会下载一个 `.zip` bundle，里面包含 Markdown、PDF、payload JSON、JSONL
-messages、QA pairs、topic/entity sidecars 和 summary 文件。
+Current version: `0.7.7`
 
 ## Status
 
-Convo Vault 现在处在早期正式使用阶段：已经能支撑真实的本地工作流，同时仍然诚实地面对那些还在快速变化的部分。
-它优先照顾隐私、透明度和可调试性，而不是急着做成一个商店级的漂亮外壳。
+Convo Vault is now an early alpha / usable MVP. The main local export flow works, Fast and Full capture modes are available, CI is in place, and real conversation bundles can be produced. It is not yet a polished public-store product: ChatGPT page/API changes, extension permissions, media edge cases, and packaging still need continued hardening.
 
-它目前专注于：
+Convo Vault 现在处在早期正式可用的 MVP 阶段。核心本地导出流程已经跑通，Fast 和 Full 两种捕获模式都可用，CI 已经搭好，也能生成真实可用的对话 bundle。它还不是商店级稳定产品：ChatGPT 页面/API 变化、扩展权限、媒体边界情况和发布打包还需要继续打磨。
 
-- 可靠捕获长对话，
-- 渲染真正可复制、可搜索文本的 PDF，
-- 生成适合长期保存的 Markdown 档案，
-- 为未来的 Obsidian / RAG 工作流准备结构化 sidecar 数据。
+## What It Exports
 
-目前已知取舍：
+Each export downloads a `.zip` bundle with:
 
-- ChatGPT 的内部网页 API 和 DOM 结构可能随时变化。
-- `Fast` 模式依赖当前已经登录的 ChatGPT 页面。
-- `Full` 模式在超长或高度虚拟化的对话中仍然可能比较慢。
-- 图片和附件仍是 best-effort 支持。
-- 扩展目前还会为了 PDF 预览请求较宽的图片抓取权限；后续会继续把这部分能力迁移到本地后端里。
+- Markdown
+- PDF
+- payload JSON
+- JSONL messages
+- asset manifest
+- QA/topic/entity/summary sidecars
 
-## Files
+每次导出会下载一个 `.zip` 包，里面通常包含：
 
-- `manifest.json` - MV3 extension manifest.
-- `popup.html`, `popup.css`, `popup.js` - popup, local backend settings, health
-  checks, and startup-command generation.
-- `src/content/` - modular source for ChatGPT page access, Fast/Full capture,
-  message selector, and bundle download handoff.
-- `src/content/debug-log.js` - page-side capture diagnostics used by the optional
-  debug download.
-- `content.js` - generated MV3 content script built from `src/content/`.
-- `background.js` - image-fetch helper used by PDF export.
-- `tools/advanced-pdf/` - local renderer service and PDF/data pipeline.
-- `scripts/` - cross-platform Node helpers plus PowerShell compatibility wrappers.
+- Markdown
+- PDF
+- payload JSON
+- JSONL messages
+- 资源清单
+- QA、topic、entity、summary 等 sidecar 文件
 
-## Build The Extension Package
+## Capture Modes
 
-Build a small extension-only folder and zip:
+`Fast` reads the current ChatGPT conversation through the logged-in page session and conversation API. It is the preferred daily mode: quicker, cleaner, and good for most exports.
 
-```bash
-npm run build:extension
-```
+`Full` scans the visible ChatGPT page DOM more deeply. It is slower, but can recover details that the API does not expose, especially some Thinking/flyout content.
 
-This creates:
+`Fast` 会通过当前已登录的 ChatGPT 页面 session 和 conversation API 读取对话。它是日常优先模式：更快、更干净，适合大多数导出。
 
-- `dist\convo-vault-extension\` - load this folder with Chrome's **Load unpacked**.
-- `dist\convo-vault-extension.zip` - archive/share this file, then unzip before
-  loading as an unpacked extension.
+`Full` 会更深入地扫描 ChatGPT 页面 DOM。它更慢，但有机会补到 API 没暴露的细节，尤其是部分 Thinking/flyout 内容。
 
-Chrome development mode cannot load a zip directly with **Load unpacked**. The
-zip is for distribution or backup; the unpacked folder is the convenient local
-install target.
+## Quick Start
 
-## Load In Chrome
-
-1. Open Chrome and go to `chrome://extensions`.
-2. Turn on **Developer mode**.
-3. Click **Load unpacked**.
-4. Select `dist\convo-vault-extension\`.
-5. Open a conversation on `https://chatgpt.com` or `https://chat.openai.com`.
-6. Click the extension icon.
-7. Set the backend folder and copy the start command.
-8. Start the local backend in your terminal.
-9. Click **Open Selector**, choose `Fast` or `Full`, adjust message selection, then
-   export the bundle.
-
-## First-Time Local Setup
-
-Install the local renderer dependencies once:
+1. Clone this repo.
+2. Install backend dependencies:
 
 ```bash
 cd tools/advanced-pdf
 pnpm install
 ```
 
-From the repository root, the shared project commands are:
+3. Go back to the repo root and build the extension:
 
 ```bash
-npm run check
-npm test
+cd ../..
 npm run build:extension
-npm run backend
 ```
 
-The popup stores the backend folder in `chrome.storage.local`:
+4. Open Chrome, go to `chrome://extensions`, enable Developer mode, click **Load unpacked**, and select:
 
-- backend folder - the repository folder containing `scripts/`.
+```text
+dist/convo-vault-extension
+```
 
-The extension cannot directly launch a local process by itself. The popup
-generates a start command for the current operating system from the saved
-settings. The command uses the folder where you cloned this repository as the
-backend root.
-
-You can also start the backend from the repository root:
+5. Start the local backend from the repo root:
 
 ```bash
 npm run backend
 ```
 
-Start it hidden in the background:
+6. Open a ChatGPT conversation, click the Convo Vault extension icon, choose `Fast` or `Full`, select messages, and export the bundle.
+
+## 快速开始
+
+1. 克隆这个仓库。
+2. 安装本地后端依赖：
 
 ```bash
-npm run backend:detached
+cd tools/advanced-pdf
+pnpm install
 ```
 
-Check whether it is reachable:
+3. 回到项目根目录并构建扩展：
 
 ```bash
+cd ../..
+npm run build:extension
+```
+
+4. 打开 Chrome，进入 `chrome://extensions`，开启开发者模式，点击 **Load unpacked**，选择：
+
+```text
+dist/convo-vault-extension
+```
+
+5. 在项目根目录启动本地后端：
+
+```bash
+npm run backend
+```
+
+6. 打开一个 ChatGPT 对话，点击 Convo Vault 扩展图标，选择 `Fast` 或 `Full`，选择消息，然后导出 bundle。
+
+## Useful Commands
+
+```bash
+npm run backend
 npm run backend:check
+npm run build:extension
+npm test
+npm run check
 ```
 
-The PowerShell scripts in `scripts/` remain available as Windows compatibility
-wrappers, but the Node scripts are the primary cross-platform entrypoints.
+## Privacy
 
-The backend listens on `http://127.0.0.1:38474` by default.
+The normal export flow runs locally. The extension reads the current ChatGPT page in your browser and sends the captured payload to the local backend on `127.0.0.1` for rendering. No remote PDF service is used.
 
-Runtime data stays under `.convo-vault/` by default. This directory is ignored
-by Git and may contain browser profiles, exports, cached payloads, cached
-assets, and other private local data.
+默认导出流程在本地运行。扩展读取你浏览器里当前打开的 ChatGPT 页面，并把捕获到的数据发送到 `127.0.0.1` 上的本地后端进行渲染，不使用远程 PDF 服务。
 
-## Backend Endpoints
+Runtime data is stored under `.convo-vault/` by default. This folder is ignored by Git.
 
-Stable extension flow:
+运行时数据默认放在 `.convo-vault/`，这个目录不会被 Git 跟踪。
 
-- `GET /health`
-- `POST /shutdown`
-- `POST /render-bundle`
-- `POST /render-markdown`
-- `POST /render-pdf`
-- `POST /render-data`
+## Notes
 
-Experimental backend recapture flow:
+- Fast mode may not include every Thinking detail if ChatGPT does not expose it through the API.
+- Full mode is slower because it interacts with the live page.
+- Generated media and uploaded attachments are best-effort exports and will keep improving.
 
-- `POST /capture-render-pdf`
-- `POST /capture-render-markdown`
-
-The default extension flow captures from the current already signed-in ChatGPT
-tab. The experimental backend recapture flow uses an independent browser profile
-and may require a separate login.
-
-## Bundle Contents
-
-A bundle normally includes:
-
-- `*.md`
-- `*.pdf`
-- `*.payload.json`
-- `*.assets.manifest.json`
-- `*.data.json`
-- `*.conversation.json`
-- `*.messages.jsonl`
-- `*.qa-pairs.json`
-- `*.topics.json`
-- `*.entities.json`
-- `*.summary.md`
-
-If the debug-log checkbox is enabled, the extension downloads a separate
-`*-debug.json` next to the bundle. Both the debug file and bundle sidecars record
-the capture mode used for that export.
-
-## Capture Strategy
-
-`Fast` mode:
-
-1. Reads the conversation id from the current URL.
-2. Reads the current ChatGPT session token from `/api/auth/session` when
-   available.
-3. Probes conversation API variants such as
-   `/backend-api/conversation/{id}?tree_format=true` with Bearer and cookie
-   auth.
-4. Walks the active conversation branch from `current_node`, or accepts a
-   linear messages response if ChatGPT returns one.
-5. Converts user/assistant messages into the shared export schema.
-6. Sends the selected messages to the local backend bundle renderer.
-
-If Fast cannot read the conversation API, it stops with a clear error instead of
-silently falling back to a Full DOM scan.
-
-`Full` mode:
-
-1. Finds ChatGPT turn nodes in the current page.
-2. Walks the real scroll container.
-3. Hydrates virtualized turns by scrolling them into view.
-4. Recovers missing turn numbers when possible.
-5. Serializes mounted DOM content, code blocks, images, files, and Thinking
-   flyouts where visible.
-
-## Testing Checklist
-
-1. Reload the unpacked extension after code changes.
-2. Save popup settings and copy the generated start command.
-3. Start the backend and confirm the popup reports it as running.
-4. Export a short text-only conversation with `Fast`.
-5. Export the same conversation with `Full`.
-6. Confirm the downloaded zip opens and includes Markdown, PDF, and JSONL.
-7. Test a conversation with code blocks and tables.
-8. Test a long conversation and compare Fast vs Full message counts.
-9. Enable debug log and confirm a separate `*-debug.json` downloads.
-
-## Roadmap
-
-- Make `Fast` mode enrich attachments and Thinking content with targeted DOM
-  lookups.
-- Move image fetching fully into the backend to reduce extension permissions.
-- Expand asset fetching beyond data URI images to safe, size-limited remote
-  media and generated-file downloads.
-- Continue splitting `src/content/` into smaller capture, UI, debug, and export
-  modules.
-- Expand fixture-based tests for API parsing, Markdown normalization, data
-  sidecars, and ZIP bundle creation.
-- Add Obsidian vault export and RAG chunking from the canonical data schema.
+- 如果 ChatGPT API 没暴露完整 Thinking，Fast 模式不一定能导出全部思考过程。
+- Full 模式会和真实页面交互，所以速度更慢。
+- 生成图片、上传附件等媒体内容目前是 best-effort 支持，后续会继续增强。
