@@ -1,138 +1,132 @@
 # Convo Vault
 
-Convo Vault is a local-first Chrome extension for exporting ChatGPT conversations into a portable archive. It captures the current conversation, renders readable Markdown and PDF, and keeps the useful structured data beside them for later search, notes, Obsidian, or RAG workflows.
+如果在 ChatGPT 里遇到一段值得长期保存的对话，怎么办？
 
-Convo Vault 是一个本地优先的 Chrome 扩展，用来把 ChatGPT 对话导出成可以长期保存的本地档案。它会抓取当前对话，生成可读的 Markdown 和 PDF，并把结构化数据一起打包，方便之后检索、整理笔记、放进 Obsidian，或继续接入 RAG 流程。
+如果一段长对话里混着代码、表格、图片、文件线索和思考过程，手动复制太痛苦，怎么办？
 
-Current version: `0.7.8`
+如果你不想把私密对话丢给陌生在线转换工具，但又想要漂亮的 Markdown、PDF 和结构化数据，怎么办？
 
-## Status
+现在你有了 **Convo Vault**。
 
-Convo Vault is now an early alpha / usable MVP. The main local export flow works, Fast and Full capture modes are available, CI is in place, and real conversation bundles can be produced. It is not yet a polished public-store product: ChatGPT page/API changes, extension permissions, media edge cases, and packaging still need continued hardening.
+Convo Vault 是一个本地优先的 Chrome 扩展，用来把 ChatGPT 对话导出成可以长期保存、检索和二次处理的本地档案。它会读取你当前打开的 ChatGPT 对话，把选中的消息打包成本地 `.zip`，里面包含可读的 Markdown、PDF，以及适合后续放进 Obsidian、知识库、搜索索引或 RAG 流程的结构化数据。
 
-Convo Vault 现在处在早期正式可用的 MVP 阶段。核心本地导出流程已经跑通，Fast 和 Full 两种捕获模式都可用，CI 已经搭好，也能生成真实可用的对话 bundle。它还不是商店级稳定产品：ChatGPT 页面/API 变化、扩展权限、媒体边界情况和发布打包还需要继续打磨。
+当前版本：`0.7.8`
 
-## What It Exports
+## 怎么使用
 
-Each export downloads a `.zip` bundle with:
+1. 复制仓库链接：
 
-- Markdown
-- PDF
-- payload JSON
-- JSONL messages
-- asset manifest
-- QA/topic/entity/summary sidecars
+```text
+https://github.com/rcha585/convo-vault.git
+```
 
-每次导出会下载一个 `.zip` 包，里面通常包含：
+2. 克隆项目：
 
-- Markdown
-- PDF
-- payload JSON
-- JSONL messages
-- 资源清单
-- QA、topic、entity、summary 等 sidecar 文件
+```bash
+git clone https://github.com/rcha585/convo-vault.git
+cd convo-vault
+```
 
-## Capture Modes
-
-`Fast` reads the current ChatGPT conversation through the logged-in page session and conversation API. It is the preferred daily mode: quicker, cleaner, and good for most exports.
-
-`Full` scans the visible ChatGPT page DOM more deeply. It is slower, but can recover details that the API does not expose, especially some Thinking/flyout content.
-
-`Fast` 会通过当前已登录的 ChatGPT 页面 session 和 conversation API 读取对话。它是日常优先模式：更快、更干净，适合大多数导出。
-
-`Full` 会更深入地扫描 ChatGPT 页面 DOM。它更慢，但有机会补到 API 没暴露的细节，尤其是部分 Thinking/flyout 内容。
-
-## Quick Start
-
-1. Clone this repo.
-2. Install backend dependencies:
+3. 安装本地渲染后端依赖：
 
 ```bash
 cd tools/advanced-pdf
 pnpm install
-```
-
-3. Go back to the repo root and build the extension:
-
-```bash
 cd ../..
+```
+
+4. 构建 Chrome 扩展：
+
+```bash
 npm run build:extension
 ```
 
-4. Open Chrome, go to `chrome://extensions`, enable Developer mode, click **Load unpacked**, and select:
+5. 在 Chrome 里加载扩展：
 
-```text
-dist/convo-vault-extension
-```
+- 打开 `chrome://extensions`
+- 开启 **Developer mode**
+- 点击 **Load unpacked**
+- 选择 `dist/convo-vault-extension`
 
-5. Open the extension popup, set the repo folder, click **Copy Start**, and
-   paste the copied command into your terminal. The copied command includes a
-   local API token so only this extension can call the browser-facing backend
-   endpoints.
+6. 启动本地后端：
 
-6. Open a ChatGPT conversation, click the Convo Vault extension icon, choose `Fast` or `Full`, select messages, and export the bundle.
+- 打开一个 ChatGPT 对话页面
+- 点击 Convo Vault 扩展图标
+- 在 `Backend folder` 里填入这个仓库目录，比如 `F:\AI\convo-vault`
+- 点击 **Copy Start**
+- 把复制出来的命令粘贴到终端执行
 
-## 快速开始
+`Copy Start` 会自动带上本地访问 token。推荐用这个方式启动后端，不要手动裸跑 `npm run backend` 来做正式导出。
 
-1. 克隆这个仓库。
-2. 安装本地后端依赖：
+7. 导出对话：
+
+- 回到 ChatGPT 对话页面
+- 点击扩展图标
+- 点击 **Open Selector**
+- 选择 `Fast` 或 `Full`
+- 勾选要导出的消息
+- 导出 bundle
+
+## 需要什么环境
+
+- Chrome 或 Chromium 系浏览器
+- Node.js `20+`
+- pnpm，用来安装本地 PDF 渲染后端依赖
+- 一个已经登录 ChatGPT 的浏览器会话
+- 本地可以运行 Node 服务的终端环境
+
+常用命令：
 
 ```bash
-cd tools/advanced-pdf
-pnpm install
-```
-
-3. 回到项目根目录并构建扩展：
-
-```bash
-cd ../..
 npm run build:extension
-```
-
-4. 打开 Chrome，进入 `chrome://extensions`，开启开发者模式，点击 **Load unpacked**，选择：
-
-```text
-dist/convo-vault-extension
-```
-
-5. 在项目根目录启动本地后端：
-
-```bash
-npm run backend
-```
-
-6. 打开一个 ChatGPT 对话，点击 Convo Vault 扩展图标，选择 `Fast` 或 `Full`，选择消息，然后导出 bundle。
-
-## Useful Commands
-
-```bash
-npm run backend
-npm run backend:check
-npm run build:extension
-npm test
 npm run check
+npm test
+npm run backend:check
 ```
 
-For extension exports, prefer the popup's **Copy Start** command instead of
-starting the backend manually. Browser-origin requests are rejected unless the
-backend was started with the popup's `CGCE_LOCAL_API_TOKEN`.
+## Fast 和 Full
 
-## Privacy
+`Fast` 是日常优先模式。它会通过当前已登录的 ChatGPT 页面 session 和 conversation API 读取对话，速度更快，结构更干净，适合大多数导出。
 
-The normal export flow runs locally. The extension reads the current ChatGPT page in your browser and sends the captured payload to the local backend on `127.0.0.1` for rendering. No remote PDF service is used.
+`Full` 是更细的页面扫描模式。它会读取当前页面 DOM，速度更慢，但在某些 API 没暴露完整内容的情况下，有机会补到更多页面细节，比如部分 Thinking/flyout 内容。
 
-默认导出流程在本地运行。扩展读取你浏览器里当前打开的 ChatGPT 页面，并把捕获到的数据发送到 `127.0.0.1` 上的本地后端进行渲染，不使用远程 PDF 服务。
+如果只是日常保存，先用 `Fast`。如果发现内容缺失，再试 `Full`。
 
-Runtime data is stored under `.convo-vault/` by default. This folder is ignored by Git.
+## 安全措施
 
-运行时数据默认放在 `.convo-vault/`，这个目录不会被 Git 跟踪。
+Convo Vault 的默认导出流程是本地优先：
 
-## Notes
+- 扩展只读取当前打开的 ChatGPT 页面
+- 渲染后端只监听 `127.0.0.1`
+- PDF、Markdown 和 zip bundle 都在本机生成
+- 不使用远程 PDF 服务
+- 运行时数据默认放在 `.convo-vault/`，这个目录不会进 Git
 
-- Fast mode may not include every Thinking detail if ChatGPT does not expose it through the API.
-- Full mode is slower because it interacts with the live page.
-- Generated media and uploaded attachments are best-effort exports and will keep improving.
+本地后端现在带有 token 门禁：
 
-- 如果 ChatGPT API 没暴露完整 Thinking，Fast 模式不一定能导出全部思考过程。
-- Full 模式会和真实页面交互，所以速度更慢。
-- 生成图片、上传附件等媒体内容目前是 best-effort 支持，后续会继续增强。
+- popup 会生成随机本地 token
+- **Copy Start** 会把 token 传给本地后端
+- popup 和 content script 请求后端时会带 `X-Convo-Vault-Token`
+- 后端会校验 token，不匹配就返回 `401`
+- 如果后端没有配置 token，带浏览器 `Origin` 的请求会被拒绝
+
+这主要解决的是：普通网页不能随便调用你的本地后端，比如误触 `/shutdown`、提交大 payload 让本机渲染，或读取 `/health` 返回的信息。
+
+还有一些产品化安全项会继续收紧，比如逐步减少 `<all_urls>` 权限、把更多图片抓取能力迁到本地后端、进一步细化 CORS 策略。当前优先保证核心导出链路稳定，不先破坏图片和附件导出能力。
+
+## 会输出什么
+
+每次导出通常会得到一个 `.zip` bundle，里面包含：
+
+- `*.md`：可读 Markdown 档案
+- `*.pdf`：本地渲染 PDF
+- `*.payload.json`：完整导出 payload
+- `*.conversation.json`：对话级元数据
+- `*.messages.jsonl`：逐条消息 JSONL
+- `*.qa-pairs.json`：问答配对
+- `*.topics.json`：话题索引
+- `*.entities.json`：链接、文件名、日期等实体线索
+- `*.summary.md`：摘要索引
+- `*.assets.manifest.json`：图片和附件资源清单
+
+这些文件的目标不是只让你“下载一份聊天记录”，而是让一段重要对话变成真正属于你的本地资料：能读、能搜、能归档，也能继续接入你自己的知识库工作流。
