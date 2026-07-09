@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.0";
+  const EXPORTER_VERSION = "0.7.1";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -311,7 +311,7 @@
   async function collectConversationMessages(options = {}) {
     const onProgress = typeof options.onProgress === "function" ? options.onProgress : () => {};
     const captureMode = normalizeCaptureMode(options.captureMode);
-    const debugLog = createDebugLog();
+    const debugLog = createDebugLog({ captureMode });
     debugLog.event("capture.mode", { captureMode });
 
     if (captureMode === "fast") {
@@ -330,11 +330,12 @@
         }
 
         debugLog.event("fastCapture.empty", {});
+        throw new Error("Fast capture returned no messages. Switch to Full mode to scan the page.");
       } catch (error) {
         debugLog.event("fastCapture.failed", {
           error: error?.message || String(error)
         });
-        onProgress("Fast capture failed; falling back to Full scan...");
+        throw new Error(`Fast capture failed. Switch to Full mode if you want to scan the page. Details: ${error?.message || error}`);
       }
     }
 
@@ -590,6 +591,7 @@
 
   async function createStructuredExportPayload(messages, exportedAt = new Date(), options = {}) {
     const portableMessages = messages.map((message, index) => createPortableMessageSnapshot(message, index));
+    const captureMode = normalizeCaptureMode(options.captureMode);
     const assetStats = {
       imagesEmbedded: 0,
       imagesFailed: 0,
@@ -606,6 +608,7 @@
       title: getConversationTitle(),
       source: location.href,
       exportedAt: exportedAt.toISOString(),
+      captureMode,
       messageCount: messages.length,
       assetStats,
       messages: portableMessages
@@ -644,9 +647,9 @@
   async function downloadExportBundle(metadata, messages, exportedAt = new Date(), options = {}) {
     const defaultFileName = markdownBuilder.filename(metadata.title, exportedAt, "zip");
     const payload = await createStructuredExportPayload(messages, exportedAt, {
-      embedImages: true
+      embedImages: true,
+      captureMode: options.captureMode
     });
-    payload.captureMode = normalizeCaptureMode(options.captureMode);
 
     const rendererUrl = await getAdvancedPdfRendererUrl();
     let response;
@@ -885,6 +888,7 @@
     const events = [];
     const isDetailed = options.detailed ?? DETAILED_DEBUG_LOG;
     const maxEvents = options.maxEvents || DEBUG_EVENT_LIMIT;
+    let captureMode = normalizeCaptureMode(options.captureMode);
     let droppedEvents = 0;
     const stats = {
       selectorHits: {},
@@ -915,6 +919,9 @@
 
     return {
       stats,
+      setCaptureMode(value) {
+        captureMode = normalizeCaptureMode(value);
+      },
       event(type, data = {}) {
         if (events.length >= maxEvents) {
           droppedEvents += 1;
@@ -1090,6 +1097,7 @@
         const expectedTurnCount = expectedTurnOrders.length || pageTurnDiagnostics.dataTurnIdCount || effectiveTurnCount;
         const missingTurnOrders = expectedTurnOrders.filter((order) => !capturedTurnOrderSet.has(order));
         finalSummary = {
+          captureMode,
           totalMessages: messages.length,
           userMessages,
           assistantMessages,
@@ -1121,6 +1129,7 @@
       toJSON() {
         return {
           exporterVersion: EXPORTER_VERSION,
+          captureMode,
           features: {
             conversationTimestampApi: true,
             visibleThinkingFlyoutCapture: true,
@@ -1148,6 +1157,7 @@
             title: getConversationTitle(),
             source: location.href,
             exportedAt: new Date().toISOString(),
+            captureMode,
             messages: exportMessages
           },
           messageDiagnostics,
@@ -1157,6 +1167,20 @@
     };
   }
 
+  function downloadDebugLog(debugLog, filename) {
+    const payload = JSON.stringify(debugLog.toJSON(), null, 2);
+    const blob = new Blob([payload], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = filename;
+    link.rel = "noopener";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
   function createMessageDebugSnapshot(message, body, roleReason = "") {
     const markdown = String(message?.markdown || "");
     const thinkingMarkdown = String(message?.thinkingMarkdown || "");
@@ -1236,21 +1260,6 @@
     }
 
     return diagnostics.slice(0, 12);
-  }
-
-  function downloadDebugLog(debugLog, filename) {
-    const payload = JSON.stringify(debugLog.toJSON(), null, 2);
-    const blob = new Blob([payload], { type: "application/json;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-
-    link.href = url;
-    link.download = filename;
-    link.rel = "noopener";
-    document.body.append(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
   }
 
   function getMarkdownFeatureFlags(markdown, thinkingMarkdown = "") {
@@ -1819,7 +1828,7 @@
 
     function updateExportButtonLabel() {
       const exportButton = shadow.querySelector("[data-action='export']");
-      exportButton.textContent = `Export ${formatCaptureMode(getSelectedCaptureMode())} Bundle`;
+      exportButton.textContent = `Export Loaded ${formatCaptureMode(getSelectedCaptureMode())} Bundle`;
     }
 
     function shouldDownloadDebugLog() {
@@ -2127,7 +2136,7 @@
           <header class="cgce-header">
             <div>
               <h2 class="cgce-title">Select messages</h2>
-              <p class="cgce-subtitle">Review extracted turns, adjust selection, then choose a capture mode.</p>
+              <p class="cgce-subtitle">Choose a capture mode, review loaded turns, then export the bundle.</p>
             </div>
             <div class="cgce-icon-buttons">
               <button class="cgce-icon-button" type="button" data-action="refresh" title="Reload messages" aria-label="Reload messages">R</button>
@@ -2156,7 +2165,7 @@
                 <span>Debug log</span>
               </label>
             </div>
-            <button class="cgce-export" type="button" data-action="export">Export Fast Bundle</button>
+            <button class="cgce-export" type="button" data-action="export">Export Loaded Fast Bundle</button>
           </footer>
         </aside>
       `;

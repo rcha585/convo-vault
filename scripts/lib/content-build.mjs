@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 const INCLUDE_FILES = {
+  "debug-log": "debug-log.js",
   "capture-fast": "capture-fast.js",
   "capture-full": "capture-full.js"
 };

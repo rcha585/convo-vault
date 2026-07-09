@@ -1,6 +1,6 @@
 {
   "name": "convo-vault",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "description": "Local-first ChatGPT conversation exporter with local rendering and portable archives.",
   "scripts": {

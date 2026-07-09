@@ -487,6 +487,7 @@ function buildDataBundle(payload) {
     source: payload.source || "",
     exportedAt: payload.exportedAt || new Date().toISOString(),
     generatedAt: new Date().toISOString(),
+    captureMode: payload.captureMode || "",
     messageCount: messages.length,
     roles: countBy(messages, (message) => message.role),
     thinkingCount: messages.filter((message) => message.thinkingMarkdown).length,
@@ -590,6 +591,7 @@ function buildSummaryMarkdown(conversation, qaPairs, topics, entities) {
   const lines = [
     `# ${conversation.title}`,
     "",
+    `- Capture mode: ${conversation.captureMode || "unknown"}`,
     `- Messages: ${conversation.messageCount}`,
     `- QA pairs: ${qaPairs.length}`,
     `- Thinking messages: ${conversation.thinkingCount}`,

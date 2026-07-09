@@ -15,6 +15,7 @@ test("asset manifest deduplicates cached AI image bytes and references user file
     title: "Asset test",
     source: "https://chatgpt.com/c/test",
     exportedAt: "2026-07-09T00:00:00.000Z",
+    captureMode: "fast",
     messages: [
       {
         id: "assistant-1",
@@ -42,6 +43,7 @@ test("asset manifest deduplicates cached AI image bytes and references user file
   const fileReferences = manifest.assets.filter((asset) => asset.kind === "file");
 
   assert.equal(manifest.schemaVersion, 1);
+  assert.equal(manifest.conversation.captureMode, "fast");
   assert.equal(cachedImages.length, 1);
   assert.equal(cachedImages[0].origin, "ai-generated");
   assert.equal(cachedImages[0].references.length, 2);

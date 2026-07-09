@@ -44,7 +44,8 @@ function buildAssetManifest(payload, options = {}) {
     conversation: {
       title: payload?.title || "ChatGPT Conversation",
       source: payload?.source || "",
-      exportedAt: payload?.exportedAt || ""
+      exportedAt: payload?.exportedAt || "",
+      captureMode: payload?.captureMode || ""
     },
     policy: {
       userUploads: "metadata-thumbnail-original-optional",
