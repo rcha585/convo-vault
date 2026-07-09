@@ -2,7 +2,7 @@
 
 Local high-quality PDF renderer for Convo Vault.
 
-This is the v0.6.1 local backend rendering direction: the extension keeps the
+This is the v0.7.0 local backend rendering direction: the extension keeps the
 page permission and selection UI, captures the currently open ChatGPT page, and
 sends structured data to the local backend for a Markdown/PDF/data zip bundle.
 
@@ -63,7 +63,7 @@ The service listens only on `127.0.0.1:38474` by default. It exposes:
   normalized JSON bundle for downstream processing.
 - `POST /render-bundle` - accepts the same `exportPayload` and returns one zip
   containing Markdown, PDF, payload JSON, JSONL, QA pairs, topic/entity sidecars,
-  and a summary file.
+  an asset manifest, and a summary file.
 - `POST /capture-render-pdf` - opens the conversation in an independent local
   Edge profile, captures it, then renders PDF. If capture fails and the request
   includes an extension payload, it falls back to that payload and returns
@@ -94,7 +94,7 @@ headless printing or Playwright-compatible launch behavior.
 
 ## Backend Edge Capture
 
-The current `0.6.1` codebase can use Microsoft Edge as an independent backend
+The current `0.7.0` codebase can use Microsoft Edge as an independent backend
 capture browser, but this remains experimental. It avoids moving the ChatGPT
 page the user is actively reading, at the cost of a separate browser profile.
 
@@ -137,6 +137,9 @@ and is separate from the browser tab where the extension runs.
   pass that targets the PDF's existing named destinations.
 - Provides a backend Markdown endpoint so PDF, Markdown, and future Obsidian
   export can share the same structured payload.
+- Writes `*.assets.manifest.json` into bundle exports and stores available data
+  URI image bytes under `.convo-vault/assets` by SHA-256 so repeated generated
+  assets are deduplicated.
 - Provides a backend data endpoint and PDF sidecar files (`*.data.json`,
   `*.summary.md`) for later analytics, search indexes, QA-pair review, and
   archive workflows.

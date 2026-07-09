@@ -9,6 +9,7 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 
 test("cross-platform extension build creates loadable folder and zip", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "convo-vault-build-"));
+  const rootPackage = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8"));
 
   try {
     const result = spawnSync(process.execPath, [
@@ -28,7 +29,7 @@ test("cross-platform extension build creates loadable folder and zip", async () 
     const zipHeader = await readFile(zipPath);
 
     assert.equal(manifest.name, "Convo Vault");
-    assert.equal(manifest.version, "0.6.1");
+    assert.equal(manifest.version, rootPackage.version);
     assert.equal((await stat(path.join(extensionDir, "content.js"))).isFile(), true);
     assert.equal((await stat(path.join(extensionDir, "assets", "icons", "icon-128.png"))).isFile(), true);
     assert.equal(zipHeader.subarray(0, 2).toString("utf8"), "PK");

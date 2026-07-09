@@ -3,6 +3,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildContentScript } from "./lib/content-build.mjs";
 import { createZipFromDirectory } from "./lib/simple-zip.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -27,6 +28,7 @@ const iconFiles = [
   "icon-128.png"
 ];
 
+await buildContentScript(repoRoot);
 await fs.rm(extensionDir, { recursive: true, force: true });
 await fs.mkdir(extensionDir, { recursive: true });
 

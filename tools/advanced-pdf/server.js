@@ -5,6 +5,7 @@ const http = require("http");
 const path = require("path");
 const { spawn } = require("child_process");
 const { captureConversationWithEdge, findEdgeExecutable, getCacheRoot } = require("./capture");
+const { buildAssetManifest } = require("./assets");
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.CGCE_ADVANCED_PDF_PORT || 38474);
@@ -278,9 +279,12 @@ async function handleRenderBundle(request, response) {
   const htmlPath = path.join(requestDir, `${baseName}.html`);
   const pdfPath = path.join(requestDir, `${baseName}.pdf`);
   const markdownPath = path.join(requestDir, `${baseName}.md`);
+  const assetManifestPath = path.join(requestDir, `${baseName}.assets.manifest.json`);
 
   fs.writeFileSync(jsonPath, JSON.stringify(payload, null, 2), "utf8");
   fs.writeFileSync(markdownPath, buildMarkdownDocument(payload), "utf8");
+  const assetManifest = buildAssetManifest(payload, { cacheRoot: getCacheRoot() });
+  fs.writeFileSync(assetManifestPath, JSON.stringify(assetManifest, null, 2), "utf8");
   const dataFiles = writeDataSidecars(requestDir, baseName, payload);
 
   const result = await runRenderer({
@@ -313,6 +317,10 @@ async function handleRenderBundle(request, response) {
       name: `${baseName}.payload.json`,
       data: fs.readFileSync(jsonPath)
     },
+    {
+      name: `${baseName}.assets.manifest.json`,
+      data: fs.readFileSync(assetManifestPath)
+    },
     ...dataFiles.map((filePath) => ({
       name: path.basename(filePath),
       data: fs.readFileSync(filePath)
@@ -327,6 +335,7 @@ async function handleRenderBundle(request, response) {
     "Content-Disposition": makeContentDisposition(filename),
     "X-Bundle-Engine": "advanced-local-bundle",
     "X-Bundle-Files": encodeHeaderValue(bundleEntries.map((entry) => entry.name).join(",")),
+    "X-Asset-Count": String(assetManifest.counts.total),
     "X-Renderer-HTML": encodeHeaderValue(htmlPath.replace(/\\/g, "/")),
     "X-Data-Dir": encodeHeaderValue(requestDir.replace(/\\/g, "/"))
   });
@@ -1000,7 +1009,8 @@ function setCorsHeaders(request, response) {
     "X-Data-Dir",
     "X-Data-Files",
     "X-Page-Count",
-    "X-Capture-Warning"
+    "X-Capture-Warning",
+    "X-Asset-Count"
   ].join(", "));
 }
 
