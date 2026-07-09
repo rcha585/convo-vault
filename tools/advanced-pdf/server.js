@@ -418,6 +418,7 @@ function normalizePayload(body) {
     title: payload.title || "ChatGPT Conversation",
     source: payload.source || "",
     exportedAt: payload.exportedAt || new Date().toISOString(),
+    captureMode: payload.captureMode || "",
     messageCount: payload.messageCount || messages.length,
     messages
   };

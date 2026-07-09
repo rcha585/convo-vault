@@ -2,7 +2,7 @@
 
 Local high-quality PDF renderer for Convo Vault.
 
-This is the v0.7.2 local backend rendering direction: the extension keeps the
+This is the v0.7.3 local backend rendering direction: the extension keeps the
 page permission and selection UI, captures the currently open ChatGPT page, and
 sends structured data to the local backend for a Markdown/PDF/data zip bundle.
 
@@ -95,7 +95,7 @@ headless printing or Playwright-compatible launch behavior.
 
 ## Backend Edge Capture
 
-The current `0.7.2` codebase can use Microsoft Edge as an independent backend
+The current `0.7.3` codebase can use Microsoft Edge as an independent backend
 capture browser, but this remains experimental. It avoids moving the ChatGPT
 page the user is actively reading, at the cost of a separate browser profile.
 

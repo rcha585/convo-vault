@@ -12,6 +12,7 @@ test("content script is generated from modular Fast and Full sources", async () 
   const debugModule = await readFile(path.join(repoRoot, "src", "content", "debug-log.js"), "utf8");
   const fastModule = await readFile(path.join(repoRoot, "src", "content", "capture-fast.js"), "utf8");
   const fullModule = await readFile(path.join(repoRoot, "src", "content", "capture-full.js"), "utf8");
+  const backendServer = await readFile(path.join(repoRoot, "tools", "advanced-pdf", "server.js"), "utf8");
 
   assert.equal(current.replace(/\r\n/g, "\n"), generated);
   assert.match(generated, /function createDebugLog/);
@@ -25,6 +26,8 @@ test("content script is generated from modular Fast and Full sources", async () 
   assert.doesNotMatch(generated, /falling back to Full scan/);
   assert.match(debugModule, /function downloadDebugLog/);
   assert.match(fastModule, /function buildMessagesFromConversationApi/);
+  assert.match(fastModule, /function getApiMessageStructuralSkipReason/);
   assert.match(fullModule, /async function hydrateVirtualizedTurns/);
+  assert.match(backendServer, /captureMode: payload\.captureMode \|\| ""/);
   assert.doesNotMatch(generated, /@convo-vault-include/);
 });

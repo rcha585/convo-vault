@@ -14,7 +14,7 @@ Convo Vault 是一个本地优先的 Chrome 扩展，专注于把当前 ChatGPT
 和结构化数据包。它适合做个人知识库、项目记录、研究材料、代码问答归档，以及未来接入
 Obsidian 或 RAG 流程的本地资料源。
 
-当前版本 `0.7.2` 已经有两种捕获模式，并统一导出为一个便携的 `.zip` 包。本版增强了 Fast 的 API-first 读取路径：会读取当前 ChatGPT session token，并探测多个 conversation API 形态。
+当前版本 `0.7.3` 已经有两种捕获模式，并统一导出为一个便携的 `.zip` 包。本版继续增强 Fast 的 API-first 读取路径：会读取当前 ChatGPT session token，探测多个 conversation API 形态，并过滤 ChatGPT API 中隐藏的搜索、代码执行和工具调用节点。
 
 - `Fast` - 通过当前已登录的 ChatGPT 页面读取对话 JSON，把当前活跃分支快速转换成
   Convo Vault 的本地导出结构。它速度更快，适合日常保存。
