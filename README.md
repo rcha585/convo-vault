@@ -14,7 +14,7 @@ Convo Vault 是一个本地优先的 Chrome 扩展，专注于把当前 ChatGPT
 和结构化数据包。它适合做个人知识库、项目记录、研究材料、代码问答归档，以及未来接入
 Obsidian 或 RAG 流程的本地资料源。
 
-当前版本 `0.7.1` 已经有两种捕获模式，并统一导出为一个便携的 `.zip` 包。本版让 bundle/debug 记录明确的捕获模式，并把 debug log 逻辑拆到 `src/content/debug-log.js`。
+当前版本 `0.7.2` 已经有两种捕获模式，并统一导出为一个便携的 `.zip` 包。本版增强了 Fast 的 API-first 读取路径：会读取当前 ChatGPT session token，并探测多个 conversation API 形态。
 
 - `Fast` - 通过当前已登录的 ChatGPT 页面读取对话 JSON，把当前活跃分支快速转换成
   Convo Vault 的本地导出结构。它速度更快，适合日常保存。
@@ -192,10 +192,15 @@ the capture mode used for that export.
 `Fast` mode:
 
 1. Reads the conversation id from the current URL.
-2. Requests `/backend-api/conversation/{id}` with the current ChatGPT session.
-3. Walks the active conversation branch from `current_node`.
-4. Converts user/assistant messages into the shared export schema.
-5. Sends the selected messages to the local backend bundle renderer.
+2. Reads the current ChatGPT session token from `/api/auth/session` when
+   available.
+3. Probes conversation API variants such as
+   `/backend-api/conversation/{id}?tree_format=true` with Bearer and cookie
+   auth.
+4. Walks the active conversation branch from `current_node`, or accepts a
+   linear messages response if ChatGPT returns one.
+5. Converts user/assistant messages into the shared export schema.
+6. Sends the selected messages to the local backend bundle renderer.
 
 If Fast cannot read the conversation API, it stops with a clear error instead of
 silently falling back to a Full DOM scan.

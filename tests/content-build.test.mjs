@@ -16,6 +16,10 @@ test("content script is generated from modular Fast and Full sources", async () 
   assert.equal(current.replace(/\r\n/g, "\n"), generated);
   assert.match(generated, /function createDebugLog/);
   assert.match(generated, /async function collectFastConversationMessages/);
+  assert.match(generated, /\/api\/auth\/session/);
+  assert.match(generated, /Bearer \$\{attempt\.accessToken\}/);
+  assert.match(generated, /tree_format=true/);
+  assert.match(generated, /routes\/_conversation\.g\.\$gizmoId\.c\.\$conversationId/);
   assert.match(generated, /function createMessageCollector/);
   assert.match(generated, /Switch to Full mode if you want to scan the page/);
   assert.doesNotMatch(generated, /falling back to Full scan/);

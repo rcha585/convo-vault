@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.1";
+  const EXPORTER_VERSION = "0.7.2";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -38,6 +38,7 @@
   const TURN_HYDRATION_SETTLE_MS = 70;
   const CONVERSATION_TIMESTAMP_FETCH_TIMEOUT_MS = 3500;
   const CONVERSATION_API_FETCH_TIMEOUT_MS = 15_000;
+  const CONVERSATION_API_ATTEMPT_TIMEOUT_MS = 4500;
   const THINKING_FLYOUT_AUTO_OPEN_LIMIT = 48;
   const THINKING_FLYOUT_OPEN_TIMEOUT_MS = 1400;
   const DEBUG_EVENT_LIMIT = 500;

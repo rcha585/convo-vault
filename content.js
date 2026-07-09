@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.1";
+  const EXPORTER_VERSION = "0.7.2";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -38,6 +38,7 @@
   const TURN_HYDRATION_SETTLE_MS = 70;
   const CONVERSATION_TIMESTAMP_FETCH_TIMEOUT_MS = 3500;
   const CONVERSATION_API_FETCH_TIMEOUT_MS = 15_000;
+  const CONVERSATION_API_ATTEMPT_TIMEOUT_MS = 4500;
   const THINKING_FLYOUT_AUTO_OPEN_LIMIT = 48;
   const THINKING_FLYOUT_OPEN_TIMEOUT_MS = 1400;
   const DEBUG_EVENT_LIMIT = 500;
@@ -4284,13 +4285,16 @@
     }
 
     const data = await fetchConversationData(conversationId, {
-      timeoutMs: CONVERSATION_API_FETCH_TIMEOUT_MS
+      timeoutMs: CONVERSATION_API_FETCH_TIMEOUT_MS,
+      debugLog
     });
     const messages = buildMessagesFromConversationApi(data, debugLog);
 
     debugLog?.event("fastCapture.loaded", {
       conversationId,
-      mappingCount: data?.mapping && typeof data.mapping === "object" ? Object.keys(data.mapping).length : 0,
+      apiSource: data?.__convoVaultApiSource || "",
+      mappingCount: Object.keys(getConversationApiMapping(data)).length,
+      linearMessageCount: getConversationApiLinearMessages(data).length,
       messageCount: messages.length
     });
 
@@ -4358,8 +4362,8 @@
   }
 
   function getConversationApiCurrentPath(data) {
-    const mapping = data?.mapping && typeof data.mapping === "object" ? data.mapping : {};
-    const currentNode = data?.current_node || data?.currentNode || "";
+    const mapping = getConversationApiMapping(data);
+    const currentNode = getConversationApiCurrentNode(data);
     const path = [];
     const seen = new Set();
     let nodeId = currentNode;
@@ -4375,7 +4379,55 @@
       return path.reverse();
     }
 
-    return Object.values(mapping);
+    if (Object.keys(mapping).length) {
+      return Object.values(mapping);
+    }
+
+    return getConversationApiLinearMessages(data)
+      .map((message, index) => ({
+        id: message?.id || `api-message-${index + 1}`,
+        message
+      }));
+  }
+
+  function getConversationApiMapping(data) {
+    const candidates = [
+      data?.mapping,
+      data?.conversation?.mapping,
+      data?.data?.mapping
+    ];
+
+    return candidates.find((value) => value && typeof value === "object" && !Array.isArray(value)) || {};
+  }
+
+  function getConversationApiCurrentNode(data) {
+    return data?.current_node
+      || data?.currentNode
+      || data?.conversation?.current_node
+      || data?.conversation?.currentNode
+      || data?.data?.current_node
+      || data?.data?.currentNode
+      || "";
+  }
+
+  function getConversationApiLinearMessages(data) {
+    const candidates = [
+      data?.messages,
+      data?.items,
+      data?.linear_conversation,
+      data?.linearConversation,
+      data?.conversation?.messages,
+      data?.conversation?.items,
+      data?.conversation?.linear_conversation,
+      data?.data?.messages,
+      data?.data?.items,
+      data?.data?.linear_conversation
+    ];
+
+    return candidates
+      .find(Array.isArray)
+      ?.map((item) => item?.message || item)
+      .filter((message) => message && typeof message === "object") || [];
   }
 
   function normalizeApiRole(role) {
@@ -4571,24 +4623,238 @@
   }
 
   async function fetchConversationData(conversationId, options = {}) {
-    const url = new URL(`/backend-api/conversation/${encodeURIComponent(conversationId)}`, location.origin);
-    const controller = new AbortController();
+    const debugLog = options.debugLog || null;
     const timeoutMs = Number(options.timeoutMs || CONVERSATION_TIMESTAMP_FETCH_TIMEOUT_MS);
-    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+    const attemptTimeoutMs = Math.min(timeoutMs, CONVERSATION_API_ATTEMPT_TIMEOUT_MS);
+    const accessToken = await getChatGptAccessToken(debugLog, attemptTimeoutMs);
+    const attempts = buildConversationApiAttempts(conversationId, accessToken);
+    const failures = [];
 
-    const response = await fetch(url.href, {
-      credentials: "include",
-      signal: controller.signal,
-      headers: {
-        accept: "application/json"
+    debugLog?.event("conversationApi.probe.start", {
+      conversationId,
+      attempts: attempts.length,
+      accessTokenAvailable: Boolean(accessToken)
+    });
+
+    for (const attempt of attempts) {
+      try {
+        const data = await fetchConversationApiAttempt(attempt, attemptTimeoutMs);
+        const mapping = getConversationApiMapping(data);
+        const linearMessages = getConversationApiLinearMessages(data);
+        const mappingCount = Object.keys(mapping).length;
+
+        if (!mappingCount && !linearMessages.length) {
+          failures.push(`${attempt.label}: empty response`);
+          debugLog?.event("conversationApi.probe.empty", {
+            label: attempt.label
+          });
+          continue;
+        }
+
+        Object.defineProperty(data, "__convoVaultApiSource", {
+          value: attempt.label,
+          enumerable: false,
+          configurable: true
+        });
+        debugLog?.event("conversationApi.probe.success", {
+          label: attempt.label,
+          mappingCount,
+          linearMessageCount: linearMessages.length
+        });
+        return data;
+      } catch (error) {
+        const reason = error?.message || String(error);
+        failures.push(`${attempt.label}: ${reason}`);
+        debugLog?.event("conversationApi.probe.failed", {
+          label: attempt.label,
+          reason
+        });
       }
-    }).finally(() => window.clearTimeout(timeoutId));
-
-    if (!response.ok) {
-      throw new Error(`Conversation API returned ${response.status}`);
     }
 
-    return response.json();
+    throw new Error(`Conversation API attempts failed after ${failures.length} route(s): ${summarizeConversationApiFailures(failures)}.`);
+  }
+
+  function summarizeConversationApiFailures(failures) {
+    const counts = new Map();
+
+    for (const failure of failures) {
+      const reason = String(failure || "").split(": ").slice(1).join(": ") || "unknown";
+      const key = reason
+        .replace(/bearer:[^;]+/g, "bearer route")
+        .replace(/cookie:[^;]+/g, "cookie route");
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+
+    return [...counts.entries()]
+      .map(([reason, count]) => count > 1 ? `${reason} x${count}` : reason)
+      .join(", ");
+  }
+
+  function buildConversationApiAttempts(conversationId, accessToken = "") {
+    const encodedId = encodeURIComponent(conversationId);
+    const paths = uniqueStrings([
+      `/backend-api/conversation/${encodedId}?tree_format=true`,
+      `/backend-api/conversation/${encodedId}`,
+      `/backend-api/conversation/${encodedId}?tree_format=false`,
+      `/backend-api/conversation/${encodedId}?include_system_messages=true`,
+      `/backend-api/conversation/${encodedId}?tree_format=true&include_system_messages=true`,
+      ...buildConversationRouteDataPaths()
+    ]);
+    const authModes = accessToken ? ["bearer", "cookie"] : ["cookie"];
+    const attempts = [];
+
+    for (const authMode of authModes) {
+      for (const path of paths) {
+        const url = new URL(path, location.origin);
+        const isRouteData = url.searchParams.has("_data");
+        attempts.push({
+          label: `${authMode}:${url.pathname}${url.search}`,
+          url: url.href,
+          authMode,
+          accessToken,
+          headers: isRouteData ? { "x-remix-request": "yes" } : {}
+        });
+      }
+    }
+
+    return attempts;
+  }
+
+  function buildConversationRouteDataPaths() {
+    const routes = getConversationRouteDataNames();
+    return routes.map((routeName) => {
+      const url = new URL(location.href);
+      url.searchParams.set("_data", routeName);
+      return `${url.pathname}${url.search}`;
+    });
+  }
+
+  function getConversationRouteDataNames() {
+    const pathParts = location.pathname.split("/").map(decodePathPart).filter(Boolean);
+    const hasGizmoRoute = pathParts.includes("g") && pathParts.includes("c");
+    const routes = [
+      "routes/_conversation.c.$conversationId",
+      "routes/_conversation"
+    ];
+
+    if (hasGizmoRoute) {
+      routes.unshift("routes/_conversation.g.$gizmoId.c.$conversationId");
+    }
+
+    return uniqueStrings(routes);
+  }
+
+  async function fetchConversationApiAttempt(attempt, timeoutMs) {
+    const headers = {
+      accept: "application/json",
+      ...(attempt.headers || {})
+    };
+
+    if (attempt.authMode === "bearer" && attempt.accessToken) {
+      headers.authorization = `Bearer ${attempt.accessToken}`;
+    }
+
+    const response = await fetchWithTimeout(attempt.url, {
+      timeoutMs,
+      credentials: "include",
+      cache: "no-store",
+      headers
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    return parseConversationApiResponse(response);
+  }
+
+  async function parseConversationApiResponse(response) {
+    const contentType = response.headers.get("content-type") || "";
+
+    if (contentType.includes("application/json")) {
+      return response.json();
+    }
+
+    const text = await response.text();
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error(`non-json response (${contentType || "unknown content-type"})`);
+    }
+  }
+
+  let cachedChatGptAccessToken = "";
+  let chatGptAccessTokenLoaded = false;
+
+  async function getChatGptAccessToken(debugLog = null, timeoutMs = CONVERSATION_API_ATTEMPT_TIMEOUT_MS) {
+    if (chatGptAccessTokenLoaded) {
+      return cachedChatGptAccessToken;
+    }
+
+    chatGptAccessTokenLoaded = true;
+
+    try {
+      const url = new URL("/api/auth/session", location.origin);
+      const response = await fetchWithTimeout(url.href, {
+        timeoutMs,
+        credentials: "include",
+        cache: "no-store",
+        headers: {
+          accept: "application/json"
+        }
+      });
+
+      if (!response.ok) {
+        debugLog?.event("conversationApi.token.failed", { status: response.status });
+        return "";
+      }
+
+      const session = await response.json();
+      cachedChatGptAccessToken = extractAccessTokenFromSession(session);
+      debugLog?.event("conversationApi.token.loaded", {
+        available: Boolean(cachedChatGptAccessToken)
+      });
+      return cachedChatGptAccessToken;
+    } catch (error) {
+      debugLog?.event("conversationApi.token.failed", {
+        error: error?.message || String(error)
+      });
+      return "";
+    }
+  }
+
+  function extractAccessTokenFromSession(session) {
+    const candidates = [
+      session?.accessToken,
+      session?.access_token,
+      session?.token,
+      session?.user?.accessToken,
+      session?.user?.access_token
+    ];
+
+    return String(candidates.find((value) => typeof value === "string" && value.length > 20) || "");
+  }
+
+  async function fetchWithTimeout(url, options = {}) {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), Number(options.timeoutMs || CONVERSATION_API_ATTEMPT_TIMEOUT_MS));
+
+    try {
+      return await fetch(url, {
+        ...options,
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        throw new Error("timeout");
+      }
+
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
   }
 
   function buildConversationTimestampMap(data) {
