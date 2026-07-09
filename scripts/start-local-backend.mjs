@@ -12,6 +12,7 @@ const port = normalizePort(options.port || process.env.CGCE_ADVANCED_PDF_PORT);
 const cacheDir = path.resolve(repoRoot, options.cacheDir || process.env.CGCE_CACHE_DIR || ".convo-vault");
 const browserPath = options.browserPath || process.env.CGCE_RENDER_BROWSER_PATH || process.env.CGCE_EDGE_PATH || "";
 const headless = options.headless || process.env.CGCE_CAPTURE_HEADLESS === "1";
+const localApiToken = String(process.env.CGCE_LOCAL_API_TOKEN || "").trim();
 const env = {
   ...process.env,
   CGCE_CACHE_DIR: cacheDir,
@@ -32,6 +33,12 @@ if (headless) {
   delete env.CGCE_CAPTURE_HEADLESS;
 }
 
+if (localApiToken) {
+  env.CGCE_LOCAL_API_TOKEN = localApiToken;
+} else {
+  delete env.CGCE_LOCAL_API_TOKEN;
+}
+
 mkdirSync(cacheDir, { recursive: true });
 
 if (options.detached) {
@@ -46,6 +53,7 @@ if (options.detached) {
   child.unref();
   console.log(`Started Convo Vault local backend process: ${child.pid}`);
   console.log(`Health: http://127.0.0.1:${port}/health`);
+  console.log(`Auth: ${localApiToken ? "token required" : "not configured; browser-origin requests rejected"}`);
   process.exit(0);
 }
 
@@ -53,6 +61,7 @@ console.log("Starting Convo Vault local backend");
 console.log(`Repo:      ${repoRoot}`);
 console.log(`Cache:     ${cacheDir}`);
 console.log(`Endpoint:  http://127.0.0.1:${port}`);
+console.log(`Auth:      ${localApiToken ? "token required" : "not configured; browser-origin requests rejected"}`);
 
 if (browserPath) {
   console.log(`Browser:   ${browserPath}`);

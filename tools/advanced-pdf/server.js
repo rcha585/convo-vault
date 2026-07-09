@@ -3,6 +3,7 @@
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const crypto = require("crypto");
 const { spawn } = require("child_process");
 const { captureConversationWithEdge, findEdgeExecutable, getCacheRoot } = require("./capture");
 const { buildAssetManifest } = require("./assets");
@@ -10,6 +11,8 @@ const { buildAssetManifest } = require("./assets");
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.CGCE_ADVANCED_PDF_PORT || 38474);
 const MAX_BODY_BYTES = Number(process.env.CGCE_ADVANCED_PDF_MAX_BODY_BYTES || 90 * 1024 * 1024);
+const LOCAL_API_TOKEN_HEADER = "x-convo-vault-token";
+const LOCAL_API_TOKEN = String(process.env.CGCE_LOCAL_API_TOKEN || "").trim();
 const ROOT_DIR = path.resolve(__dirname, "..", "..");
 const WORK_DIR = path.join(ROOT_DIR, "tmp", "advanced-pdf-server");
 const RENDER_SCRIPT = path.join(__dirname, "render.js");
@@ -27,6 +30,7 @@ const server = http.createServer((request, response) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`[advanced-pdf-server] Listening on http://${HOST}:${PORT}`);
+  console.log(`[advanced-pdf-server] Local API token: ${LOCAL_API_TOKEN ? "required" : "not configured; browser-origin requests will be rejected"}`);
   console.log("[advanced-pdf-server] Endpoints: GET /health, POST /shutdown, POST /render-pdf, POST /render-markdown, POST /render-data, POST /render-bundle, POST /capture-render-pdf, POST /capture-render-markdown");
 });
 
@@ -39,6 +43,14 @@ async function handleRequest(request, response) {
     return;
   }
 
+  if (!isLocalApiAuthorized(request)) {
+    sendJson(response, 401, {
+      ok: false,
+      error: "Missing or invalid local API token."
+    });
+    return;
+  }
+
   const url = new URL(request.url || "/", `http://${HOST}:${PORT}`);
 
   if (request.method === "GET" && url.pathname === "/health") {
@@ -46,6 +58,7 @@ async function handleRequest(request, response) {
       ok: true,
       renderer: "advanced-local-chrome",
       version: readPackageVersion(),
+      authRequired: Boolean(LOCAL_API_TOKEN),
       cacheRoot: getCacheRoot(),
       edgePath: findEdgeExecutable() || null
     });
@@ -1010,7 +1023,7 @@ function setCorsHeaders(request, response) {
   response.setHeader("Access-Control-Allow-Origin", origin);
   response.setHeader("Vary", "Origin");
   response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  response.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  response.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Convo-Vault-Token");
   response.setHeader("Access-Control-Expose-Headers", [
     "Content-Disposition",
     "X-PDF-Engine",
@@ -1024,6 +1037,26 @@ function setCorsHeaders(request, response) {
     "X-Asset-Count",
     "X-Bundle-Timings"
   ].join(", "));
+}
+
+function isLocalApiAuthorized(request) {
+  if (!LOCAL_API_TOKEN) {
+    return !request.headers.origin;
+  }
+
+  const providedToken = String(request.headers[LOCAL_API_TOKEN_HEADER] || "").trim();
+  return timingSafeEqualText(providedToken, LOCAL_API_TOKEN);
+}
+
+function timingSafeEqualText(left, right) {
+  const leftBytes = Buffer.from(String(left || ""), "utf8");
+  const rightBytes = Buffer.from(String(right || ""), "utf8");
+
+  if (leftBytes.length !== rightBytes.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(leftBytes, rightBytes);
 }
 
 function sendJson(response, statusCode, payload) {

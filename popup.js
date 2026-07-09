@@ -3,7 +3,8 @@ const DEFAULT_SETTINGS = {
   backendRoot: "",
   port: 38474,
   cacheDir: "",
-  browserPath: ""
+  browserPath: "",
+  backendToken: ""
 };
 
 const exportButton = document.getElementById("exportButton");
@@ -19,6 +20,13 @@ let currentSettings = { ...DEFAULT_SETTINGS };
 
 document.addEventListener("DOMContentLoaded", async () => {
   currentSettings = await loadSettings();
+  if (!currentSettings.backendToken) {
+    currentSettings = {
+      ...currentSettings,
+      backendToken: createLocalApiToken()
+    };
+    await saveSettings(currentSettings);
+  }
   renderSettings(currentSettings);
   checkBackend();
 });
@@ -72,7 +80,8 @@ stopBackendButton.addEventListener("click", async () => {
 
   try {
     const response = await fetch(`${getRendererUrl()}/shutdown`, {
-      method: "POST"
+      method: "POST",
+      headers: getLocalApiHeaders()
     });
 
     if (!response.ok) {
@@ -96,8 +105,13 @@ async function checkBackend(options = {}) {
   try {
     const response = await fetch(`${getRendererUrl()}/health`, {
       method: "GET",
-      cache: "no-store"
+      cache: "no-store",
+      headers: getLocalApiHeaders()
     });
+
+    if (response.status === 401 || response.status === 403) {
+      throw new Error("Local renderer needs the popup token. Copy a fresh start command and restart it.");
+    }
 
     if (!response.ok) {
       throw new Error(`Health check failed (${response.status}).`);
@@ -105,16 +119,19 @@ async function checkBackend(options = {}) {
 
     const health = await response.json();
     const version = health.version ? ` v${health.version}` : "";
-    setBackendState("running", `Local renderer running${version}`);
+    const authLabel = health.authRequired === false ? " without token" : "";
+    setBackendState("running", `Local renderer running${version}${authLabel}`);
 
     if (options.announce) {
-      setStatus("Local renderer is running.");
+      setStatus(health.authRequired === false
+        ? "Local renderer is running without token. Copy Start will create a protected start command."
+        : "Local renderer is running.");
     }
-  } catch {
+  } catch (error) {
     setBackendState("stopped", "Local renderer not running");
 
     if (options.announce) {
-      setStatus("Local renderer is not running. Copy the start command first.");
+      setStatus(error.message || "Local renderer is not running. Copy the start command first.");
     }
   } finally {
     setBackendBusy(false);
@@ -138,7 +155,8 @@ function readSettingsFromForm() {
     backendRoot: backendRootInput.value.trim(),
     port: DEFAULT_SETTINGS.port,
     cacheDir: DEFAULT_SETTINGS.cacheDir,
-    browserPath: DEFAULT_SETTINGS.browserPath
+    browserPath: DEFAULT_SETTINGS.browserPath,
+    backendToken: currentSettings.backendToken || createLocalApiToken()
   };
 }
 
@@ -167,7 +185,8 @@ function normalizeSettings(settings = {}) {
     backendRoot: String(settings.backendRoot || "").trim(),
     port: DEFAULT_SETTINGS.port,
     cacheDir: DEFAULT_SETTINGS.cacheDir,
-    browserPath: DEFAULT_SETTINGS.browserPath
+    browserPath: DEFAULT_SETTINGS.browserPath,
+    backendToken: normalizeLocalApiToken(settings.backendToken)
   };
 }
 
@@ -176,11 +195,20 @@ function getRendererUrl(settings = currentSettings) {
   return `http://127.0.0.1:${port}`;
 }
 
+function getLocalApiHeaders(settings = currentSettings) {
+  const token = normalizeSettings(settings).backendToken;
+  return token ? { "X-Convo-Vault-Token": token } : {};
+}
+
 function buildStartCommand(settings) {
   const normalized = normalizeSettings(settings);
 
   if (!normalized.backendRoot) {
     throw new Error("Set the Convo Vault folder first.");
+  }
+
+  if (!normalized.backendToken) {
+    throw new Error("Local backend token is missing. Reopen the popup and try again.");
   }
 
   const args = [
@@ -194,11 +222,21 @@ function buildStartCommand(settings) {
       .map((arg, index) => index < 4 ? arg : quotePowerShellSingle(arg))
       .join(" ");
 
-    return `Set-Location -LiteralPath ${quotePowerShellSingle(normalized.backendRoot)}; ${command}`;
+    return `$env:CGCE_LOCAL_API_TOKEN=${quotePowerShellSingle(normalized.backendToken)}; Set-Location -LiteralPath ${quotePowerShellSingle(normalized.backendRoot)}; ${command}; Remove-Item Env:CGCE_LOCAL_API_TOKEN -ErrorAction SilentlyContinue`;
   }
 
   const command = args.map(quotePosixSingle).join(" ");
-  return `cd ${quotePosixSingle(normalized.backendRoot)} && ${command}`;
+  return `cd ${quotePosixSingle(normalized.backendRoot)} && CGCE_LOCAL_API_TOKEN=${quotePosixSingle(normalized.backendToken)} ${command}`;
+}
+
+function normalizeLocalApiToken(value) {
+  return String(value || "").trim();
+}
+
+function createLocalApiToken() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function quotePowerShellSingle(value) {

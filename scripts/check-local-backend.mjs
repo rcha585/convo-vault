@@ -4,8 +4,12 @@ import http from "node:http";
 
 const port = normalizePort(parsePort(process.argv.slice(2)) || process.env.CGCE_ADVANCED_PDF_PORT);
 const url = `http://127.0.0.1:${port}/health`;
+const localApiToken = String(process.env.CGCE_LOCAL_API_TOKEN || "").trim();
 
-const request = http.get(url, { timeout: 5000 }, (response) => {
+const request = http.get(url, {
+  timeout: 5000,
+  headers: localApiToken ? { "X-Convo-Vault-Token": localApiToken } : {}
+}, (response) => {
   const chunks = [];
 
   response.on("data", (chunk) => chunks.push(chunk));

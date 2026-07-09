@@ -2,7 +2,7 @@
 
 Local high-quality PDF renderer for Convo Vault.
 
-This is the v0.7.7 local backend rendering direction: the extension keeps the
+This is the v0.7.8 local backend rendering direction: the extension keeps the
 page permission and selection UI, captures the currently open ChatGPT page, and
 sends structured data to the local backend for a Markdown/PDF/data zip bundle.
 
@@ -45,13 +45,20 @@ node tools/advanced-pdf/render.js path/to/export-debug.json --out output/pdf/con
 ## Local Renderer Service
 
 For the extension's `Fast` and `Full` bundle export options, start the local
-service first from the repository root:
+service from the extension popup with **Copy Start**. The copied command sets
+`CGCE_LOCAL_API_TOKEN`, and browser-origin requests must include that token in
+`X-Convo-Vault-Token`.
+
+For local CLI development, you can still start the service from the repository
+root:
 
 ```bash
 npm run backend
 ```
 
-The service listens only on `127.0.0.1:38474` by default. It exposes:
+When no token is configured, terminal-origin requests without an `Origin` header
+can still reach the service, but browser-origin requests are rejected. The
+service listens only on `127.0.0.1:38474` by default. It exposes:
 
 - `GET /health` - quick availability check.
 - `POST /shutdown` - stop the local renderer process.
@@ -95,7 +102,7 @@ headless printing or Playwright-compatible launch behavior.
 
 ## Backend Edge Capture
 
-The current `0.7.7` codebase can use Microsoft Edge as an independent backend
+The current `0.7.8` codebase can use Microsoft Edge as an independent backend
 capture browser, but this remains experimental. It avoids moving the ChatGPT
 page the user is actively reading, at the cost of a separate browser profile.
 

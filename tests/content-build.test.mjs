@@ -45,6 +45,8 @@ test("content script is generated from modular Fast and Full sources", async () 
   assert.match(background, /\/backend-api\/files\/\$\{encodedId\}\/content/);
   assert.match(background, /extractImageUrlsFromMetadata/);
   assert.match(backendServer, /captureMode: payload\.captureMode \|\| ""/);
+  assert.match(backendServer, /CGCE_LOCAL_API_TOKEN/);
+  assert.match(backendServer, /X-Convo-Vault-Token/);
   assert.match(backendServer, /X-Bundle-Timings/);
   assert.match(backendServer, /message\.counts\?\.images/);
   assert.match(backendRender, /margin: 44px 34px/);
@@ -54,5 +56,7 @@ test("content script is generated from modular Fast and Full sources", async () 
   assert.doesNotMatch(popupHtml, /portInput|cacheDirInput|browserPathInput|saveSettingsButton|resetSettingsButton/);
   assert.doesNotMatch(popupJs, /portInput|cacheDirInput|browserPathInput|saveSettingsButton|resetSettingsButton/);
   assert.doesNotMatch(popupJs, /--port|--cache-dir|--browser-path/);
+  assert.match(popupJs, /CGCE_LOCAL_API_TOKEN/);
+  assert.match(popupJs, /createLocalApiToken/);
   assert.doesNotMatch(generated, /@convo-vault-include/);
 });

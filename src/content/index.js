@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.7";
+  const EXPORTER_VERSION = "0.7.8";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -48,7 +48,8 @@
   const ADVANCED_PDF_IMAGE_EMBED_CONCURRENCY = 4;
   const SETTINGS_STORAGE_KEY = "convoVaultSettings";
   const DEFAULT_EXPORTER_SETTINGS = {
-    port: 38474
+    port: 38474,
+    backendToken: ""
   };
   const DEFAULT_ADVANCED_PDF_RENDERER_URL = "http://127.0.0.1:38474";
   const MESSAGE_NODE_SELECTORS = [
@@ -656,17 +657,23 @@
     });
   }
 
-  function normalizeExporterSettings() {
+  function normalizeExporterSettings(settings = {}) {
     return {
-      port: DEFAULT_EXPORTER_SETTINGS.port
+      port: DEFAULT_EXPORTER_SETTINGS.port,
+      backendToken: String(settings.backendToken || "").trim()
     };
   }
 
-  async function getAdvancedPdfRendererUrl() {
-    const settings = await getExporterSettings();
+  function getAdvancedPdfRendererUrl(settings = DEFAULT_EXPORTER_SETTINGS) {
     return settings.port === DEFAULT_EXPORTER_SETTINGS.port
       ? DEFAULT_ADVANCED_PDF_RENDERER_URL
       : `http://127.0.0.1:${settings.port}`;
+  }
+
+  function getLocalApiHeaders(settings = DEFAULT_EXPORTER_SETTINGS) {
+    return settings.backendToken
+      ? { "X-Convo-Vault-Token": settings.backendToken }
+      : {};
   }
 
   async function downloadExportBundle(metadata, messages, exportedAt = new Date(), options = {}) {
@@ -677,14 +684,16 @@
       debugLog: options.debugLog
     });
 
-    const rendererUrl = await getAdvancedPdfRendererUrl();
+    const rendererSettings = await getExporterSettings();
+    const rendererUrl = getAdvancedPdfRendererUrl(rendererSettings);
     let response;
 
     try {
       response = await fetch(`${rendererUrl}/render-bundle`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          ...getLocalApiHeaders(rendererSettings)
         },
         body: JSON.stringify({
           exportPayload: payload,
@@ -696,8 +705,7 @@
     }
 
     if (!response.ok) {
-      const errorText = await response.text().catch(() => "");
-      throw new Error(`Bundle renderer failed (${response.status}). ${errorText || response.statusText}`);
+      await throwRendererResponseError(response, "Bundle renderer");
     }
 
     const blob = await response.blob();
@@ -719,13 +727,15 @@
     const defaultFileName = markdownBuilder.filename(metadata.title, exportedAt, "md");
     const payload = await createStructuredExportPayload(messages, exportedAt);
 
-    const rendererUrl = await getAdvancedPdfRendererUrl();
+    const rendererSettings = await getExporterSettings();
+    const rendererUrl = getAdvancedPdfRendererUrl(rendererSettings);
     let response;
     try {
       response = await fetch(`${rendererUrl}/render-markdown`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          ...getLocalApiHeaders(rendererSettings)
         },
         body: JSON.stringify({
           exportPayload: payload,
@@ -737,8 +747,7 @@
     }
 
     if (!response.ok) {
-      const errorText = await response.text().catch(() => "");
-      throw new Error(`Markdown renderer failed (${response.status}). ${errorText || response.statusText}`);
+      await throwRendererResponseError(response, "Markdown renderer");
     }
 
     const blob = await response.blob();
@@ -759,13 +768,15 @@
       embedImages: true
     });
 
-    const rendererUrl = await getAdvancedPdfRendererUrl();
+    const rendererSettings = await getExporterSettings();
+    const rendererUrl = getAdvancedPdfRendererUrl(rendererSettings);
     let response;
     try {
       response = await fetch(`${rendererUrl}/render-pdf`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          ...getLocalApiHeaders(rendererSettings)
         },
         body: JSON.stringify({
           exportPayload: payload,
@@ -777,8 +788,7 @@
     }
 
     if (!response.ok) {
-      const errorText = await response.text().catch(() => "");
-      throw new Error(`PDF renderer failed (${response.status}). ${errorText || response.statusText}`);
+      await throwRendererResponseError(response, "PDF renderer");
     }
 
     const blob = await response.blob();
@@ -796,6 +806,16 @@
       imagesEmbedded: payload.assetStats?.imagesEmbedded || 0,
       imagesFailed: payload.assetStats?.imagesFailed || 0
     };
+  }
+
+  async function throwRendererResponseError(response, label) {
+    const errorText = await response.text().catch(() => "");
+
+    if (response.status === 401 || response.status === 403) {
+      throw new Error("Local renderer rejected the extension token. Copy a fresh start command from the popup and restart the local renderer.");
+    }
+
+    throw new Error(`${label} failed (${response.status}). ${errorText || response.statusText}`);
   }
 
   async function embedImagesForPortableMessages(messages, stats, options = {}) {

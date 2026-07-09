@@ -4,7 +4,7 @@ Convo Vault is a local-first Chrome extension for exporting ChatGPT conversation
 
 Convo Vault 是一个本地优先的 Chrome 扩展，用来把 ChatGPT 对话导出成可以长期保存的本地档案。它会抓取当前对话，生成可读的 Markdown 和 PDF，并把结构化数据一起打包，方便之后检索、整理笔记、放进 Obsidian，或继续接入 RAG 流程。
 
-Current version: `0.7.7`
+Current version: `0.7.8`
 
 ## Status
 
@@ -65,11 +65,10 @@ npm run build:extension
 dist/convo-vault-extension
 ```
 
-5. Start the local backend from the repo root:
-
-```bash
-npm run backend
-```
+5. Open the extension popup, set the repo folder, click **Copy Start**, and
+   paste the copied command into your terminal. The copied command includes a
+   local API token so only this extension can call the browser-facing backend
+   endpoints.
 
 6. Open a ChatGPT conversation, click the Convo Vault extension icon, choose `Fast` or `Full`, select messages, and export the bundle.
 
@@ -113,6 +112,10 @@ npm run build:extension
 npm test
 npm run check
 ```
+
+For extension exports, prefer the popup's **Copy Start** command instead of
+starting the backend manually. Browser-origin requests are rejected unless the
+backend was started with the popup's `CGCE_LOCAL_API_TOKEN`.
 
 ## Privacy
 

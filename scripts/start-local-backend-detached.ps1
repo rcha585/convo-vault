@@ -2,6 +2,7 @@ param(
   [string]$CacheDir = "",
   [int]$Port = 38474,
   [string]$BrowserPath = "",
+  [string]$LocalApiToken = "",
   [switch]$Headless
 )
 
@@ -27,4 +28,7 @@ if ($Headless) {
 }
 
 Set-Location $repoRoot
+if ($LocalApiToken) {
+  $env:CGCE_LOCAL_API_TOKEN = $LocalApiToken
+}
 & $node @arguments
