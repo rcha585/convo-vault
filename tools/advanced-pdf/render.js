@@ -640,8 +640,10 @@ function renderMessage(md, message, index, imageRegistry) {
   if (isUser) {
     return `<article id="${escapeAttr(anchorId)}" class="message user-message" data-turn-number="${escapeAttr(message.turnNumber)}">
       <div class="user-stack">
-        ${turnHeading}
-        ${renderUserAvatar()}
+        <div class="user-meta-row">
+          ${turnHeading}
+          ${renderUserAvatar()}
+        </div>
         ${renderAttachmentLead(message.markdown, imageRegistry)}
         <div class="bubble user-bubble">${content}</div>
         ${time ? `<div class="message-time user-time">${time}</div>` : ""}
@@ -650,16 +652,22 @@ function renderMessage(md, message, index, imageRegistry) {
   }
 
   return `<article id="${escapeAttr(anchorId)}" class="message assistant-message" data-turn-number="${escapeAttr(message.turnNumber)}">
-    <div class="assistant-header">
-      <div class="assistant-title">
+    <div class="assistant-row">
+      <div class="assistant-gutter">
         ${renderAssistantAvatar()}
-        ${turnHeading}
-        ${time ? `<div class="message-time assistant-time">${time}</div>` : ""}
       </div>
-    </div>
-    <div class="assistant-body">
-      ${thinking}
-      <div class="assistant-content">${content}</div>
+      <div class="assistant-main">
+        <div class="assistant-header">
+          <div class="assistant-title">
+            ${turnHeading}
+            ${time ? `<div class="message-time assistant-time">${time}</div>` : ""}
+          </div>
+        </div>
+        <div class="assistant-body">
+          ${thinking}
+          <div class="assistant-content">${content}</div>
+        </div>
+      </div>
     </div>
   </article>`;
 }
@@ -1355,8 +1363,8 @@ body {
   color: #111827;
   background: #ffffff;
   font-family: Inter, "Noto Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
-  font-size: 12.8px;
-  line-height: 1.56;
+  font-size: 13.1px;
+  line-height: 1.6;
   letter-spacing: 0;
 }
 
@@ -1495,7 +1503,7 @@ a {
 }
 
 .conversation {
-  padding-top: 2px;
+  padding-top: 4px;
 }
 
 .message {
@@ -1505,11 +1513,11 @@ a {
 .user-message {
   display: block;
   break-inside: auto;
-  margin: 0 0 9px;
+  margin: 0 0 16px;
 }
 
 .user-stack {
-  width: min(84%, 600px);
+  width: min(78%, 570px);
   display: block;
   margin-left: auto;
   break-inside: auto;
@@ -1524,12 +1532,27 @@ a {
   margin-top: 0;
 }
 
+.user-meta-row {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 28px;
+  max-width: 100%;
+  margin-left: auto;
+}
+
+.user-meta-row .turn-heading {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .turn-heading {
   margin: 0;
-  color: #64748b;
-  font-size: 10px;
+  color: #7b8494;
+  font-size: 9.5px;
   line-height: 1.25;
-  font-weight: 800;
+  font-weight: 750;
   letter-spacing: 0;
   break-after: avoid;
 }
@@ -1544,8 +1567,8 @@ a {
 
 .avatar,
 .assistant-avatar {
-  width: 25px;
-  height: 25px;
+  width: 27px;
+  height: 27px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1554,8 +1577,8 @@ a {
 
 .avatar img,
 .assistant-avatar img {
-  width: 25px;
-  height: 25px;
+  width: 27px;
+  height: 27px;
   object-fit: contain;
   display: block;
 }
@@ -1569,26 +1592,27 @@ a {
 .user-avatar {
   display: flex;
   margin-left: auto;
+  opacity: .95;
 }
 
 .bubble {
   width: fit-content;
   max-width: 100%;
-  padding: 10px 15px;
-  border-radius: 18px;
-  background: #f3f4f6;
-  border: 1px solid #e5e7eb;
+  padding: 10px 15px 11px;
+  border-radius: 19px;
+  background: #f4f4f5;
+  border: 1px solid #e7e9ee;
 }
 
 .user-bubble {
-  border-bottom-right-radius: 6px;
+  border-bottom-right-radius: 7px;
   margin-left: auto;
   text-align: left;
 }
 
 .message-time {
-  color: #a0a7b2;
-  font-size: 10px;
+  color: #9ca3af;
+  font-size: 10.4px;
   font-style: italic;
 }
 
@@ -1600,15 +1624,32 @@ a {
 .assistant-message {
   display: block;
   break-inside: auto;
-  margin: 0 0 18px;
+  margin: 0 0 26px;
 }
 
 .user-message.force-page-before {
   break-before: page;
 }
 
+.assistant-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 11px;
+  align-items: start;
+}
+
+.assistant-gutter {
+  display: flex;
+  justify-content: center;
+  padding-top: 1px;
+}
+
+.assistant-main {
+  min-width: 0;
+}
+
 .assistant-header {
-  margin: 0 0 7px;
+  margin: 0 0 6px;
   display: flex;
   gap: 12px;
   align-items: center;
@@ -1624,7 +1665,7 @@ a {
 }
 
 .assistant-avatar {
-  opacity: .9;
+  opacity: .92;
 }
 
 .assistant-body {
@@ -1632,7 +1673,7 @@ a {
 }
 
 .assistant-content {
-  padding-top: 1px;
+  padding-top: 0;
 }
 
 .thinking {
@@ -1698,7 +1739,7 @@ a {
 }
 
 .markdown-body h1 { font-size: 21px; }
-.markdown-body h2 { font-size: 18px; border-top: 1px solid #e5e7eb; padding-top: 14px; }
+.markdown-body h2 { font-size: 18px; border-top: 1px solid #edf1f5; padding-top: 14px; }
 .markdown-body h3 { font-size: 15px; }
 .markdown-body h4 { font-size: 13px; }
 
@@ -1908,13 +1949,16 @@ a {
 .attachment-card.with-thumb {
   display: flex;
   min-width: 0;
-  width: min(340px, 100%);
-  max-width: 340px;
-  padding: 8px;
+  width: min(470px, 100%);
+  max-width: 470px;
+  padding: 0;
   flex-direction: column;
   align-items: stretch;
-  gap: 7px;
+  gap: 0;
   margin-left: auto;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
   break-inside: avoid;
   page-break-inside: avoid;
 }
@@ -1927,7 +1971,7 @@ a {
 
 .user-attachments .attachment-card-link {
   display: block;
-  width: min(340px, 100%);
+  width: min(470px, 100%);
 }
 
 .user-attachments > .attachment-card {
@@ -1945,11 +1989,11 @@ a {
 
 .attachment-thumb {
   width: 100%;
-  max-height: 320px;
-  border-radius: 8px;
+  max-height: 430px;
+  border-radius: 14px;
   overflow: hidden;
-  border: 1px solid #dbeafe;
-  background: #f8fafc;
+  border: 1px solid #dfe6f0;
+  background: #ffffff;
   flex: 0 0 auto;
   display: block;
 }
@@ -1957,7 +2001,7 @@ a {
 .attachment-thumb img {
   width: 100%;
   height: auto;
-  max-height: 320px;
+  max-height: 430px;
   object-fit: contain;
   display: block;
 }
@@ -1990,9 +2034,7 @@ a {
 }
 
 .attachment-card.with-thumb .attachment-name {
-  color: #64748b;
-  font-size: 10.5px;
-  font-weight: 650;
+  display: none;
 }
 
 .attachment-chip {

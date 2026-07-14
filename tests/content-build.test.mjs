@@ -61,6 +61,8 @@ test("content script is generated from modular Hybrid, Fast, and Full sources", 
   assert.match(backendServer, /compactMarkdownSourceLinks/);
   assert.match(backendServer, /message\.counts\?\.images/);
   assert.match(backendRender, /margin: 44px 34px/);
+  assert.match(backendRender, /\.user-meta-row\s*{\s*display: inline-flex;/);
+  assert.match(backendRender, /assistant-row/);
   assert.match(backendRender, /assistant-title/);
   assert.match(backendRender, /stripAttachmentOnlyLines/);
   assert.match(backendRender, /compactMarkdownSourceLinks/);
