@@ -30,6 +30,9 @@ test("content script is generated from modular Hybrid, Fast, and Full sources", 
   assert.match(generated, /function reconcileHybridMessages/);
   assert.match(generated, /hybridCapture\.reconciled/);
   assert.match(generated, /hybridCapture\.fullOnlyCandidates/);
+  assert.match(generated, /function refreshPortableMessageImageStats/);
+  assert.match(generated, /function stripMarkdownImagesFromLinkLabel/);
+  assert.match(generated, /function isFaviconImageUrl/);
   assert.match(generated, /function isTimestampDividerText/);
   assert.match(generated, /option value="hybrid" selected>Hybrid/);
   assert.match(generated, /Export Loaded Hybrid Bundle/);
@@ -55,10 +58,12 @@ test("content script is generated from modular Hybrid, Fast, and Full sources", 
   assert.match(backendServer, /CGCE_LOCAL_API_TOKEN/);
   assert.match(backendServer, /X-Convo-Vault-Token/);
   assert.match(backendServer, /X-Bundle-Timings/);
+  assert.match(backendServer, /compactMarkdownSourceLinks/);
   assert.match(backendServer, /message\.counts\?\.images/);
   assert.match(backendRender, /margin: 44px 34px/);
   assert.match(backendRender, /assistant-title/);
   assert.match(backendRender, /stripAttachmentOnlyLines/);
+  assert.match(backendRender, /compactMarkdownSourceLinks/);
   assert.match(backendRender, /shouldShowCodeLabel/);
   assert.doesNotMatch(popupHtml, /portInput|cacheDirInput|browserPathInput|saveSettingsButton|resetSettingsButton/);
   assert.doesNotMatch(popupJs, /portInput|cacheDirInput|browserPathInput|saveSettingsButton|resetSettingsButton/);

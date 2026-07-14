@@ -683,10 +683,43 @@ function buildMarkdownDocument(payload) {
 }
 
 function normalizeMarkdown(markdown) {
-  return String(markdown || "")
+  return compactMarkdownSourceLinks(String(markdown || "")
     .replace(/\r\n?/g, "\n")
     .replace(/<!--[\s\S]*?-->/g, "")
+    .trim());
+}
+
+function compactMarkdownSourceLinks(markdown) {
+  return stripFaviconMarkdownImages(markdown)
+    .replace(/\[!\\?\[[^\]\n]*\\?\]\([^)]+\)\s*([^\]]*?)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, url) => {
+      const cleanLabel = cleanMarkdownLinkLabel(label, url);
+      return cleanLabel ? `[${escapeMarkdownLinkLabel(cleanLabel)}](${url})` : url;
+    })
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, url) => {
+      const cleanLabel = cleanMarkdownLinkLabel(label, url);
+      return cleanLabel ? `[${escapeMarkdownLinkLabel(cleanLabel)}](${url})` : url;
+    });
+}
+
+function stripFaviconMarkdownImages(markdown) {
+  return String(markdown || "")
+    .replace(/!\\?\[[^\]\n]*\\?\]\((https?:\/\/[^)]*(?:google\.com\/s2\/favicons|favicon)[^)]*)\)\s*/gi, "");
+}
+
+function cleanMarkdownLinkLabel(label, url = "") {
+  const value = String(label || "")
+    .replace(/!\\?\[[^\]\n]*\\?\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, " ")
+    .replace(/\\?\[?image-\d+\\?]?/gi, " ")
+    .replace(/\s+/g, " ")
     .trim();
+
+  if (!value) return compactUrl(url);
+  if (/^https?:\/\//i.test(value)) return compactUrl(value);
+  return value;
+}
+
+function escapeMarkdownLinkLabel(text) {
+  return String(text || "").replace(/[[\]\\]/g, "\\$&");
 }
 
 function stripMarkdown(markdown) {

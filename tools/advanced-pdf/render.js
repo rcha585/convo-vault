@@ -595,14 +595,56 @@ function formatTurnHeading(message, index) {
 }
 
 function cleanMarkdownForHtml(markdown) {
-  return String(markdown || "")
+  return compactMarkdownSourceLinks(String(markdown || "")
     .replace(/\r\n?/g, "\n")
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/[\uE000-\uF8FF]*cite(?:[\uE000-\uF8FF]+turn[0-9A-Za-z_-]+)+[\uE000-\uF8FF]*/gi, "")
     .replace(/[\uE000-\uF8FF]+/g, "")
     .replace(/!\[(image-\d+|Image-\d+)\]\((https?:\/\/[^)]+)\)\s*/gi, "")
     .replace(/\[Image:\s*([^\]]+)\]\((https?:\/\/[^)]+)\)/gi, "[$1]($2)")
+    .trim());
+}
+
+function compactMarkdownSourceLinks(markdown) {
+  return stripFaviconMarkdownImages(markdown)
+    .replace(/\[!\\?\[[^\]\n]*\\?\]\([^)]+\)\s*([^\]]*?)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, url) => {
+      const cleanLabel = cleanMarkdownLinkLabel(label, url);
+      return cleanLabel ? `[${escapeMarkdownLinkLabel(cleanLabel)}](${url})` : url;
+    })
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, url) => {
+      const cleanLabel = cleanMarkdownLinkLabel(label, url);
+      return cleanLabel ? `[${escapeMarkdownLinkLabel(cleanLabel)}](${url})` : url;
+    });
+}
+
+function stripFaviconMarkdownImages(markdown) {
+  return String(markdown || "")
+    .replace(/!\\?\[[^\]\n]*\\?\]\((https?:\/\/[^)]*(?:google\.com\/s2\/favicons|favicon)[^)]*)\)\s*/gi, "");
+}
+
+function cleanMarkdownLinkLabel(label, url = "") {
+  const value = String(label || "")
+    .replace(/!\\?\[[^\]\n]*\\?\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, " ")
+    .replace(/\\?\[?image-\d+\\?]?/gi, " ")
+    .replace(/\s+/g, " ")
     .trim();
+
+  if (!value) return compactUrlLabel(url);
+  if (/^https?:\/\//i.test(value)) return compactUrlLabel(value);
+  return value;
+}
+
+function compactUrlLabel(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.replace(/^www\./, "") || url;
+  } catch {
+    return String(url || "").slice(0, 80);
+  }
+}
+
+function escapeMarkdownLinkLabel(text) {
+  return String(text || "").replace(/[[\]\\]/g, "\\$&");
 }
 
 function stripAttachmentOnlyLines(markdown) {

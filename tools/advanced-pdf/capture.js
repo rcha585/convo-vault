@@ -269,11 +269,12 @@ async function extractConversationPayload(page, options = {}) {
       if (tag === "ul" || tag === "ol") return `\n${serializeChildren(node)}\n`;
       if (tag === "a") {
         const href = node.getAttribute("href") || "";
-        const label = serializeChildren(node).trim() || href;
+        const label = cleanLinkLabel(serializeChildren(node).trim(), href);
         return href ? `[${label}](${href})` : label;
       }
       if (tag === "img") {
         const src = node.currentSrc || node.getAttribute("src") || "";
+        if (isFaviconImageUrl(src)) return "";
         const alt = node.getAttribute("alt") || "image";
         return src ? `![${alt}](${src})\n\n` : "";
       }
@@ -284,6 +285,32 @@ async function extractConversationPayload(page, options = {}) {
 
     function toText(node) {
       return (node?.innerText || node?.textContent || "").replace(/\s+/g, " ").trim();
+    }
+
+    function cleanLinkLabel(label, href = "") {
+      const value = String(label || "")
+        .replace(/!\\?\[[^\]\n]*\\?\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, " ")
+        .replace(/\\?\[?image-\d+\\?]?/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      if (!value) return compactUrlLabel(href);
+      if (/^https?:\/\//i.test(value)) return compactUrlLabel(value);
+      return value;
+    }
+
+    function compactUrlLabel(url) {
+      try {
+        const parsed = new URL(url, location.href);
+        const leaf = decodeURIComponent(parsed.pathname.split("/").filter(Boolean).pop() || "");
+        return leaf || parsed.hostname || url;
+      } catch {
+        return url || "";
+      }
+    }
+
+    function isFaviconImageUrl(url) {
+      return /(?:google\.com\/s2\/favicons|favicon)/i.test(String(url || ""));
     }
   });
 

@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.9";
+  const EXPORTER_VERSION = "0.7.10";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -579,6 +579,7 @@
     const markdown = markdownSource === "full" ? fullMessage.markdown : fastMessage.markdown;
     const thinkingMarkdown = thinkingSource === "full" ? fullMessage.thinkingMarkdown : fastMessage.thinkingMarkdown;
     const hybridSource = markdownSource === "full" || thinkingSource === "full" ? "fast+full" : "fast";
+    const finalImageCount = countMarkdownImages(`${markdown}\n${thinkingMarkdown}`);
 
     return {
       ...fastMessage,
@@ -592,12 +593,9 @@
       preview: truncatePreview(cleanMarkdown(`${markdown}\n${thinkingMarkdown}`), 180) || fastMessage.preview || fullMessage.preview || "",
       codeBlockCount: Math.max(fastMessage.codeBlockCount || 0, fullMessage.codeBlockCount || 0),
       fileCount: Math.max(fastMessage.fileCount || 0, fullMessage.fileCount || 0),
-      imageCount: Math.max(
-        fastMessage.imageCount || countMarkdownImages(markdown),
-        fullMessage.imageCount || 0
-      ),
-      imagesEmbedded: Math.max(fastMessage.imagesEmbedded || 0, fullMessage.imagesEmbedded || 0),
-      imagesFailed: Math.max(fastMessage.imagesFailed || 0, fullMessage.imagesFailed || 0),
+      imageCount: finalImageCount,
+      imagesEmbedded: Math.min(finalImageCount, Math.max(fastMessage.imagesEmbedded || 0, fullMessage.imagesEmbedded || 0)),
+      imagesFailed: Math.min(finalImageCount, Math.max(fastMessage.imagesFailed || 0, fullMessage.imagesFailed || 0)),
       captureMode: "hybrid",
       hybridSource,
       hybridMarkdownSource: markdownSource,
@@ -895,6 +893,9 @@
         captureMode,
         debugLog: options.debugLog
       });
+      portableMessages.forEach((message) => refreshPortableMessageImageStats(message, {
+        embedAttempted: true
+      }));
       options.debugLog?.event?.("assetEmbed.done", {
         captureMode,
         imageReferenceCount,
@@ -1719,6 +1720,11 @@
   }
 
   function createPortableMessageSnapshot(message, index = 0) {
+    const markdown = String(message?.markdown || "");
+    const thinkingMarkdown = String(message?.thinkingMarkdown || "");
+    const imageCount = countMarkdownImages(`${markdown}\n${thinkingMarkdown}`);
+    const imagesEmbedded = Math.min(imageCount, message?.imagesEmbedded || 0);
+
     return {
       id: message?.id || `message-${index + 1}`,
       role: message?.role || "unknown",
@@ -1731,17 +1737,40 @@
       sourceMessageId: message?.sourceMessageId || "",
       timestamp: message?.timestamp || "",
       preview: message?.preview || "",
-      markdown: String(message?.markdown || ""),
-      thinkingMarkdown: String(message?.thinkingMarkdown || ""),
+      markdown,
+      thinkingMarkdown,
       codeBlockCount: message?.codeBlockCount || 0,
       fileCount: message?.fileCount || 0,
-      imageCount: message?.imageCount || 0,
-      imagesEmbedded: message?.imagesEmbedded || 0,
-      imagesFailed: message?.imagesFailed || 0,
+      imageCount,
+      imagesEmbedded,
+      imagesFailed: Math.min(Math.max(0, imageCount - imagesEmbedded), message?.imagesFailed || 0),
       hybridSource: message?.hybridSource || "",
       hybridMarkdownSource: message?.hybridMarkdownSource || "",
       hybridThinkingSource: message?.hybridThinkingSource || ""
     };
+  }
+
+  function refreshPortableMessageImageStats(message, options = {}) {
+    const imageCount = countMarkdownImages(`${message?.markdown || ""}\n${message?.thinkingMarkdown || ""}`);
+    const embedded = countEmbeddedMarkdownImages(`${message?.markdown || ""}\n${message?.thinkingMarkdown || ""}`);
+    message.imageCount = imageCount;
+    message.imagesEmbedded = embedded;
+    message.imagesFailed = options.embedAttempted ? Math.max(0, imageCount - embedded) : Math.min(message.imagesFailed || 0, imageCount);
+    return message;
+  }
+
+  function countEmbeddedMarkdownImages(markdown) {
+    let count = 0;
+    const imagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+    let match;
+
+    while ((match = imagePattern.exec(String(markdown || "")))) {
+      if (/^data:image\//i.test(match[2] || "")) {
+        count += 1;
+      }
+    }
+
+    return count;
   }
 
   function truncateDebugText(text, maxLength) {
@@ -7409,6 +7438,11 @@
 
   function isLikelyDecorativeImage(image) {
     const imageButton = image.closest("button, [role='button']");
+    const src = image.currentSrc || image.src || image.getAttribute("src") || "";
+
+    if (isFaviconImageUrl(src)) {
+      return true;
+    }
 
     if (imageButton && isLikelyImageAttachmentButton(imageButton)) {
       return false;
@@ -7419,6 +7453,10 @@
     }
 
     return isLikelyDecorativeMedia(image);
+  }
+
+  function isFaviconImageUrl(url) {
+    return /(?:google\.com\/s2\/favicons|favicon)/i.test(String(url || ""));
   }
 
   function isLikelyDecorativeMedia(element) {
@@ -8062,7 +8100,7 @@
   }
 
   function cleanPdfLinkLabel(label, url = "") {
-    const value = String(label || "")
+    const value = stripMarkdownImagesFromLinkLabel(label)
       .replace(/\s+/g, " ")
       .trim();
     const normalizedUrl = String(url || "").trim();
@@ -8071,12 +8109,22 @@
       return compactUrlLabel(normalizedUrl);
     }
 
+    if (/^https?:\/\//i.test(value)) {
+      return compactUrlLabel(value);
+    }
+
     if (normalizedUrl && value.includes(normalizedUrl)) {
       const withoutUrl = value.replaceAll(normalizedUrl, " ").replace(/\s+/g, " ").trim();
       return withoutUrl || compactUrlLabel(normalizedUrl);
     }
 
     return value;
+  }
+
+  function stripMarkdownImagesFromLinkLabel(label) {
+    return String(label || "")
+      .replace(/!\\?\[[^\]\n]*\\?\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, " ")
+      .replace(/\\?\[?image-\d+\\?]?/gi, " ");
   }
 
   function compactUrlLabel(url) {
