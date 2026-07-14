@@ -244,7 +244,19 @@ function createMarkdownRenderer() {
     }
   });
 
+  const defaultFence = md.renderer.rules.fence || renderFenceFallback;
   const defaultLinkOpen = md.renderer.rules.link_open || renderToken;
+  md.renderer.rules.fence = (tokens, index, options, env, self) => {
+    const token = tokens[index];
+    const language = normalizeLanguage(String(token.info || "").trim().split(/\s+/)[0]);
+
+    if (language === "mermaid") {
+      return renderMermaidDiagram(token.content || "");
+    }
+
+    return defaultFence(tokens, index, options, env, self);
+  };
+
   md.renderer.rules.link_open = (tokens, index, options, env, self) => {
     const token = tokens[index];
     const hrefIndex = token.attrIndex("href");
@@ -277,8 +289,341 @@ function createMarkdownRenderer() {
   return md;
 }
 
+function renderFenceFallback(tokens, index) {
+  const token = tokens[index];
+  const language = normalizeLanguage(String(token.info || "").trim().split(/\s+/)[0]);
+  const label = shouldShowCodeLabel(language) ? `<div class="code-label">${escapeHtml(language)}</div>` : "";
+  return `${label}<pre class="hljs"><code>${escapeHtml(token.content || "")}</code></pre>`;
+}
+
 function renderToken(tokens, index, options, env, self) {
   return self.renderToken(tokens, index, options);
+}
+
+function renderMermaidDiagram(source) {
+  const graph = parseMermaidFlowchart(source);
+
+  if (!graph) {
+    return `${renderMermaidTitle()}<pre class="hljs mermaid-fallback"><code>${escapeHtml(source)}</code></pre>`;
+  }
+
+  return `<figure class="mermaid-card">${renderMermaidTitle()}<div class="mermaid-stage">${renderFlowchartSvg(graph)}</div></figure>`;
+}
+
+function renderMermaidTitle() {
+  return `<figcaption class="mermaid-title">Mermaid</figcaption>`;
+}
+
+function parseMermaidFlowchart(source) {
+  const lines = String(source || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("%%"));
+  const header = lines.shift() || "";
+  const headerMatch = header.match(/^(?:flowchart|graph)\s+(LR|RL|TB|TD|BT)\b/i);
+
+  if (!headerMatch) {
+    return null;
+  }
+
+  const graph = {
+    direction: headerMatch[1].toUpperCase(),
+    groups: [],
+    nodes: new Map(),
+    edges: []
+  };
+  let currentGroup = "";
+
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/;$/g, "").trim();
+
+    if (!line) {
+      continue;
+    }
+
+    const subgraphMatch = line.match(/^subgraph\s+(.+)$/i);
+    if (subgraphMatch) {
+      currentGroup = cleanMermaidLabel(subgraphMatch[1]);
+      ensureMermaidGroup(graph, currentGroup);
+      continue;
+    }
+
+    if (/^end$/i.test(line)) {
+      currentGroup = "";
+      continue;
+    }
+
+    const edgeMatch = line.match(/^(.+?)\s*-{1,2}>\s*(?:\|([^|]+)\|\s*)?(.+)$/);
+    if (edgeMatch) {
+      const sourceNode = ensureMermaidNode(graph, edgeMatch[1], currentGroup);
+      const targetNode = ensureMermaidNode(graph, edgeMatch[3], currentGroup);
+      if (sourceNode && targetNode) {
+        graph.edges.push({
+          source: sourceNode.id,
+          target: targetNode.id,
+          label: cleanMermaidLabel(edgeMatch[2] || "")
+        });
+      }
+      continue;
+    }
+
+    ensureMermaidNode(graph, line, currentGroup);
+  }
+
+  return graph.nodes.size ? graph : null;
+}
+
+function ensureMermaidGroup(graph, name) {
+  const groupName = name || "Diagram";
+  let group = graph.groups.find((item) => item.name === groupName);
+
+  if (!group) {
+    group = {
+      name: groupName,
+      nodes: []
+    };
+    graph.groups.push(group);
+  }
+
+  return group;
+}
+
+function ensureMermaidNode(graph, token, groupName = "") {
+  const parsed = parseMermaidNodeToken(token);
+
+  if (!parsed?.id) {
+    return null;
+  }
+
+  let node = graph.nodes.get(parsed.id);
+
+  if (!node) {
+    node = {
+      ...parsed,
+      group: groupName || "Diagram"
+    };
+    graph.nodes.set(node.id, node);
+  } else if (parsed.label && parsed.label !== parsed.id) {
+    node.label = parsed.label;
+    node.shape = parsed.shape || node.shape;
+  }
+
+  if (groupName && node.group === "Diagram") {
+    node.group = groupName;
+  }
+
+  const group = ensureMermaidGroup(graph, node.group);
+  if (!group.nodes.includes(node.id)) {
+    group.nodes.push(node.id);
+  }
+
+  return node;
+}
+
+function parseMermaidNodeToken(token) {
+  const value = String(token || "").trim().replace(/;$/g, "");
+  const idMatch = value.match(/^([A-Za-z][\w-]*)/);
+
+  if (!idMatch) {
+    return null;
+  }
+
+  const id = idMatch[1];
+  const rest = value.slice(id.length).trim();
+  let label = id;
+  let shape = "rect";
+  let labelMatch = rest.match(/^\[\(([\s\S]+)\)\]$/);
+
+  if (labelMatch) {
+    label = labelMatch[1];
+    shape = "database";
+  } else {
+    labelMatch = rest.match(/^\[([\s\S]+)\]$/);
+    if (labelMatch) {
+      label = labelMatch[1];
+    } else {
+      labelMatch = rest.match(/^\(\(([\s\S]+)\)\)$/);
+      if (labelMatch) {
+        label = labelMatch[1];
+        shape = "circle";
+      } else {
+        labelMatch = rest.match(/^\(([\s\S]+)\)$/);
+        if (labelMatch) {
+          label = labelMatch[1];
+          shape = "round";
+        }
+      }
+    }
+  }
+
+  return {
+    id,
+    label: cleanMermaidLabel(label),
+    shape
+  };
+}
+
+function renderFlowchartSvg(graph) {
+  const layout = layoutMermaidFlowchart(graph);
+  const arrows = graph.edges.map((edge, index) => renderMermaidEdge(edge, layout, index)).join("");
+  const groups = layout.groups.map(renderMermaidGroup).join("");
+  const nodes = layout.nodes.map(renderMermaidNode).join("");
+
+  return `<svg class="mermaid-svg" viewBox="0 0 ${layout.width} ${layout.height}" role="img" aria-label="Mermaid flowchart" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="${layout.markerId}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M 0 0 L 8 4 L 0 8 z" fill="#64748b"></path>
+      </marker>
+    </defs>
+    ${groups}
+    <g class="mermaid-edges">${arrows}</g>
+    <g class="mermaid-nodes">${nodes}</g>
+  </svg>`;
+}
+
+function layoutMermaidFlowchart(graph) {
+  const horizontal = !["TB", "TD", "BT"].includes(graph.direction);
+  const groupWidth = 158;
+  const groupGap = 50;
+  const nodeWidth = 122;
+  const nodeHeight = 46;
+  const nodeGap = 14;
+  const groupPaddingX = 18;
+  const groupHeader = 24;
+  const bottomPadding = 16;
+  const groupHeights = graph.groups.map((group) => {
+    const nodeCount = Math.max(1, group.nodes.length);
+    return groupHeader + bottomPadding + nodeCount * nodeHeight + (nodeCount - 1) * nodeGap;
+  });
+  const groupHeight = Math.max(104, ...groupHeights);
+  const layout = {
+    width: horizontal
+      ? graph.groups.length * groupWidth + Math.max(0, graph.groups.length - 1) * groupGap
+      : groupWidth,
+    height: horizontal
+      ? groupHeight
+      : graph.groups.length * groupHeight + Math.max(0, graph.groups.length - 1) * groupGap,
+    markerId: `arrow-${graph.direction.toLowerCase()}-${graph.groups.length}-${graph.nodes.size}`,
+    groups: [],
+    nodes: []
+  };
+  const positions = new Map();
+
+  graph.groups.forEach((group, groupIndex) => {
+    const groupX = horizontal ? groupIndex * (groupWidth + groupGap) : 0;
+    const groupY = horizontal ? 0 : groupIndex * (groupHeight + groupGap);
+    layout.groups.push({
+      name: group.name,
+      x: groupX,
+      y: groupY,
+      width: groupWidth,
+      height: groupHeight
+    });
+
+    const totalNodeHeight = group.nodes.length * nodeHeight + Math.max(0, group.nodes.length - 1) * nodeGap;
+    const startY = groupY + groupHeader + Math.max(0, (groupHeight - groupHeader - bottomPadding - totalNodeHeight) / 2);
+
+    group.nodes.forEach((nodeId, nodeIndex) => {
+      const node = graph.nodes.get(nodeId);
+      const positioned = {
+        ...node,
+        x: groupX + groupPaddingX,
+        y: startY + nodeIndex * (nodeHeight + nodeGap),
+        width: nodeWidth,
+        height: nodeHeight
+      };
+      positions.set(nodeId, positioned);
+      layout.nodes.push(positioned);
+    });
+  });
+
+  layout.positions = positions;
+  return layout;
+}
+
+function renderMermaidGroup(group) {
+  return `<g class="mermaid-group">
+    <rect x="${group.x + 0.5}" y="${group.y + 0.5}" width="${group.width - 1}" height="${group.height - 1}" rx="4"></rect>
+    <text x="${group.x + group.width / 2}" y="${group.y + 15}" text-anchor="middle">${escapeSvgText(group.name)}</text>
+  </g>`;
+}
+
+function renderMermaidNode(node) {
+  const lines = wrapMermaidLabel(node.label);
+  const textY = node.y + node.height / 2 - ((lines.length - 1) * 7);
+  const rect = node.shape === "circle"
+    ? `<ellipse cx="${node.x + node.width / 2}" cy="${node.y + node.height / 2}" rx="${node.width / 2}" ry="${node.height / 2}"></ellipse>`
+    : `<rect x="${node.x}" y="${node.y}" width="${node.width}" height="${node.height}" rx="${node.shape === "database" ? 18 : 4}"></rect>`;
+  const text = lines.map((line, index) => (
+    `<tspan x="${node.x + node.width / 2}" dy="${index === 0 ? 0 : 14}">${escapeSvgText(line)}</tspan>`
+  )).join("");
+
+  return `<g class="mermaid-node">${rect}<text x="${node.x + node.width / 2}" y="${textY}" text-anchor="middle">${text}</text></g>`;
+}
+
+function renderMermaidEdge(edge, layout, index) {
+  const source = layout.positions.get(edge.source);
+  const target = layout.positions.get(edge.target);
+
+  if (!source || !target) {
+    return "";
+  }
+
+  const sameColumn = Math.abs(source.x - target.x) < 4;
+  const sx = sameColumn ? source.x + source.width / 2 : source.x + source.width;
+  const sy = sameColumn ? source.y + source.height : source.y + source.height / 2;
+  const tx = sameColumn ? target.x + target.width / 2 : target.x;
+  const ty = sameColumn ? target.y : target.y + target.height / 2;
+  const curve = sameColumn ? Math.max(18, Math.abs(ty - sy) / 2) : Math.max(30, Math.abs(tx - sx) / 2);
+  const path = sameColumn
+    ? `M ${sx} ${sy} C ${sx} ${sy + curve}, ${tx} ${ty - curve}, ${tx} ${ty}`
+    : `M ${sx} ${sy} C ${sx + curve} ${sy}, ${tx - curve} ${ty}, ${tx} ${ty}`;
+  const labelX = sameColumn ? sx + source.width / 2 + 8 : (sx + tx) / 2;
+  const labelY = sameColumn ? (sy + ty) / 2 : (sy + ty) / 2 - 6 - (index % 2) * 6;
+  const label = edge.label
+    ? `<text class="mermaid-edge-label" x="${labelX}" y="${labelY}" text-anchor="middle">${escapeSvgText(edge.label)}</text>`
+    : "";
+
+  return `<g class="mermaid-edge"><path d="${path}" marker-end="url(#${layout.markerId})"></path>${label}</g>`;
+}
+
+function wrapMermaidLabel(label) {
+  const lines = String(label || "")
+    .replace(/\\n/g, "\n")
+    .split("\n")
+    .flatMap((line) => wrapMermaidTextLine(line.trim(), 17))
+    .filter(Boolean);
+  return lines.length ? lines.slice(0, 4) : [""];
+}
+
+function wrapMermaidTextLine(line, maxChars) {
+  if (line.length <= maxChars) {
+    return [line];
+  }
+
+  const chunks = [];
+  let cursor = 0;
+  while (cursor < line.length) {
+    chunks.push(line.slice(cursor, cursor + maxChars));
+    cursor += maxChars;
+  }
+  return chunks;
+}
+
+function cleanMermaidLabel(label) {
+  return String(label || "")
+    .replace(/^["']|["']$/g, "")
+    .replace(/\\n/g, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function escapeSvgText(value) {
+  return escapeHtml(value).replace(/\n/g, " ");
 }
 
 function renderMessage(md, message, index, imageRegistry) {
@@ -1416,6 +1761,79 @@ a {
   font-size: 9px;
   font-weight: 800;
   text-transform: uppercase;
+}
+
+.mermaid-card {
+  margin: 14px 0 18px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+  overflow: hidden;
+  break-inside: avoid;
+}
+
+.mermaid-title {
+  padding: 8px 12px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #ffffff;
+  color: #1f2937;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.mermaid-stage {
+  padding: 16px 14px;
+  background: #f8fafc;
+}
+
+.mermaid-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.mermaid-group rect {
+  fill: #ffffff;
+  stroke: #cbd5e1;
+  stroke-width: 1.2;
+}
+
+.mermaid-group text {
+  fill: #64748b;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.mermaid-node rect,
+.mermaid-node ellipse {
+  fill: #f8fafc;
+  stroke: #94a3b8;
+  stroke-width: 1.15;
+}
+
+.mermaid-node text {
+  fill: #0f172a;
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.mermaid-edge path {
+  fill: none;
+  stroke: #64748b;
+  stroke-width: 1.1;
+}
+
+.mermaid-edge-label {
+  fill: #475569;
+  font-size: 9.5px;
+  font-weight: 650;
+  paint-order: stroke;
+  stroke: #f8fafc;
+  stroke-width: 3px;
+}
+
+.mermaid-fallback {
+  margin-top: 0;
 }
 
 .markdown-body table {

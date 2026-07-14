@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Convo Vault",
-  "version": "0.7.10",
+  "version": "0.7.11",
   "description": "Local-first ChatGPT conversation exporter with Hybrid, Fast, and Full capture modes.",
   "permissions": [
     "activeTab",

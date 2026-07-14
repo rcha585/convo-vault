@@ -64,6 +64,8 @@ test("content script is generated from modular Hybrid, Fast, and Full sources", 
   assert.match(backendRender, /assistant-title/);
   assert.match(backendRender, /stripAttachmentOnlyLines/);
   assert.match(backendRender, /compactMarkdownSourceLinks/);
+  assert.match(backendRender, /renderMermaidDiagram/);
+  assert.match(backendRender, /parseMermaidFlowchart/);
   assert.match(backendRender, /shouldShowCodeLabel/);
   assert.doesNotMatch(popupHtml, /portInput|cacheDirInput|browserPathInput|saveSettingsButton|resetSettingsButton/);
   assert.doesNotMatch(popupJs, /portInput|cacheDirInput|browserPathInput|saveSettingsButton|resetSettingsButton/);
