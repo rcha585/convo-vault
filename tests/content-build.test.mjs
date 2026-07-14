@@ -6,7 +6,7 @@ import { buildContentScript } from "../scripts/lib/content-build.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
-test("content script is generated from modular Fast and Full sources", async () => {
+test("content script is generated from modular Hybrid, Fast, and Full sources", async () => {
   const generated = await buildContentScript(repoRoot, { write: false });
   const current = await readFile(path.join(repoRoot, "content.js"), "utf8");
   const debugModule = await readFile(path.join(repoRoot, "src", "content", "debug-log.js"), "utf8");
@@ -26,6 +26,13 @@ test("content script is generated from modular Fast and Full sources", async () 
   assert.match(generated, /tree_format=true/);
   assert.match(generated, /routes\/_conversation\.g\.\$gizmoId\.c\.\$conversationId/);
   assert.match(generated, /function createMessageCollector/);
+  assert.match(generated, /async function collectHybridConversationMessages/);
+  assert.match(generated, /function reconcileHybridMessages/);
+  assert.match(generated, /hybridCapture\.reconciled/);
+  assert.match(generated, /hybridCapture\.fullOnlyCandidates/);
+  assert.match(generated, /function isTimestampDividerText/);
+  assert.match(generated, /option value="hybrid" selected>Hybrid/);
+  assert.match(generated, /Export Loaded Hybrid Bundle/);
   assert.match(generated, /Switch to Full mode if you want to scan the page/);
   assert.doesNotMatch(generated, /falling back to Full scan/);
   assert.match(generated, /assetEmbed\.start/);

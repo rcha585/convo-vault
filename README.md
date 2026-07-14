@@ -10,7 +10,7 @@
 
 Convo Vault 是一个本地优先的 Chrome 扩展，用来把 ChatGPT 对话导出成可以长期保存、检索和二次处理的本地档案。它会读取你当前打开的 ChatGPT 对话，把选中的消息打包成本地 `.zip`，里面包含可读的 Markdown、PDF，以及适合后续放进 Obsidian、知识库、搜索索引或 RAG 流程的结构化数据。
 
-当前版本：`0.7.8`
+当前版本：`0.7.9`
 
 ## 怎么使用
 
@@ -63,7 +63,7 @@ npm run build:extension
 - 回到 ChatGPT 对话页面
 - 点击扩展图标
 - 点击 **Open Selector**
-- 选择 `Fast` 或 `Full`
+- 默认使用 `Hybrid`
 - 勾选要导出的消息
 - 导出 bundle
 
@@ -84,13 +84,24 @@ npm test
 npm run backend:check
 ```
 
-## Fast 和 Full
+如果后端是通过 **Copy Start** 带 token 启动的，`backend:check` 也需要同一个 `CGCE_LOCAL_API_TOKEN`；没有 token 时返回 `401` 是安全拦截，不是服务坏了。
 
-`Fast` 是日常优先模式。它会通过当前已登录的 ChatGPT 页面 session 和 conversation API 读取对话，速度更快，结构更干净，适合大多数导出。
+## Hybrid、Fast 和 Full
 
-`Full` 是更细的页面扫描模式。它会读取当前页面 DOM，速度更慢，但在某些 API 没暴露完整内容的情况下，有机会补到更多页面细节，比如部分 Thinking/flyout 内容。
+`Hybrid` 是默认推荐模式。它先用 `Fast` 读取 ChatGPT conversation API，确定最终消息数量、角色和顺序；再用 `Full` 扫描页面 DOM，补充可见 Thinking、页面细节和渲染线索。最终导出以 Fast 的消息骨架为准，Full 只做补充和异常检查。
 
-如果只是日常保存，先用 `Fast`。如果发现内容缺失，再试 `Full`。
+这意味着：
+
+- Fast 里有、Full 里也能对齐的消息，会合并补强。
+- Fast 里有、Full 没扫到的消息，会保留 Fast。
+- Full 多抓出来但不能对齐 Fast 的候选，会进入 debug report，不会直接混进最终导出。
+- 纯日期/时间分隔符，比如 `星期日 16:10`，会被当作非消息过滤掉。
+
+`Fast` 是 API-first 模式，速度更快，结构更干净，适合快速确认对话骨架。
+
+`Full` 是 DOM-only 深度扫描模式，速度更慢，主要用于调试页面渲染、虚拟滚动、Thinking/flyout 或特殊内容缺失问题。
+
+日常使用先选 `Hybrid`。只有在排查问题时，才单独比较 `Fast` 和 `Full`。
 
 ## 安全措施
 

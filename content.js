@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.8";
+  const EXPORTER_VERSION = "0.7.9";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -198,6 +198,7 @@
   ];
   const DATE_TIME_VALUE_RE = /\b(?:\d{4}[\/.-]\d{1,2}[\/.-]\d{1,2}|\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4})(?:[,\uFF0C]?\s*(?:at\s*)?\d{1,2}:\d{2}(?::\d{2})?(?:\s?(?:am|pm))?)?\b/i;
   const TIME_VALUE_RE = /\b\d{1,2}:\d{2}(?::\d{2})?(?:\s?(?:am|pm))?\b/i;
+  const TIMESTAMP_DIVIDER_RE = /^(?:(?:星期|周)[一二三四五六日天]|(?:mon|tue|wed|thu|fri|sat|sun)(?:day)?|today|yesterday|昨天|今天|明天)(?:[,\uFF0C]?\s+|\s*)\d{1,2}:\d{2}(?::\d{2})?(?:\s?(?:am|pm))?$/i;
   const TIMESTAMP_CUE_RE = /\b(timestamp|sent|created|edited|updated|today|yesterday|date|time|am|pm)\b|\u65f6\u95f4|\u53d1\u9001|\u521b\u5efa|\u7f16\u8f91|\u66f4\u65b0/i;
   const NON_MESSAGE_TEXT_RE = /chatgpt\s+(can|may|might)\s+make\s+mistakes|check\s+important\s+info|verify\s+important\s+information|chatgpt\s*\u4e5f?\u53ef\u80fd\u4f1a?\u72af\u9519|\u8bf7\u6838\u67e5\u91cd\u8981\u4fe1\u606f|\u8bf7\u6838\u5bf9\u91cd\u8981\u4fe1\u606f|\u6838\u67e5\u91cd\u8981\u4fe1\u606f/i;
   const NON_MESSAGE_ROLE_RE = /\b(alert|status|banner|complementary|navigation|contentinfo|dialog|tooltip|menu|menubar|search)\b/i;
@@ -320,28 +321,14 @@
 
     if (captureMode === "fast") {
       try {
-        onProgress("Loading conversation data...");
-        const messages = await collectFastConversationMessages(debugLog);
-
-        if (messages.length) {
-          onProgress("Checking visible thinking details...");
-          await enrichVisibleThinkingFlyouts(messages, debugLog, {
-            autoOpenLimit: FAST_THINKING_FLYOUT_AUTO_OPEN_LIMIT,
-            allowGlobalFallback: false,
-            requireMountedRoot: true
-          });
-          debugLog.mark("enrichedFastThinkingFlyouts");
-          debugLog.finish(messages);
-          onProgress(`Found ${messages.length} messages with Fast capture.`);
-          return {
-            messages,
-            debugLog,
-            captureMode
-          };
-        }
-
-        debugLog.event("fastCapture.empty", {});
-        throw new Error("Fast capture returned no messages. Switch to Full mode to scan the page.");
+        const messages = await collectFastCanonicalMessages(debugLog, onProgress, {
+          finishDebug: true
+        });
+        return {
+          messages,
+          debugLog,
+          captureMode
+        };
       } catch (error) {
         debugLog.event("fastCapture.failed", {
           error: error?.message || String(error)
@@ -350,6 +337,88 @@
       }
     }
 
+    if (captureMode === "hybrid") {
+      return collectHybridConversationMessages(debugLog, onProgress);
+    }
+
+    const messages = await collectFullDomMessages(debugLog, onProgress, {
+      finishDebug: true
+    });
+    return {
+      messages,
+      debugLog,
+      captureMode: "full"
+    };
+  }
+
+  async function collectFastCanonicalMessages(debugLog, onProgress, options = {}) {
+    onProgress("Loading conversation data...");
+    const messages = await collectFastConversationMessages(debugLog);
+
+    if (!messages.length) {
+      debugLog.event("fastCapture.empty", {});
+      throw new Error("Fast capture returned no messages. Switch to Full mode to scan the page.");
+    }
+
+    onProgress("Checking visible thinking details...");
+    await enrichVisibleThinkingFlyouts(messages, debugLog, {
+      autoOpenLimit: FAST_THINKING_FLYOUT_AUTO_OPEN_LIMIT,
+      allowGlobalFallback: false,
+      requireMountedRoot: true
+    });
+    debugLog.mark("enrichedFastThinkingFlyouts");
+
+    if (options.finishDebug !== false) {
+      debugLog.finish(messages);
+    }
+
+    onProgress(`Found ${messages.length} messages with Fast capture.`);
+    return messages;
+  }
+
+  async function collectHybridConversationMessages(debugLog, onProgress) {
+    try {
+      const fastMessages = await collectFastCanonicalMessages(debugLog, onProgress, {
+        finishDebug: false
+      });
+      debugLog.event("hybridCapture.fastReady", {
+        messageCount: fastMessages.length
+      });
+      onProgress(`Fast found ${fastMessages.length} canonical messages. Scanning page for enrichments...`);
+      let fullMessages = [];
+
+      try {
+        fullMessages = await collectFullDomMessages(debugLog, onProgress, {
+          finishDebug: false,
+          progressPrefix: "Full enrichment: "
+        });
+      } catch (error) {
+        debugLog.event("hybridCapture.fullFailed", {
+          error: error?.message || String(error)
+        });
+        onProgress(`Full enrichment failed; using ${fastMessages.length} Fast canonical messages.`);
+      }
+
+      const reconciliation = reconcileHybridMessages(fastMessages, fullMessages, debugLog);
+      const messages = reconciliation.messages;
+      debugLog.event("hybridCapture.reconciled", reconciliation.report);
+      debugLog.finish(messages);
+      onProgress(`Hybrid ready. ${messages.length} canonical messages, ${reconciliation.report.enrichedMessages} enriched, ${reconciliation.report.ignoredFullOnlyMessages} Full-only candidate(s) ignored.`);
+      return {
+        messages,
+        debugLog,
+        captureMode: "hybrid"
+      };
+    } catch (error) {
+      debugLog.event("hybridCapture.failed", {
+        error: error?.message || String(error)
+      });
+      throw new Error(`Hybrid capture failed. Use Fast for API-only export or Full for DOM-only debugging. Details: ${error?.message || error}`);
+    }
+  }
+
+  async function collectFullDomMessages(debugLog, onProgress, options = {}) {
+    const progressPrefix = options.progressPrefix || "";
     const scrollTarget = getBestScrollTarget();
     const originalScrollTop = getScrollTop(scrollTarget);
     const collector = createMessageCollector(debugLog);
@@ -363,19 +432,19 @@
       // ChatGPT can lazy-load older turns. First move upward until the top is
       // stable, then walk downward and capture each visible batch.
       debugLog.mark("start");
-      onProgress("Loading older messages...");
+      onProgress(`${progressPrefix}Loading older messages...`);
       await loadOlderMessages(scrollTarget, collector, debugLog, scanDeadline, scanBudget);
       debugLog.mark("loadedOlderMessages");
-      onProgress("Scanning conversation...");
+      onProgress(`${progressPrefix}Scanning conversation...`);
       await walkConversation(scrollTarget, collector, debugLog, walkDeadline, scanBudget);
       debugLog.mark("walkedConversation");
-      onProgress("Hydrating virtualized messages...");
+      onProgress(`${progressPrefix}Hydrating virtualized messages...`);
       const hydrateDeadline = Math.max(scanDeadline, Date.now() + scanBudget.hydrateReservedMs);
       await hydrateVirtualizedTurns(collector, debugLog, hydrateDeadline, scanBudget);
       debugLog.mark("hydratedVirtualizedTurns");
       await collector.captureFromDom();
       debugLog.mark("finalCapture");
-      onProgress("Recovering missed turns...");
+      onProgress(`${progressPrefix}Recovering missed turns...`);
       const missingBeforeRecovery = getMissingConversationTurnOrders(collector.getMessages());
       const recoveryBudgetMs = getMissingRecoveryBudgetMs(missingBeforeRecovery.length, scanBudget.pageTurnCount);
       const recoveryDeadline = Date.now() + recoveryBudgetMs;
@@ -389,27 +458,225 @@
         throw new Error("No conversation messages were found on this page.");
       }
 
-      onProgress("Loading message timestamps...");
+      onProgress(`${progressPrefix}Loading message timestamps...`);
       await enrichMessageTimestamps(messages, debugLog);
       debugLog.mark("enrichedTimestamps");
-      onProgress("Loading thinking details...");
+      onProgress(`${progressPrefix}Loading thinking details...`);
       await enrichVisibleThinkingFlyouts(messages, debugLog);
       debugLog.mark("enrichedThinkingFlyouts");
-      debugLog.finish(messages);
-      const finalSummary = debugLog.getFinalSummary();
-      if (finalSummary?.missingTurnOrders?.length) {
-        onProgress(`Found ${messages.length}/${finalSummary.expectedTurnCount || finalSummary.pageTurnCount || "?"} messages; ${finalSummary.missingTurnOrders.length} turns may still be missing.`);
-      } else {
-        onProgress(`Found ${messages.length} messages.`);
+
+      if (options.finishDebug !== false) {
+        debugLog.finish(messages);
+        const finalSummary = debugLog.getFinalSummary();
+        if (finalSummary?.missingTurnOrders?.length) {
+          onProgress(`Found ${messages.length}/${finalSummary.expectedTurnCount || finalSummary.pageTurnCount || "?"} messages; ${finalSummary.missingTurnOrders.length} turns may still be missing.`);
+        } else {
+          onProgress(`Found ${messages.length} messages.`);
+        }
       }
-      return {
-        messages,
-        debugLog,
-        captureMode: "full"
-      };
+      return messages;
     } finally {
       setScrollTop(scrollTarget, originalScrollTop);
     }
+  }
+
+  function reconcileHybridMessages(fastMessages, fullMessages, debugLog = null) {
+    const fullMatches = new Map();
+    const fullOnlyCandidates = [];
+    const usedFullMessages = new Set();
+    let enrichedMessages = 0;
+
+    for (const fullMessage of fullMessages) {
+      if (isLikelyFullOnlyNonMessageCandidate(fullMessage)) {
+        fullOnlyCandidates.push({
+          role: fullMessage.role,
+          order: fullMessage.order,
+          reason: "timestamp-or-non-message-divider",
+          preview: fullMessage.preview || makeMessagePreview(fullMessage)
+        });
+        continue;
+      }
+
+      const key = getHybridMessageKey(fullMessage);
+
+      if (!key) {
+        fullOnlyCandidates.push({
+          role: fullMessage.role,
+          order: fullMessage.order,
+          reason: "missing-order-or-role",
+          preview: fullMessage.preview || makeMessagePreview(fullMessage)
+        });
+        continue;
+      }
+
+      const existing = fullMatches.get(key);
+      fullMatches.set(key, existing && isMessageRicher(existing, fullMessage) ? existing : fullMessage);
+    }
+
+    const messages = fastMessages.map((fastMessage, index) => {
+      const key = getHybridMessageKey(fastMessage);
+      const fullMessage = key ? fullMatches.get(key) : null;
+
+      if (!fullMessage) {
+        return {
+          ...fastMessage,
+          captureMode: "hybrid",
+          hybridSource: "fast"
+        };
+      }
+
+      usedFullMessages.add(fullMessage);
+      const merged = mergeHybridMessage(fastMessage, fullMessage, index);
+
+      if (merged.hybridSource !== "fast") {
+        enrichedMessages += 1;
+      }
+
+      return merged;
+    });
+
+    for (const fullMessage of fullMatches.values()) {
+      if (usedFullMessages.has(fullMessage)) {
+        continue;
+      }
+
+      fullOnlyCandidates.push({
+        role: fullMessage.role,
+        order: fullMessage.order,
+        reason: "not-in-fast-canonical-path",
+        preview: fullMessage.preview || makeMessagePreview(fullMessage)
+      });
+    }
+
+    const ignoredSamples = fullOnlyCandidates.slice(0, 12);
+    const report = {
+      fastMessages: fastMessages.length,
+      fullCandidates: fullMessages.length,
+      mergedMessages: messages.length,
+      matchedFullCandidates: usedFullMessages.size,
+      enrichedMessages,
+      ignoredFullOnlyMessages: fullOnlyCandidates.length,
+      ignoredSamples
+    };
+
+    debugLog?.event("hybridCapture.fullOnlyCandidates", {
+      count: fullOnlyCandidates.length,
+      samples: ignoredSamples
+    });
+
+    return {
+      messages,
+      report
+    };
+  }
+
+  function mergeHybridMessage(fastMessage, fullMessage, index = 0) {
+    const markdownSource = chooseHybridMarkdownSource(fastMessage, fullMessage);
+    const thinkingSource = chooseRicherMarkdown(
+      fastMessage.thinkingMarkdown,
+      fullMessage.thinkingMarkdown
+    ) === "second" ? "full" : "fast";
+    const markdown = markdownSource === "full" ? fullMessage.markdown : fastMessage.markdown;
+    const thinkingMarkdown = thinkingSource === "full" ? fullMessage.thinkingMarkdown : fastMessage.thinkingMarkdown;
+    const hybridSource = markdownSource === "full" || thinkingSource === "full" ? "fast+full" : "fast";
+
+    return {
+      ...fastMessage,
+      sourceNode: fullMessage.sourceNode || fastMessage.sourceNode || null,
+      sourceTurnId: fastMessage.sourceTurnId || fullMessage.sourceTurnId || "",
+      sourceTurnContainer: fastMessage.sourceTurnContainer || fullMessage.sourceTurnContainer || "",
+      sourceTestId: fastMessage.sourceTestId || fullMessage.sourceTestId || "",
+      timestamp: fastMessage.timestamp || fullMessage.timestamp || "",
+      markdown,
+      thinkingMarkdown,
+      preview: truncatePreview(cleanMarkdown(`${markdown}\n${thinkingMarkdown}`), 180) || fastMessage.preview || fullMessage.preview || "",
+      codeBlockCount: Math.max(fastMessage.codeBlockCount || 0, fullMessage.codeBlockCount || 0),
+      fileCount: Math.max(fastMessage.fileCount || 0, fullMessage.fileCount || 0),
+      imageCount: Math.max(
+        fastMessage.imageCount || countMarkdownImages(markdown),
+        fullMessage.imageCount || 0
+      ),
+      imagesEmbedded: Math.max(fastMessage.imagesEmbedded || 0, fullMessage.imagesEmbedded || 0),
+      imagesFailed: Math.max(fastMessage.imagesFailed || 0, fullMessage.imagesFailed || 0),
+      captureMode: "hybrid",
+      hybridSource,
+      hybridMarkdownSource: markdownSource,
+      hybridThinkingSource: thinkingSource,
+      turnNumber: normalizeTurnNumber(fastMessage.turnNumber, index),
+      order: fastMessage.order ?? index + 1,
+      conversationOrder: fastMessage.conversationOrder ?? fastMessage.order ?? index + 1,
+      originalOrder: fastMessage.originalOrder ?? fastMessage.order ?? index + 1
+    };
+  }
+
+  function getHybridMessageKey(message) {
+    const order = Number(message?.conversationOrder ?? message?.order ?? message?.turnNumber);
+    const role = String(message?.role || "").toLowerCase();
+
+    if (!Number.isFinite(order) || order <= 0 || !["user", "assistant"].includes(role)) {
+      return "";
+    }
+
+    return `${Math.floor(order)}|${role}`;
+  }
+
+  function chooseHybridMarkdownSource(fastMessage, fullMessage) {
+    const fastMarkdown = String(fastMessage?.markdown || "");
+    const fullMarkdown = String(fullMessage?.markdown || "");
+
+    if (!fullMarkdown.trim()) {
+      return "fast";
+    }
+
+    if (!fastMarkdown.trim()) {
+      return "full";
+    }
+
+    if (hasPortableImagePointers(fastMarkdown) && !hasPortableImagePointers(fullMarkdown)) {
+      return "fast";
+    }
+
+    return chooseRicherMarkdown(fastMarkdown, fullMarkdown) === "second" ? "full" : "fast";
+  }
+
+  function chooseRicherMarkdown(first, second) {
+    const left = String(first || "").trim();
+    const right = String(second || "").trim();
+
+    if (!right) {
+      return "first";
+    }
+
+    if (!left) {
+      return "second";
+    }
+
+    const leftText = normalizeMessageDedupeText(left);
+    const rightText = normalizeMessageDedupeText(right);
+
+    if (rightText.length > leftText.length + Math.max(180, Math.floor(leftText.length * 0.18))) {
+      return "second";
+    }
+
+    return "first";
+  }
+
+  function hasPortableImagePointers(markdown) {
+    return /!\[[^\]]*]\((?:sediment|file-service):\/\/[^)]+\)/i.test(String(markdown || ""));
+  }
+
+  function isLikelyFullOnlyNonMessageCandidate(message) {
+    const text = [message?.markdown, message?.thinkingMarkdown]
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!text) {
+      return false;
+    }
+
+    return isTimestampDividerText(text) || isLikelyNonMessageMarkdown(message);
   }
 
   function getConversationScanBudget() {
@@ -454,11 +721,15 @@
   }
 
   function normalizeCaptureMode(value) {
-    return String(value || "").toLowerCase() === "full" ? "full" : "fast";
+    const mode = String(value || "").toLowerCase();
+    return ["fast", "full", "hybrid"].includes(mode) ? mode : "hybrid";
   }
 
   function formatCaptureMode(value) {
-    return normalizeCaptureMode(value) === "full" ? "Full" : "Fast";
+    const mode = normalizeCaptureMode(value);
+    if (mode === "full") return "Full";
+    if (mode === "fast") return "Fast";
+    return "Hybrid";
   }
 
   function normalizeTurnNumber(value, index = 0) {
@@ -1466,7 +1737,10 @@
       fileCount: message?.fileCount || 0,
       imageCount: message?.imageCount || 0,
       imagesEmbedded: message?.imagesEmbedded || 0,
-      imagesFailed: message?.imagesFailed || 0
+      imagesFailed: message?.imagesFailed || 0,
+      hybridSource: message?.hybridSource || "",
+      hybridMarkdownSource: message?.hybridMarkdownSource || "",
+      hybridThinkingSource: message?.hybridThinkingSource || ""
     };
   }
 
@@ -1626,7 +1900,7 @@
       return false;
     }
 
-    return text.length <= 320 && NON_MESSAGE_TEXT_RE.test(text);
+    return isTimestampDividerText(text) || (text.length <= 320 && NON_MESSAGE_TEXT_RE.test(text));
   }
 
   function getMessageStats(message) {
@@ -1786,7 +2060,7 @@
     let selectedIds = new Set();
     let api = null;
     let currentDebugLog = null;
-    let currentCaptureMode = "fast";
+    let currentCaptureMode = "hybrid";
 
     return {
       open(nextApi) {
@@ -2395,6 +2669,7 @@
               <label class="cgce-format">
                 <span>Mode</span>
                 <select class="cgce-select" data-option="capture-mode">
+                  <option value="hybrid" selected>Hybrid</option>
                   <option value="fast">Fast</option>
                   <option value="full">Full</option>
                 </select>
@@ -2404,7 +2679,7 @@
                 <span>Debug log</span>
               </label>
             </div>
-            <button class="cgce-export" type="button" data-action="export">Export Loaded Fast Bundle</button>
+            <button class="cgce-export" type="button" data-action="export">Export Loaded Hybrid Bundle</button>
           </footer>
         </aside>
       `;
@@ -4513,6 +4788,27 @@
 
     const timeMatch = text.match(TIME_VALUE_RE);
     return timeMatch ? timeMatch[0].trim() : "";
+  }
+
+  function isTimestampDividerText(value) {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+
+    if (!text || text.length > 96) {
+      return false;
+    }
+
+    if (TIMESTAMP_DIVIDER_RE.test(text)) {
+      return true;
+    }
+
+    const dateTime = text.match(DATE_TIME_VALUE_RE)?.[0]?.trim() || "";
+
+    if (dateTime && dateTime === text) {
+      return true;
+    }
+
+    const time = text.match(TIME_VALUE_RE)?.[0]?.trim() || "";
+    return Boolean(time && time === text && TIMESTAMP_CUE_RE.test(text));
   }
 
   async function collectFastConversationMessages(debugLog = null) {
