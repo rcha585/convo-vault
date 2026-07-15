@@ -26,6 +26,13 @@ jobs:
         with:
           node-version: 22
 
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install PDF backend dependencies
+        working-directory: tools/advanced-pdf
+        run: pnpm install --frozen-lockfile
+
       - name: Check syntax and JSON
         run: npm run check
 
