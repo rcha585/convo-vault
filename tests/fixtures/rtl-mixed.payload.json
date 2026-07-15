@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "exporterVersion": "0.7.14-fixture",
+  "title": "RTL mixed script fixture",
+  "source": "https://chatgpt.com/c/rtl-mixed-fixture",
+  "exportedAt": "2026-07-15T00:30:00.000Z",
+  "captureMode": "hybrid",
+  "language": "ar",
+  "messages": [
+    {
+      "id": "rtl-user-1",
+      "role": "user",
+      "turnNumber": 1,
+      "timestamp": "2026-07-15, 10:30:00",
+      "markdown": "هل يمكن حفظ محادثة عربية مختلطة مع English و中文 بدون فقدان النص؟"
+    },
+    {
+      "id": "rtl-assistant-2",
+      "role": "assistant",
+      "turnNumber": 2,
+      "timestamp": "2026-07-15, 10:30:01",
+      "markdown": "نعم. يجب أن يحافظ الأرشيف المحلي على النص الأصلي، including English terms, Hebrew כמו שלום, and Chinese 内容."
+    },
+    {
+      "id": "rtl-user-3",
+      "role": "user",
+      "turnNumber": 3,
+      "timestamp": "2026-07-15, 10:31:00",
+      "markdown": "בדיקה נוספת בעברית: שלום, ארכיון מקומי, mixed direction text."
+    },
+    {
+      "id": "rtl-assistant-4",
+      "role": "assistant",
+      "turnNumber": 4,
+      "timestamp": "2026-07-15, 10:31:01",
+      "markdown": "This fixture checks Unicode preservation for right-to-left scripts. The PDF HTML uses dir=\"auto\" on message content to improve mixed-direction rendering."
+    }
+  ]
+}

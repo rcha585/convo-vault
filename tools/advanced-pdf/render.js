@@ -126,6 +126,7 @@ function loadExportPayload(inputPath) {
     title: payload.title || data.title || "ChatGPT Conversation",
     source: payload.source || data.pageUrl || "",
     exportedAt: payload.exportedAt || data.finishedAt || new Date().toISOString(),
+    language: payload.language || payload.locale || payload.documentLanguage || data.language || data.locale || data.documentLanguage || "",
     messages
   };
 }
@@ -151,9 +152,10 @@ function buildDocumentHtml(payload) {
   const exportedAt = formatDateTime(payload.exportedAt);
   const imageRegistry = buildImageRegistry(messages);
   const tocRows = buildTocRows(messages);
+  const documentLanguage = normalizeDocumentLanguage(payload.language || payload.locale || payload.documentLanguage);
 
   return `<!doctype html>
-<html lang="zh-CN">
+<html lang="${escapeAttr(documentLanguage)}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -171,6 +173,16 @@ function buildDocumentHtml(payload) {
   ${renderImageGallery(imageRegistry.items)}
 </body>
 </html>`;
+}
+
+function normalizeDocumentLanguage(value) {
+  const language = String(value || "").trim();
+
+  if (/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(language)) {
+    return language;
+  }
+
+  return "und";
 }
 
 function renderIntroPages(payload, messages, exportedAt, tocRows) {
@@ -205,7 +217,7 @@ function renderTocCard(rows, sectionIndex) {
 function renderTocRow(row) {
   return `
         <a class="toc-row ${row.kind} ${row.hasThinking ? "has-thinking" : ""}" href="#${escapeAttr(row.id)}">
-          <span class="toc-label">${escapeHtml(row.label)}</span>
+          <span class="toc-label" dir="auto">${escapeHtml(row.label)}</span>
           <span class="toc-meta">
             ${row.hasThinking ? `<span class="toc-chip" aria-label="Thinking"></span>` : ""}
             <span class="toc-type">${escapeHtml(row.type)}</span>
@@ -244,6 +256,8 @@ function createMarkdownRenderer() {
     }
   });
 
+  installMathRules(md);
+
   const defaultFence = md.renderer.rules.fence || renderFenceFallback;
   const defaultLinkOpen = md.renderer.rules.link_open || renderToken;
   md.renderer.rules.fence = (tokens, index, options, env, self) => {
@@ -254,6 +268,10 @@ function createMarkdownRenderer() {
       return renderMermaidDiagram(token.content || "");
     }
 
+    if (isChartLanguage(language)) {
+      return renderChartBlock(token.content || "", language);
+    }
+
     return defaultFence(tokens, index, options, env, self);
   };
 
@@ -262,9 +280,15 @@ function createMarkdownRenderer() {
     const hrefIndex = token.attrIndex("href");
     if (hrefIndex >= 0) {
       const href = token.attrs[hrefIndex][1];
+      const label = tokens[index + 1]?.content || href;
+      const objectLink = getObjectLinkDetails(label, href);
       token.attrSet("href", href);
       token.attrSet("target", "_blank");
       token.attrSet("rel", "noopener noreferrer");
+      if (objectLink) {
+        token.attrJoin("class", `object-link ${objectLink.className}`);
+        token.attrSet("data-object-kind", objectLink.badge);
+      }
     }
     return defaultLinkOpen(tokens, index, options, env, self);
   };
@@ -277,7 +301,7 @@ function createMarkdownRenderer() {
     const asset = registry?.bySrc?.get(src);
 
     if (!src.startsWith("data:image/") && !src.startsWith("file:")) {
-      return `<span class="attachment-chip image-chip">Image: ${escapeHtml(alt)}</span>`;
+      return renderRemoteMediaCard(src, alt);
     }
 
     const figure = `<figure class="inline-image"><img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}"><figcaption>${escapeHtml(alt)}</figcaption></figure>`;
@@ -287,6 +311,303 @@ function createMarkdownRenderer() {
   };
 
   return md;
+}
+
+function installMathRules(md) {
+  md.block.ruler.before("fence", "math_block", (state, startLine, endLine, silent) => {
+    const start = state.bMarks[startLine] + state.tShift[startLine];
+    const end = state.eMarks[startLine];
+    const firstLine = state.src.slice(start, end).trim();
+
+    if (!firstLine.startsWith("$$")) {
+      return false;
+    }
+
+    const firstContent = firstLine.slice(2);
+    if (firstContent.endsWith("$$") && firstContent.length > 2) {
+      if (!silent) {
+        const token = state.push("math_block", "math", 0);
+        token.content = firstContent.slice(0, -2).trim();
+        state.line = startLine + 1;
+      }
+      return true;
+    }
+
+    const content = firstContent.trim() ? [firstContent] : [];
+    let nextLine = startLine + 1;
+
+    while (nextLine < endLine) {
+      const lineStart = state.bMarks[nextLine] + state.tShift[nextLine];
+      const lineEnd = state.eMarks[nextLine];
+      const line = state.src.slice(lineStart, lineEnd);
+      const trimmed = line.trim();
+
+      if (trimmed.endsWith("$$")) {
+        const beforeClose = line.slice(0, line.lastIndexOf("$$"));
+        if (beforeClose.trim()) {
+          content.push(beforeClose);
+        }
+        if (!silent) {
+          const token = state.push("math_block", "math", 0);
+          token.content = content.join("\n").trim();
+          state.line = nextLine + 1;
+        }
+        return true;
+      }
+
+      content.push(line);
+      nextLine += 1;
+    }
+
+    return false;
+  });
+
+  md.inline.ruler.before("escape", "math_inline", (state, silent) => {
+    const marker = "\\(";
+
+    if (state.src.slice(state.pos, state.pos + marker.length) !== marker) {
+      return false;
+    }
+
+    const close = state.src.indexOf("\\)", state.pos + marker.length);
+    if (close < 0) {
+      return false;
+    }
+
+    if (!silent) {
+      const token = state.push("math_inline", "math", 0);
+      token.content = state.src.slice(state.pos + marker.length, close).trim();
+    }
+
+    state.pos = close + 2;
+    return true;
+  });
+
+  md.renderer.rules.math_block = (tokens, index) => {
+    const source = cleanMathSource(tokens[index].content);
+    return `<figure class="math-card"><figcaption>Formula</figcaption><div class="math-display">${renderMathHtml(source, { display: true })}</div></figure>`;
+  };
+
+  md.renderer.rules.math_inline = (tokens, index) => {
+    return `<span class="math-inline">${renderMathHtml(cleanMathSource(tokens[index].content), { display: false })}</span>`;
+  };
+}
+
+function cleanMathSource(value) {
+  return String(value || "")
+    .replace(/\r\n?/g, "\n")
+    .trim();
+}
+
+function renderMathHtml(source, options = {}) {
+  const math = renderMathSegment(source, 0, String(source || "").length).html;
+  return options.display
+    ? math.replace(/(?:<br>){2,}/g, "<br>")
+    : math.replace(/<br>/g, " ");
+}
+
+function renderMathSegment(source, start, end) {
+  let html = "";
+  let index = start;
+
+  while (index < end) {
+    const char = source[index];
+
+    if (char === "\\") {
+      const command = readMathCommand(source, index);
+      if (command.name === "\\") {
+        html += "<br>";
+      } else if (command.name === "frac") {
+        const numerator = readMathAtom(source, command.end);
+        const denominator = readMathAtom(source, numerator.end);
+        html += `<span class="math-frac"><span class="math-num">${numerator.html}</span><span class="math-den">${denominator.html}</span></span>`;
+        index = denominator.end;
+        continue;
+      } else if (command.name === "sqrt") {
+        const radicand = readMathAtom(source, command.end);
+        html += `<span class="math-root"><span class="math-root-symbol">√</span><span class="math-root-body">${radicand.html}</span></span>`;
+        index = radicand.end;
+        continue;
+      } else if (command.name === "left" || command.name === "right") {
+        // Formatting hint only; the next visible delimiter is handled normally.
+      } else {
+        html += escapeHtml(mathCommandToText(command.name));
+      }
+      index = command.end;
+      continue;
+    }
+
+    if (char === "^" || char === "_") {
+      const atom = readMathAtom(source, index + 1);
+      html += char === "^"
+        ? `<sup class="math-sup">${atom.html}</sup>`
+        : `<sub class="math-sub">${atom.html}</sub>`;
+      index = atom.end;
+      continue;
+    }
+
+    if (char === "{") {
+      const group = readMathGroup(source, index);
+      html += group.html;
+      index = group.end;
+      continue;
+    }
+
+    if (char === "}") {
+      index += 1;
+      continue;
+    }
+
+    if (char === "\n") {
+      html += "<br>";
+      index += 1;
+      continue;
+    }
+
+    if (char === "&") {
+      html += `<span class="math-align-space"></span>`;
+      index += 1;
+      continue;
+    }
+
+    html += escapeHtml(char);
+    index += 1;
+  }
+
+  return { html, end: index };
+}
+
+function readMathAtom(source, start) {
+  let index = skipMathWhitespace(source, start);
+
+  if (source[index] === "{") {
+    return readMathGroup(source, index);
+  }
+
+  if (source[index] === "\\") {
+    const command = readMathCommand(source, index);
+    if (command.name === "frac") {
+      const numerator = readMathAtom(source, command.end);
+      const denominator = readMathAtom(source, numerator.end);
+      return {
+        html: `<span class="math-frac"><span class="math-num">${numerator.html}</span><span class="math-den">${denominator.html}</span></span>`,
+        end: denominator.end
+      };
+    }
+    if (command.name === "sqrt") {
+      const radicand = readMathAtom(source, command.end);
+      return {
+        html: `<span class="math-root"><span class="math-root-symbol">√</span><span class="math-root-body">${radicand.html}</span></span>`,
+        end: radicand.end
+      };
+    }
+    return {
+      html: escapeHtml(mathCommandToText(command.name)),
+      end: command.end
+    };
+  }
+
+  if (index >= source.length) {
+    return { html: "", end: index };
+  }
+
+  return {
+    html: escapeHtml(source[index]),
+    end: index + 1
+  };
+}
+
+function readMathGroup(source, start) {
+  let depth = 0;
+  let index = start;
+
+  while (index < source.length) {
+    if (source[index] === "{") {
+      depth += 1;
+    } else if (source[index] === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          html: renderMathSegment(source, start + 1, index).html,
+          end: index + 1
+        };
+      }
+    }
+    index += 1;
+  }
+
+  return {
+    html: escapeHtml(source.slice(start)),
+    end: source.length
+  };
+}
+
+function readMathCommand(source, start) {
+  if (source[start + 1] === "\\") {
+    return { name: "\\", end: start + 2 };
+  }
+
+  const match = source.slice(start + 1).match(/^[A-Za-z]+|^./);
+  const name = match?.[0] || "";
+  return {
+    name,
+    end: start + 1 + name.length
+  };
+}
+
+function skipMathWhitespace(source, start) {
+  let index = start;
+  while (/\s/.test(source[index] || "") && source[index] !== "\n") {
+    index += 1;
+  }
+  return index;
+}
+
+function mathCommandToText(command) {
+  const symbols = {
+    alpha: "α",
+    beta: "β",
+    gamma: "γ",
+    delta: "δ",
+    Delta: "Δ",
+    epsilon: "ε",
+    theta: "θ",
+    lambda: "λ",
+    mu: "μ",
+    pi: "π",
+    sigma: "σ",
+    Sigma: "Σ",
+    omega: "ω",
+    Omega: "Ω",
+    sum: "∑",
+    prod: "∏",
+    int: "∫",
+    infty: "∞",
+    le: "≤",
+    leq: "≤",
+    ge: "≥",
+    geq: "≥",
+    neq: "≠",
+    approx: "≈",
+    times: "×",
+    cdot: "·",
+    pm: "±",
+    to: "→",
+    rightarrow: "→",
+    leftarrow: "←",
+    implies: "⇒",
+    in: "∈",
+    notin: "∉",
+    subset: "⊂",
+    subseteq: "⊆",
+    cup: "∪",
+    cap: "∩",
+    text: ""
+  };
+
+  return Object.prototype.hasOwnProperty.call(symbols, command)
+    ? symbols[command]
+    : command;
 }
 
 function renderFenceFallback(tokens, index) {
@@ -300,18 +621,287 @@ function renderToken(tokens, index, options, env, self) {
   return self.renderToken(tokens, index, options);
 }
 
+function getObjectLinkDetails(label, href) {
+  const text = String(label || "");
+  const url = String(href || "");
+  const fileName = extractObjectLinkFileName(text, url);
+
+  if (/^\s*(Interactive|Dashboard|Canvas|App|Prototype|Site)\s*:/i.test(text)) {
+    return { badge: "APP", className: "object-interactive-link" };
+  }
+
+  if (/^\s*(Source|Citation|Reference)\s*:/i.test(text)) {
+    return { badge: "SRC", className: "object-source-link" };
+  }
+
+  if (!fileName) {
+    return null;
+  }
+
+  const extension = fileName.match(/\.([a-z0-9]{1,8})$/i)?.[1]?.toUpperCase() || "FILE";
+  if (["MP4", "MOV", "WEBM", "M4V"].includes(extension)) {
+    return { badge: "VID", className: "object-media-link" };
+  }
+  if (["MP3", "WAV", "M4A", "AAC", "OGG"].includes(extension)) {
+    return { badge: "AUD", className: "object-media-link" };
+  }
+  if (["XLSX", "XLS", "CSV", "TSV"].includes(extension)) {
+    return { badge: extension.slice(0, 4), className: "object-file-link" };
+  }
+  if (["PPTX", "PPT"].includes(extension)) {
+    return { badge: "PPT", className: "object-file-link" };
+  }
+  if (["PDF", "DOC", "DOCX", "TXT", "MD"].includes(extension)) {
+    return { badge: extension.slice(0, 4), className: "object-file-link" };
+  }
+
+  return { badge: extension.slice(0, 4), className: "object-file-link" };
+}
+
+function extractObjectLinkFileName(label, href) {
+  const combined = `${label || ""} ${href || ""}`;
+  const match = combined.match(/[^\\/:*?"<>|\n\r]{1,140}\.(?:pdf|docx?|xlsx?|pptx?|csv|tsv|txt|md|json|zip|rar|7z|mov|mp4|webm|m4v|mp3|wav|m4a|aac|ogg)\b/i);
+  return match?.[0] || "";
+}
+
+function isChartLanguage(language) {
+  return ["chart", "chart-json", "vega-lite", "vegalite"].includes(String(language || "").toLowerCase());
+}
+
+function renderChartBlock(source, language = "chart") {
+  const chart = parseChartSpec(source, language);
+
+  if (!chart) {
+    return `<figure class="chart-card chart-unsupported">
+      <figcaption class="chart-title">Chart (source preserved)</figcaption>
+      <div class="diagram-degraded-note">This chart could not be parsed, so the source text is preserved in the PDF.</div>
+      <pre class="hljs chart-fallback"><code>${escapeHtml(source)}</code></pre>
+    </figure>`;
+  }
+
+  return `<figure class="chart-card">
+    <figcaption class="chart-title">${escapeHtml(chart.title || formatChartType(chart.type))}</figcaption>
+    <div class="chart-stage">${renderChartSvg(chart)}</div>
+  </figure>`;
+}
+
+function parseChartSpec(source, language = "chart") {
+  const text = String(source || "").trim();
+
+  if (!text) {
+    return null;
+  }
+
+  const json = parseChartJson(text);
+  if (json) {
+    return normalizeChartSpec(json, language);
+  }
+
+  return parseDelimitedChart(text);
+}
+
+function parseChartJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    return null;
+  }
+}
+
+function normalizeChartSpec(value, language = "chart") {
+  const spec = Array.isArray(value) ? { data: value } : value;
+  const type = normalizeChartType(spec.mark || spec.type || spec.chart || (language.includes("vega") ? "bar" : "bar"));
+  const title = typeof spec.title === "string" ? spec.title : "";
+
+  if (Array.isArray(spec.labels) && Array.isArray(spec.values)) {
+    return {
+      type,
+      title,
+      points: spec.labels.map((label, index) => ({
+        label: cleanText(label, 40),
+        value: Number(spec.values[index])
+      })).filter((point) => Number.isFinite(point.value))
+    };
+  }
+
+  const data = Array.isArray(spec.data?.values) ? spec.data.values : (Array.isArray(spec.data) ? spec.data : []);
+  const encoding = spec.encoding || {};
+  const xField = encoding.x?.field || spec.x || "label";
+  const yField = encoding.y?.field || spec.y || "value";
+  const points = data.map((row, index) => ({
+    label: cleanText(row?.[xField] ?? row?.label ?? row?.name ?? `Item ${index + 1}`, 40),
+    value: Number(row?.[yField] ?? row?.value ?? row?.count)
+  })).filter((point) => Number.isFinite(point.value));
+
+  return points.length ? { type, title, points } : null;
+}
+
+function parseDelimitedChart(text) {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  let type = "bar";
+
+  if (/^(bar|line|area|scatter)\b/i.test(lines[0] || "")) {
+    type = normalizeChartType(lines.shift());
+  }
+
+  if (lines[0] && /label\s*,\s*value/i.test(lines[0])) {
+    lines.shift();
+  }
+
+  const points = lines.map((line, index) => {
+    const [label, rawValue] = line.split(/,|\t/);
+    return {
+      label: cleanText(label || `Item ${index + 1}`, 40),
+      value: Number(rawValue)
+    };
+  }).filter((point) => point.label && Number.isFinite(point.value));
+
+  return points.length ? { type, title: formatChartType(type), points } : null;
+}
+
+function normalizeChartType(value) {
+  const type = String(value || "bar").toLowerCase().replace(/[^a-z]/g, "");
+  if (type.includes("line")) return "line";
+  if (type.includes("area")) return "line";
+  if (type.includes("scatter")) return "scatter";
+  return "bar";
+}
+
+function formatChartType(type) {
+  if (type === "line") return "Line chart";
+  if (type === "scatter") return "Scatter chart";
+  return "Bar chart";
+}
+
+function renderChartSvg(chart) {
+  const width = 620;
+  const height = 300;
+  const margin = { top: 24, right: 22, bottom: 58, left: 52 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const maxValue = Math.max(1, ...chart.points.map((point) => point.value));
+  const minValue = Math.min(0, ...chart.points.map((point) => point.value));
+  const range = Math.max(1, maxValue - minValue);
+  const scaleY = (value) => margin.top + plotHeight - ((value - minValue) / range) * plotHeight;
+  const zeroY = scaleY(0);
+  const axis = renderChartAxis({ width, height, margin, plotWidth, plotHeight, maxValue, minValue, zeroY });
+  const labels = chart.points.map((point, index) => {
+    const x = margin.left + (index + 0.5) * (plotWidth / chart.points.length);
+    return `<text class="chart-label" x="${x}" y="${height - 22}" text-anchor="middle">${escapeSvgText(point.label)}</text>`;
+  }).join("");
+
+  const plot = chart.type === "bar"
+    ? renderBarChartPlot(chart, { margin, plotWidth, scaleY, zeroY })
+    : renderLineChartPlot(chart, { margin, plotWidth, scaleY });
+
+  return `<svg class="chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeAttr(chart.title || formatChartType(chart.type))}" xmlns="http://www.w3.org/2000/svg">
+    ${axis}
+    ${plot}
+    ${labels}
+  </svg>`;
+}
+
+function renderChartAxis({ width, height, margin, plotWidth, plotHeight, maxValue, minValue, zeroY }) {
+  const ticks = [minValue, (minValue + maxValue) / 2, maxValue]
+    .map((value) => Number(value.toFixed(2)));
+  const grid = ticks.map((tick) => {
+    const y = margin.top + plotHeight - ((tick - minValue) / Math.max(1, maxValue - minValue)) * plotHeight;
+    return `<g class="chart-grid">
+      <line x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}"></line>
+      <text x="${margin.left - 8}" y="${y + 4}" text-anchor="end">${escapeSvgText(String(tick))}</text>
+    </g>`;
+  }).join("");
+
+  return `${grid}
+    <line class="chart-axis" x1="${margin.left}" y1="${zeroY}" x2="${width - margin.right}" y2="${zeroY}"></line>
+    <line class="chart-axis" x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${height - margin.bottom}"></line>`;
+}
+
+function renderBarChartPlot(chart, context) {
+  const { margin, plotWidth, scaleY, zeroY } = context;
+  const slot = plotWidth / chart.points.length;
+  const barWidth = Math.max(16, Math.min(54, slot * 0.58));
+
+  return chart.points.map((point, index) => {
+    const x = margin.left + index * slot + (slot - barWidth) / 2;
+    const y = Math.min(scaleY(point.value), zeroY);
+    const height = Math.max(1, Math.abs(zeroY - scaleY(point.value)));
+    return `<g class="chart-bar-group">
+      <rect class="chart-bar" x="${x}" y="${y}" width="${barWidth}" height="${height}" rx="4"></rect>
+      <text class="chart-value" x="${x + barWidth / 2}" y="${y - 6}" text-anchor="middle">${escapeSvgText(String(point.value))}</text>
+    </g>`;
+  }).join("");
+}
+
+function renderLineChartPlot(chart, context) {
+  const { margin, plotWidth, scaleY } = context;
+  const step = chart.points.length > 1 ? plotWidth / (chart.points.length - 1) : plotWidth;
+  const points = chart.points.map((point, index) => ({
+    x: margin.left + index * step,
+    y: scaleY(point.value),
+    value: point.value
+  }));
+  const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+  const dots = points.map((point) => `<circle class="chart-dot" cx="${point.x}" cy="${point.y}" r="4"></circle>`).join("");
+  const values = points.map((point) => `<text class="chart-value" x="${point.x}" y="${point.y - 8}" text-anchor="middle">${escapeSvgText(String(point.value))}</text>`).join("");
+
+  return `<path class="chart-line" d="${path}"></path>${dots}${values}`;
+}
+
 function renderMermaidDiagram(source) {
+  const diagramType = getMermaidDiagramType(source);
+
+  if (diagramType === "sequencediagram") {
+    const sequence = parseMermaidSequence(source);
+    if (sequence) {
+      return `<figure class="mermaid-card">${renderMermaidTitle("Mermaid Sequence")}<div class="mermaid-stage">${renderSequenceSvg(sequence)}</div></figure>`;
+    }
+  }
+
+  if (diagramType === "erdiagram") {
+    const erDiagram = parseMermaidErDiagram(source);
+    if (erDiagram) {
+      return `<figure class="mermaid-card">${renderMermaidTitle("Mermaid ER Diagram")}<div class="mermaid-stage">${renderErSvg(erDiagram)}</div></figure>`;
+    }
+  }
+
+  if (diagramType === "statediagram" || diagramType === "statediagram-v2") {
+    const stateDiagram = parseMermaidStateDiagram(source);
+    if (stateDiagram) {
+      return `<figure class="mermaid-card">${renderMermaidTitle("Mermaid State Diagram")}<div class="mermaid-stage">${renderStateSvg(stateDiagram)}</div></figure>`;
+    }
+  }
+
   const graph = parseMermaidFlowchart(source);
 
   if (!graph) {
-    return `${renderMermaidTitle()}<pre class="hljs mermaid-fallback"><code>${escapeHtml(source)}</code></pre>`;
+    return renderUnsupportedMermaidDiagram(source, diagramType);
   }
 
-  return `<figure class="mermaid-card">${renderMermaidTitle()}<div class="mermaid-stage">${renderFlowchartSvg(graph)}</div></figure>`;
+  return `<figure class="mermaid-card">${renderMermaidTitle("Mermaid")}<div class="mermaid-stage">${renderFlowchartSvg(graph)}</div></figure>`;
 }
 
-function renderMermaidTitle() {
-  return `<figcaption class="mermaid-title">Mermaid</figcaption>`;
+function renderMermaidTitle(label = "Mermaid") {
+  return `<figcaption class="mermaid-title">${escapeHtml(label)}</figcaption>`;
+}
+
+function renderUnsupportedMermaidDiagram(source, diagramType = "") {
+  const label = diagramType ? `Mermaid ${diagramType} (source preserved)` : "Mermaid (source preserved)";
+  return `<figure class="mermaid-card mermaid-unsupported">
+    ${renderMermaidTitle(label)}
+    <div class="diagram-degraded-note">This diagram type is preserved as source text in the PDF.</div>
+    <pre class="hljs mermaid-fallback"><code>${escapeHtml(source)}</code></pre>
+  </figure>`;
+}
+
+function getMermaidDiagramType(source) {
+  const firstLine = String(source || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith("%%")) || "";
+  const match = firstLine.match(/^([A-Za-z][A-Za-z0-9_-]*)/);
+  return String(match?.[1] || "").toLowerCase();
 }
 
 function parseMermaidFlowchart(source) {
@@ -372,6 +962,415 @@ function parseMermaidFlowchart(source) {
   }
 
   return graph.nodes.size ? graph : null;
+}
+
+function parseMermaidSequence(source) {
+  const lines = String(source || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("%%"));
+
+  if (!/^sequenceDiagram\b/i.test(lines.shift() || "")) {
+    return null;
+  }
+
+  const participants = new Map();
+  const events = [];
+
+  for (const line of lines) {
+    const participant = line.match(/^(?:participant|actor)\s+([A-Za-z][\w-]*)(?:\s+as\s+(.+))?$/i);
+    if (participant) {
+      ensureSequenceParticipant(participants, participant[1], participant[2] || participant[1]);
+      continue;
+    }
+
+    const note = line.match(/^Note\s+(?:over|left of|right of)\s+([A-Za-z][\w-]*(?:\s*,\s*[A-Za-z][\w-]*)*)\s*:\s*(.+)$/i);
+    if (note) {
+      const ids = note[1].split(/\s*,\s*/).filter(Boolean);
+      ids.forEach((id) => ensureSequenceParticipant(participants, id, id));
+      events.push({
+        kind: "note",
+        participants: ids,
+        text: cleanMermaidLabel(note[2])
+      });
+      continue;
+    }
+
+    const message = line.match(/^([A-Za-z][\w-]*)\s*(?:-{1,2}|={1,2})(?:>>|>|x)?\s*([A-Za-z][\w-]*)\s*:\s*(.+)$/);
+    if (message) {
+      ensureSequenceParticipant(participants, message[1], message[1]);
+      ensureSequenceParticipant(participants, message[2], message[2]);
+      events.push({
+        kind: "message",
+        from: message[1],
+        to: message[2],
+        text: cleanMermaidLabel(message[3])
+      });
+    }
+  }
+
+  return participants.size && events.length ? {
+    participants: [...participants.values()],
+    events
+  } : null;
+}
+
+function ensureSequenceParticipant(participants, id, label) {
+  if (!participants.has(id)) {
+    participants.set(id, {
+      id,
+      label: cleanMermaidLabel(label || id)
+    });
+  }
+
+  return participants.get(id);
+}
+
+function renderSequenceSvg(sequence) {
+  const participantWidth = 150;
+  const participantGap = 28;
+  const top = 22;
+  const headerHeight = 34;
+  const eventGap = 48;
+  const left = 12;
+  const width = Math.max(430, sequence.participants.length * participantWidth + Math.max(0, sequence.participants.length - 1) * participantGap + left * 2);
+  const height = top + headerHeight + 34 + sequence.events.length * eventGap + 24;
+  const positions = new Map();
+
+  sequence.participants.forEach((participant, index) => {
+    const x = left + participantWidth / 2 + index * (participantWidth + participantGap);
+    positions.set(participant.id, x);
+  });
+
+  const participantBoxes = sequence.participants.map((participant) => {
+    const x = positions.get(participant.id);
+    return `<g class="sequence-participant">
+      <rect x="${x - participantWidth / 2}" y="${top}" width="${participantWidth}" height="${headerHeight}" rx="7"></rect>
+      <text x="${x}" y="${top + 22}" text-anchor="middle">${escapeSvgText(participant.label)}</text>
+      <line x1="${x}" y1="${top + headerHeight}" x2="${x}" y2="${height - 18}"></line>
+    </g>`;
+  }).join("");
+
+  const events = sequence.events.map((event, index) => {
+    const y = top + headerHeight + 34 + index * eventGap;
+
+    if (event.kind === "note") {
+      const xs = event.participants.map((id) => positions.get(id)).filter((value) => Number.isFinite(value));
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const boxX = Math.max(left, minX - 58);
+      const boxWidth = Math.min(width - boxX - left, Math.max(130, maxX - minX + 116));
+      return `<g class="sequence-note">
+        <rect x="${boxX}" y="${y - 16}" width="${boxWidth}" height="30" rx="6"></rect>
+        <text x="${boxX + boxWidth / 2}" y="${y + 4}" text-anchor="middle">${escapeSvgText(event.text)}</text>
+      </g>`;
+    }
+
+    const fromX = positions.get(event.from);
+    const toX = positions.get(event.to);
+    if (!Number.isFinite(fromX) || !Number.isFinite(toX)) {
+      return "";
+    }
+
+    const direction = fromX <= toX ? 1 : -1;
+    const labelX = (fromX + toX) / 2;
+    return `<g class="sequence-message">
+      <line x1="${fromX}" y1="${y}" x2="${toX - direction * 8}" y2="${y}" marker-end="url(#sequence-arrow)"></line>
+      <text x="${labelX}" y="${y - 7}" text-anchor="middle">${escapeSvgText(event.text)}</text>
+    </g>`;
+  }).join("");
+
+  return `<svg class="sequence-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Mermaid sequence diagram" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="sequence-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M 0 0 L 8 4 L 0 8 z" fill="#64748b"></path>
+      </marker>
+    </defs>
+    ${participantBoxes}
+    ${events}
+  </svg>`;
+}
+
+function parseMermaidErDiagram(source) {
+  const lines = String(source || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("%%"));
+
+  if (!/^erDiagram\b/i.test(lines.shift() || "")) {
+    return null;
+  }
+
+  const entities = new Map();
+  const relationships = [];
+  let currentEntity = "";
+
+  for (const line of lines) {
+    const entityStart = line.match(/^([A-Za-z][\w-]*)\s*\{$/);
+    if (entityStart) {
+      currentEntity = entityStart[1];
+      ensureErEntity(entities, currentEntity);
+      continue;
+    }
+
+    if (line === "}") {
+      currentEntity = "";
+      continue;
+    }
+
+    if (currentEntity) {
+      const entity = ensureErEntity(entities, currentEntity);
+      entity.attributes.push(cleanMermaidLabel(line));
+      continue;
+    }
+
+    const relationship = line.match(/^([A-Za-z][\w-]*)\s+([|o}{]+)--([|o}{]+)\s+([A-Za-z][\w-]*)\s*:?\s*(.*)$/);
+    if (relationship) {
+      const from = ensureErEntity(entities, relationship[1]);
+      const to = ensureErEntity(entities, relationship[4]);
+      relationships.push({
+        from: from.id,
+        to: to.id,
+        leftCardinality: relationship[2],
+        rightCardinality: relationship[3],
+        label: cleanMermaidLabel(relationship[5] || "")
+      });
+    }
+  }
+
+  return entities.size ? {
+    entities: [...entities.values()],
+    relationships
+  } : null;
+}
+
+function ensureErEntity(entities, id) {
+  if (!entities.has(id)) {
+    entities.set(id, {
+      id,
+      label: cleanMermaidLabel(id.replace(/_/g, " ")),
+      attributes: []
+    });
+  }
+
+  return entities.get(id);
+}
+
+function renderErSvg(diagram) {
+  const columnWidth = 180;
+  const rowHeight = 102;
+  const gapX = 48;
+  const gapY = 22;
+  const cols = Math.min(3, Math.max(1, Math.ceil(Math.sqrt(diagram.entities.length))));
+  const rows = Math.ceil(diagram.entities.length / cols);
+  const width = cols * columnWidth + Math.max(0, cols - 1) * gapX + 24;
+  const height = rows * rowHeight + Math.max(0, rows - 1) * gapY + 24;
+  const positions = new Map();
+
+  diagram.entities.forEach((entity, index) => {
+    const col = index % cols;
+    const row = Math.floor(index / cols);
+    const x = 12 + col * (columnWidth + gapX);
+    const y = 12 + row * (rowHeight + gapY);
+    positions.set(entity.id, {
+      x,
+      y,
+      width: columnWidth,
+      height: rowHeight
+    });
+  });
+
+  const relationships = diagram.relationships.map((relationship) => {
+    const from = positions.get(relationship.from);
+    const to = positions.get(relationship.to);
+    if (!from || !to) return "";
+
+    const fromX = from.x + from.width / 2;
+    const fromY = from.y + from.height / 2;
+    const toX = to.x + to.width / 2;
+    const toY = to.y + to.height / 2;
+    const labelX = (fromX + toX) / 2;
+    const labelY = (fromY + toY) / 2 - 5;
+    const label = [
+      relationship.leftCardinality,
+      relationship.label,
+      relationship.rightCardinality
+    ].filter(Boolean).join(" ");
+
+    return `<g class="er-relationship">
+      <path d="M ${fromX} ${fromY} C ${labelX} ${fromY}, ${labelX} ${toY}, ${toX} ${toY}"></path>
+      ${label ? `<text x="${labelX}" y="${labelY}" text-anchor="middle">${escapeSvgText(label)}</text>` : ""}
+    </g>`;
+  }).join("");
+
+  const entities = diagram.entities.map((entity) => {
+    const box = positions.get(entity.id);
+    const attributes = entity.attributes.slice(0, 4).map((attribute, index) => (
+      `<text class="er-attribute" x="${box.x + 12}" y="${box.y + 48 + index * 13}">${escapeSvgText(attribute)}</text>`
+    )).join("");
+    return `<g class="er-entity">
+      <rect x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}" rx="7"></rect>
+      <line x1="${box.x}" y1="${box.y + 33}" x2="${box.x + box.width}" y2="${box.y + 33}"></line>
+      <text class="er-title" x="${box.x + box.width / 2}" y="${box.y + 22}" text-anchor="middle">${escapeSvgText(entity.label)}</text>
+      ${attributes}
+    </g>`;
+  }).join("");
+
+  return `<svg class="er-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Mermaid ER diagram" xmlns="http://www.w3.org/2000/svg">
+    ${relationships}
+    ${entities}
+  </svg>`;
+}
+
+function parseMermaidStateDiagram(source) {
+  const lines = String(source || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("%%"));
+  const header = lines.shift() || "";
+
+  if (!/^stateDiagram(?:-v2)?\b/i.test(header)) {
+    return null;
+  }
+
+  const states = new Map();
+  const transitions = [];
+
+  for (const line of lines) {
+    const alias = line.match(/^state\s+"([^"]+)"\s+as\s+([A-Za-z][\w-]*)$/i);
+    if (alias) {
+      ensureStateNode(states, alias[2], alias[1]);
+      continue;
+    }
+
+    const transition = line.match(/^(\[\*\]|[A-Za-z][\w-]*)\s*-->\s*(\[\*\]|[A-Za-z][\w-]*)(?:\s*:\s*(.+))?$/);
+    if (transition) {
+      const from = ensureStateNode(
+        states,
+        transition[1] === "[*]" ? "__start" : transition[1],
+        transition[1],
+        transition[1] === "[*]" ? "start" : ""
+      );
+      const to = ensureStateNode(
+        states,
+        transition[2] === "[*]" ? "__end" : transition[2],
+        transition[2],
+        transition[2] === "[*]" ? "end" : ""
+      );
+      transitions.push({
+        from: from.id,
+        to: to.id,
+        label: cleanMermaidLabel(transition[3] || "")
+      });
+      continue;
+    }
+
+    const plain = line.match(/^state\s+([A-Za-z][\w-]*)$/i) || line.match(/^([A-Za-z][\w-]*)$/);
+    if (plain) {
+      ensureStateNode(states, plain[1], plain[1]);
+    }
+  }
+
+  return states.size ? {
+    states: [...states.values()],
+    transitions
+  } : null;
+}
+
+function ensureStateNode(states, id, label, terminalKind = "") {
+  const normalized = id === "[*]" ? "state-terminal" : id;
+  if (!states.has(normalized)) {
+    states.set(normalized, {
+      id: normalized,
+      rawId: id,
+      label: label === "[*]" ? "" : cleanMermaidLabel(label || id),
+      terminal: label === "[*]" || Boolean(terminalKind),
+      terminalKind
+    });
+  }
+
+  return states.get(normalized);
+}
+
+function renderStateSvg(diagram) {
+  const nodeWidth = 132;
+  const nodeHeight = 48;
+  const gapX = 54;
+  const gapY = 38;
+  const cols = diagram.states.length <= 5
+    ? diagram.states.length
+    : Math.min(3, Math.max(1, Math.ceil(Math.sqrt(diagram.states.length))));
+  const rows = Math.ceil(diagram.states.length / cols);
+  const width = cols * nodeWidth + Math.max(0, cols - 1) * gapX + 32;
+  const height = rows * nodeHeight + Math.max(0, rows - 1) * gapY + 32;
+  const positions = new Map();
+
+  diagram.states.forEach((state, index) => {
+    const col = index % cols;
+    const row = Math.floor(index / cols);
+    positions.set(state.id, {
+      x: 16 + col * (nodeWidth + gapX),
+      y: 16 + row * (nodeHeight + gapY),
+      width: nodeWidth,
+      height: nodeHeight
+    });
+  });
+
+  const transitions = diagram.transitions.map((transition) => {
+    const from = positions.get(transition.from);
+    const to = positions.get(transition.to);
+    if (!from || !to) return "";
+
+    const fromCenterX = from.x + from.width / 2;
+    const toCenterX = to.x + to.width / 2;
+    const leftToRight = toCenterX >= fromCenterX;
+    const fromX = leftToRight ? from.x + from.width : from.x;
+    const fromY = from.y + from.height / 2;
+    const toX = leftToRight ? to.x : to.x + to.width;
+    const toY = to.y + to.height / 2;
+    const sameColumn = Math.abs(from.x - to.x) < 4;
+    const sx = sameColumn ? from.x + from.width / 2 : fromX;
+    const sy = sameColumn ? from.y + from.height : fromY;
+    const tx = sameColumn ? to.x + to.width / 2 : toX;
+    const ty = sameColumn ? to.y : toY;
+    const curve = sameColumn ? 28 : Math.max(28, Math.abs(tx - sx) / 2);
+    const path = sameColumn
+      ? `M ${sx} ${sy} C ${sx} ${sy + curve}, ${tx} ${ty - curve}, ${tx} ${ty}`
+      : `M ${sx} ${sy} C ${sx + curve} ${sy}, ${tx - curve} ${ty}, ${tx} ${ty}`;
+    const labelX = (sx + tx) / 2;
+    const labelY = (sy + ty) / 2 - 7;
+
+    return `<g class="state-transition">
+      <path d="${path}" marker-end="url(#state-arrow)"></path>
+      ${transition.label ? `<text x="${labelX}" y="${labelY}" text-anchor="middle">${escapeSvgText(transition.label)}</text>` : ""}
+    </g>`;
+  }).join("");
+
+  const states = diagram.states.map((state) => {
+    const box = positions.get(state.id);
+    if (state.terminal) {
+      return `<g class="state-node state-terminal">
+        <circle cx="${box.x + box.width / 2}" cy="${box.y + box.height / 2}" r="12"></circle>
+      </g>`;
+    }
+    return `<g class="state-node">
+      <rect x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}" rx="20"></rect>
+      <text x="${box.x + box.width / 2}" y="${box.y + 30}" text-anchor="middle">${escapeSvgText(state.label)}</text>
+    </g>`;
+  }).join("");
+
+  return `<svg class="state-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Mermaid state diagram" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="state-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M 0 0 L 8 4 L 0 8 z" fill="#64748b"></path>
+      </marker>
+    </defs>
+    ${transitions}
+    ${states}
+  </svg>`;
 }
 
 function ensureMermaidGroup(graph, name) {
@@ -697,13 +1696,13 @@ function renderAvatarImage(src, alt) {
 function renderThinking(md, thinkingMarkdown, imageRegistry) {
   return `<section class="thinking">
     <h3>Thinking</h3>
-    <div class="thinking-body markdown-body">${md.render(cleanMarkdownForHtml(thinkingMarkdown), { imageRegistry })}</div>
+    <div class="thinking-body markdown-body" dir="auto">${md.render(cleanMarkdownForHtml(thinkingMarkdown), { imageRegistry })}</div>
   </section>`;
 }
 
 function renderMessageMarkdown(md, markdown, imageRegistry) {
   const cleaned = cleanMarkdownForHtml(markdown || "_No text content found._");
-  return `<div class="markdown-body">${md.render(cleaned, { imageRegistry })}</div>`;
+  return `<div class="markdown-body" dir="auto">${md.render(cleaned, { imageRegistry })}</div>`;
 }
 
 function buildPaginationScript() {
@@ -872,6 +1871,20 @@ function extractMarkdownImages(markdown) {
   }
 
   return images;
+}
+
+function renderRemoteMediaCard(src, alt) {
+  const kind = /\.gif(?:$|[?#])/i.test(src) ? "GIF" : "IMG";
+  const note = kind === "GIF"
+    ? "Animated media is preserved as a reference; PDF output is static."
+    : "Remote image reference preserved; embed when local bytes are available.";
+  return `<a class="remote-media-card" href="${escapeAttr(src)}" target="_blank" rel="noopener noreferrer">
+    <span class="remote-media-kind">${kind}</span>
+    <span class="remote-media-main">
+      <span class="remote-media-label">${escapeHtml(alt || "Image")}</span>
+      <span class="remote-media-note">${escapeHtml(note)}</span>
+    </span>
+  </a>`;
 }
 
 function renderImageGallery(items) {
@@ -1362,7 +2375,7 @@ body {
   margin: 0;
   color: #111827;
   background: #ffffff;
-  font-family: Inter, "Noto Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+  font-family: Inter, "Noto Sans", "Noto Sans Arabic", "Noto Sans Hebrew", "Noto Sans SC", "Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans CJK KR", "Noto Sans JP", "Noto Sans KR", "Microsoft YaHei", "PingFang SC", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, "Malgun Gothic", "Apple SD Gothic Neo", "Segoe UI", Arial, sans-serif;
   font-size: 13.1px;
   line-height: 1.6;
   letter-spacing: 0;
@@ -1804,6 +2817,96 @@ a {
   text-transform: uppercase;
 }
 
+.math-card {
+  margin: 14px 0 16px;
+  border: 1px solid #dbe3ed;
+  border-radius: 9px;
+  background: #fbfdff;
+  break-inside: avoid;
+  overflow: hidden;
+}
+
+.math-card figcaption {
+  padding: 7px 11px;
+  border-bottom: 1px solid #e5ebf3;
+  background: #ffffff;
+  color: #475569;
+  font-size: 10.5px;
+  font-weight: 800;
+}
+
+.math-display {
+  padding: 14px 16px;
+  text-align: center;
+  color: #0f172a;
+  font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
+  font-size: 16px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.math-inline {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #0f172a;
+  font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
+  font-size: .96em;
+}
+
+.math-frac {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  line-height: 1.08;
+  margin: 0 2px;
+}
+
+.math-num {
+  display: block;
+  padding: 0 4px 2px;
+  border-bottom: 1px solid currentColor;
+  font-size: .86em;
+}
+
+.math-den {
+  display: block;
+  padding: 2px 4px 0;
+  font-size: .86em;
+}
+
+.math-root {
+  display: inline-flex;
+  align-items: stretch;
+  vertical-align: middle;
+  margin: 0 2px;
+}
+
+.math-root-symbol {
+  font-size: 1.18em;
+  line-height: 1;
+  padding-right: 1px;
+}
+
+.math-root-body {
+  border-top: 1px solid currentColor;
+  padding: 1px 3px 0;
+}
+
+.math-sup,
+.math-sub {
+  font-size: .72em;
+  line-height: 0;
+}
+
+.math-align-space {
+  display: inline-block;
+  width: 16px;
+}
+
 .mermaid-card {
   margin: 14px 0 18px;
   border: 1px solid #e5e7eb;
@@ -1875,6 +2978,189 @@ a {
 
 .mermaid-fallback {
   margin-top: 0;
+}
+
+.diagram-degraded-note {
+  padding: 9px 12px 0;
+  color: #64748b;
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.sequence-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.sequence-participant rect {
+  fill: #ffffff;
+  stroke: #94a3b8;
+  stroke-width: 1.1;
+}
+
+.sequence-participant text {
+  fill: #0f172a;
+  font-size: 10.5px;
+  font-weight: 760;
+}
+
+.sequence-participant line {
+  stroke: #cbd5e1;
+  stroke-width: 1;
+  stroke-dasharray: 4 5;
+}
+
+.sequence-message line {
+  stroke: #64748b;
+  stroke-width: 1.25;
+}
+
+.sequence-message text,
+.sequence-note text {
+  fill: #334155;
+  font-size: 10px;
+  font-weight: 650;
+  paint-order: stroke;
+  stroke: #f8fafc;
+  stroke-width: 3px;
+}
+
+.sequence-note rect {
+  fill: #fff7ed;
+  stroke: #fed7aa;
+  stroke-width: 1;
+}
+
+.er-svg,
+.state-svg,
+.chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.er-relationship path,
+.state-transition path {
+  fill: none;
+  stroke: #64748b;
+  stroke-width: 1.15;
+}
+
+.er-relationship text,
+.state-transition text {
+  fill: #334155;
+  font-size: 9.7px;
+  font-weight: 700;
+  paint-order: stroke;
+  stroke: #f8fafc;
+  stroke-width: 3px;
+}
+
+.er-entity rect {
+  fill: #ffffff;
+  stroke: #94a3b8;
+  stroke-width: 1.15;
+}
+
+.er-entity line {
+  stroke: #dbe3ed;
+  stroke-width: 1;
+}
+
+.er-title {
+  fill: #0f172a;
+  font-size: 10.6px;
+  font-weight: 800;
+}
+
+.er-attribute {
+  fill: #475569;
+  font-size: 9.2px;
+  font-weight: 600;
+}
+
+.state-node rect {
+  fill: #ffffff;
+  stroke: #94a3b8;
+  stroke-width: 1.15;
+}
+
+.state-node text {
+  fill: #0f172a;
+  font-size: 10.5px;
+  font-weight: 750;
+}
+
+.state-terminal circle {
+  fill: #0f172a;
+  stroke: #0f172a;
+}
+
+.chart-card {
+  margin: 14px 0 18px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+  overflow: hidden;
+  break-inside: avoid;
+}
+
+.chart-title {
+  padding: 8px 12px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #ffffff;
+  color: #1f2937;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.chart-stage {
+  padding: 14px 14px 8px;
+  background: #f8fafc;
+}
+
+.chart-grid line {
+  stroke: #e2e8f0;
+  stroke-width: 1;
+}
+
+.chart-grid text,
+.chart-label {
+  fill: #64748b;
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+.chart-axis {
+  stroke: #94a3b8;
+  stroke-width: 1.2;
+}
+
+.chart-bar {
+  fill: #10a37f;
+}
+
+.chart-line {
+  fill: none;
+  stroke: #2563eb;
+  stroke-width: 2;
+}
+
+.chart-dot {
+  fill: #ffffff;
+  stroke: #2563eb;
+  stroke-width: 2;
+}
+
+.chart-value {
+  fill: #334155;
+  font-size: 9.5px;
+  font-weight: 750;
+}
+
+.chart-fallback {
+  margin: 8px 12px 12px;
 }
 
 .markdown-body table {
@@ -2046,6 +3332,102 @@ a {
   color: #475569;
   font-size: 10.5px;
   font-weight: 650;
+}
+
+.remote-media-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  max-width: 100%;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid #dbe3ed;
+  border-radius: 9px;
+  background: #fbfdff;
+  color: inherit;
+  text-decoration: none;
+  break-inside: avoid;
+}
+
+.remote-media-kind {
+  width: 32px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 9px;
+  font-weight: 900;
+  flex: 0 0 auto;
+}
+
+.remote-media-main {
+  min-width: 0;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.remote-media-label {
+  color: #111827;
+  font-size: 11.2px;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.remote-media-note {
+  color: #64748b;
+  font-size: 9.7px;
+}
+
+.object-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  margin: 3px 5px 4px 0;
+  padding: 6px 9px 6px 7px;
+  border: 1px solid #dbe3ed;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f2937;
+  text-decoration: none;
+  font-size: 11.2px;
+  font-weight: 650;
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+}
+
+.object-link::before {
+  content: attr(data-object-kind);
+  min-width: 28px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 8px;
+  font-weight: 900;
+  flex: 0 0 auto;
+}
+
+.object-media-link::before {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.object-interactive-link::before {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.object-source-link::before {
+  background: #e0f2fe;
+  color: #075985;
 }
 
 .image-gallery {

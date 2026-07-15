@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "exporterVersion": "0.7.14-fixture",
+  "title": "CJK locale fixture",
+  "source": "https://chatgpt.com/c/cjk-locale-fixture",
+  "exportedAt": "2026-07-15T00:20:00.000Z",
+  "captureMode": "hybrid",
+  "language": "ja-JP",
+  "messages": [
+    {
+      "id": "cjk-user-1",
+      "role": "user",
+      "turnNumber": 1,
+      "timestamp": "2026-07-15, 10:20:00",
+      "markdown": "日本語の会話をそのままPDFとMarkdownに保存したいです。表やコードも混ざります。"
+    },
+    {
+      "id": "cjk-assistant-2",
+      "role": "assistant",
+      "turnNumber": 2,
+      "timestamp": "2026-07-15, 10:20:01",
+      "markdown": "はい。日本語の本文、韓国語の 문장, 中文内容, and English notes should all remain readable.\n\n| 言語 | チェック項目 |\n| --- | --- |\n| 日本語 | 文字化けしない |\n| 한국어 | 문장이 유지된다 |\n| 中文 | 正常显示 |\n\n```text\n保存: 日本語 / 한국어 / 中文 / English\n```"
+    },
+    {
+      "id": "cjk-user-3",
+      "role": "user",
+      "turnNumber": 3,
+      "timestamp": "2026-07-15, 10:21:00",
+      "markdown": "한국어 문장도 확인해 주세요: 안녕하세요, 로컬 아카이브 테스트입니다."
+    },
+    {
+      "id": "cjk-assistant-4",
+      "role": "assistant",
+      "turnNumber": 4,
+      "timestamp": "2026-07-15, 10:21:01",
+      "markdown": "좋습니다. 이 샘플은 일본어, 한국어, 중국어, 영어가 섞인 대화가 HTML/PDF 렌더링 경로에서 유지되는지 확인합니다."
+    }
+  ]
+}

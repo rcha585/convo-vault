@@ -1,0 +1,210 @@
+[
+  {
+    "name": "multilingual-export",
+    "payload": "multilingual-export.payload.json",
+    "purpose": "Baseline mixed-language archive with Latin accents, CJK, Korean, emoji, a Markdown table, and a code block.",
+    "coverage": ["unicode", "mixed-language", "latin-accents", "cjk", "korean", "emoji", "table", "code-block"],
+    "expectedLang": "und",
+    "expectedCounts": {
+      "messages": 8,
+      "roles": { "user": 4, "assistant": 4 },
+      "qaPairs": 4,
+      "codeBlocks": 1,
+      "tables": 1
+    },
+    "mustContain": [
+      "¿Cómo exporto una conversación con acentos",
+      "Vorrei conservare questa conversazione in italiano",
+      "日本語の会話もそのまま保存できますか",
+      "한국어 대화와 이모지도 PDF에 남나요",
+      "안녕하세요 / こんにちは / hola"
+    ],
+    "mustNotContain": ["�", "undefined", "[object Object]"]
+  },
+  {
+    "name": "european-accents",
+    "payload": "european-accents.payload.json",
+    "purpose": "Focused European Latin-script accent coverage with explicit Spanish language metadata.",
+    "coverage": ["unicode", "latin-accents", "spanish", "italian", "french", "explicit-language"],
+    "expectedLang": "es",
+    "expectedCounts": {
+      "messages": 4,
+      "roles": { "user": 2, "assistant": 2 },
+      "qaPairs": 2,
+      "codeBlocks": 0,
+      "tables": 0
+    },
+    "mustContain": [
+      "información, corazón, año y pingüino",
+      "città, perché, così, già",
+      "déjà vu, élève, façade, naïve"
+    ],
+    "mustNotContain": ["�", "undefined", "[object Object]"]
+  },
+  {
+    "name": "cjk-locale",
+    "payload": "cjk-locale.payload.json",
+    "purpose": "Focused CJK and Korean coverage with explicit Japanese locale metadata, table, and code block.",
+    "coverage": ["unicode", "cjk", "japanese", "korean", "chinese", "table", "code-block", "explicit-language"],
+    "expectedLang": "ja-JP",
+    "expectedCounts": {
+      "messages": 4,
+      "roles": { "user": 2, "assistant": 2 },
+      "qaPairs": 2,
+      "codeBlocks": 1,
+      "tables": 1
+    },
+    "mustContain": [
+      "日本語の会話をそのままPDFとMarkdownに保存したいです",
+      "한국어 문장도 확인해 주세요",
+      "保存: 日本語 / 한국어 / 中文 / English"
+    ],
+    "mustNotContain": ["�", "undefined", "[object Object]"]
+  },
+  {
+    "name": "rtl-mixed",
+    "payload": "rtl-mixed.payload.json",
+    "purpose": "Right-to-left mixed-script smoke coverage for Arabic, Hebrew, English, and Chinese preservation.",
+    "coverage": ["unicode", "rtl", "arabic", "hebrew", "mixed-direction", "explicit-language"],
+    "expectedLang": "ar",
+    "expectedCounts": {
+      "messages": 4,
+      "roles": { "user": 2, "assistant": 2 },
+      "qaPairs": 2,
+      "codeBlocks": 0,
+      "tables": 0
+    },
+    "mustContain": [
+      "هل يمكن حفظ محادثة عربية مختلطة",
+      "Hebrew כמו שלום",
+      "בדיקה נוספת בעברית",
+      "dir=\"auto\""
+    ],
+    "mustNotContain": ["�", "undefined", "[object Object]"]
+  },
+  {
+    "name": "output-types",
+    "payload": "output-types.payload.json",
+    "purpose": "Output object matrix coverage for formulas, diagrams, media references, file attachments, interactive cards, and citations.",
+    "coverage": ["output-matrix", "math", "mermaid", "sequence-diagram", "unsupported-diagram", "remote-image", "gif", "file-attachment", "video", "audio", "interactive", "citation", "degradation"],
+    "expectedLang": "en",
+    "expectedCounts": {
+      "messages": 2,
+      "roles": { "user": 1, "assistant": 1 },
+      "qaPairs": 1,
+      "codeBlocks": 2,
+      "tables": 0
+    },
+    "expectedOutputObjects": {
+      "total": 14,
+      "degraded": 5,
+      "byKind": {
+        "math": 2,
+        "diagram": 2,
+        "image": 1,
+        "gif": 1,
+        "document": 1,
+        "spreadsheet": 2,
+        "presentation": 1,
+        "video": 1,
+        "audio": 1,
+        "interactive": 1,
+        "citation": 1
+      },
+      "byRenderStatus": {
+        "rendered-static": 4,
+        "reference-only": 6,
+        "degraded": 4
+      },
+      "byDegradationReason": {
+        "remote-image-reference-only": 1,
+        "animated-media-static-poster": 1,
+        "media-not-playable-in-pdf": 2,
+        "interactive-content-static-record": 1
+      }
+    },
+    "sourceMustContain": [
+      "sequenceDiagram",
+      "erDiagram"
+    ],
+    "mustContain": [
+      "Inline formula: \\(a^2 + b^2 = c^2\\).",
+      "Remote product image",
+      "Animated walkthrough",
+      "research-report.pdf",
+      "finance-model.xlsx",
+      "raw-data.csv",
+      "roadmap-deck.pptx",
+      "product-demo.mp4",
+      "narration.mp3",
+      "Interactive: KPI dashboard",
+      "Source: product docs"
+    ],
+    "mustRenderContain": [
+      "class=\"math-inline\"",
+      "class=\"math-card\"",
+      "class=\"sequence-svg\"",
+      "class=\"er-svg\"",
+      "class=\"remote-media-card\"",
+      "Animated media is preserved as a reference",
+      "class=\"object-link object-file-link\"",
+      "class=\"object-link object-media-link\"",
+      "class=\"object-link object-interactive-link\"",
+      "class=\"object-link object-source-link\""
+    ],
+    "mustNotContain": ["�", "undefined", "[object Object]"]
+  },
+  {
+    "name": "visual-rendering",
+    "payload": "visual-rendering.payload.json",
+    "purpose": "Focused visual rendering coverage for advanced formula layout, state diagrams, and static chart SVG output.",
+    "coverage": ["output-matrix", "math", "advanced-math", "mermaid", "state-diagram", "chart", "bar-chart", "line-chart"],
+    "expectedLang": "en",
+    "expectedCounts": {
+      "messages": 2,
+      "roles": { "user": 1, "assistant": 1 },
+      "qaPairs": 1,
+      "codeBlocks": 3,
+      "tables": 0
+    },
+    "expectedOutputObjects": {
+      "total": 5,
+      "degraded": 0,
+      "byKind": {
+        "math": 2,
+        "diagram": 1,
+        "chart": 2
+      },
+      "byRenderStatus": {
+        "rendered-static": 5
+      },
+      "byDegradationReason": {}
+    },
+    "sourceMustContain": [
+      "\\frac{\\sqrt{x_1^2 + y_1^2}}{\\Delta t}",
+      "stateDiagram-v2",
+      "```chart"
+    ],
+    "mustContain": [
+      "Advanced formula examples",
+      "Idle",
+      "Running",
+      "Complete",
+      "Export coverage",
+      "Fast",
+      "Hybrid",
+      "Full"
+    ],
+    "mustRenderContain": [
+      "class=\"math-frac\"",
+      "class=\"math-root\"",
+      "class=\"math-sup\"",
+      "class=\"math-sub\"",
+      "class=\"state-svg\"",
+      "class=\"chart-svg\"",
+      "class=\"chart-bar\"",
+      "class=\"chart-line\""
+    ],
+    "mustNotContain": ["�", "undefined", "[object Object]"]
+  }
+]

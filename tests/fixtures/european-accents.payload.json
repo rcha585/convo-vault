@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "exporterVersion": "0.7.14-fixture",
+  "title": "European accents fixture",
+  "source": "https://chatgpt.com/c/european-accents-fixture",
+  "exportedAt": "2026-07-15T00:10:00.000Z",
+  "captureMode": "hybrid",
+  "language": "es",
+  "messages": [
+    {
+      "id": "european-user-1",
+      "role": "user",
+      "turnNumber": 1,
+      "timestamp": "2026-07-15, 10:10:00",
+      "markdown": "Necesito archivar una conversación en español con palabras como información, corazón, año y pingüino."
+    },
+    {
+      "id": "european-assistant-2",
+      "role": "assistant",
+      "turnNumber": 2,
+      "timestamp": "2026-07-15, 10:10:01",
+      "markdown": "El exportador debe conservar tildes, eñes y diéresis sin perder legibilidad. También puede mezclar italiano: città, perché, così, già."
+    },
+    {
+      "id": "european-user-3",
+      "role": "user",
+      "turnNumber": 3,
+      "timestamp": "2026-07-15, 10:11:00",
+      "markdown": "Ajoute aussi une phrase française: déjà vu, élève, façade, naïve."
+    },
+    {
+      "id": "european-assistant-4",
+      "role": "assistant",
+      "turnNumber": 4,
+      "timestamp": "2026-07-15, 10:11:01",
+      "markdown": "Sí. A multilingual archive should preserve the original text, not translate it. It should keep Spanish, Italian, French, and English in the same conversation."
+    }
+  ]
+}

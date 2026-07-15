@@ -10,7 +10,18 @@
 
 Convo Vault 是一个本地优先的 Chrome 扩展，用来把 ChatGPT 对话导出成可以长期保存、检索和二次处理的本地档案。它会读取你当前打开的 ChatGPT 对话，把选中的消息打包成本地 `.zip`，里面包含可读的 Markdown、PDF，以及适合后续放进 Obsidian、知识库、搜索索引或 RAG 流程的结构化数据。
 
-当前版本：`0.7.13`
+当前版本：`0.7.15`
+
+## 最近更新
+
+`0.7.15` 主要把导出从“文本 + 基础 PDF”推进到“轻量工作台归档”：
+
+- 新增输出类型矩阵：公式、Mermaid、图表、图片、GIF、文件、视频、音频、交互卡片和引用都会进入 PDF/JSON 的归档逻辑
+- PDF 支持更好的公式静态排版，包含常见上下标、分数、根号和数学符号
+- Mermaid 支持 flowchart、sequenceDiagram、erDiagram 和 stateDiagram 的静态 SVG 渲染
+- 新增简单 `chart` 代码块渲染，可以把 JSON 或 CSV-like 数据变成柱状图、折线图
+- JSON sidecars 增加 `outputObjects`，记录每个非纯文本对象的类型、渲染状态和降级原因
+- 测试样本库扩展到多语言、RTL、输出类型矩阵和视觉渲染样本
 
 ## 怎么使用
 
@@ -81,10 +92,40 @@ npm run build:extension
 npm run build:extension
 npm run check
 npm test
+npm run test:fixtures
 npm run backend:check
 ```
 
 如果后端是通过 **Copy Start** 带 token 启动的，`backend:check` 也需要同一个 `CGCE_LOCAL_API_TOKEN`；没有 token 时返回 `401` 是安全拦截，不是服务坏了。
+
+## 多语言导出
+
+Convo Vault 的界面和按钮目前保持英文，但导出的对话内容按 Unicode 原文保留。也就是说，你可以导出中文、英文、西语、意大利语、日语、韩语，或者多种语言混合的 ChatGPT 对话。
+
+`0.7.14` 加固了 PDF 渲染的多语言文字能力：
+
+- PDF HTML 使用中性语言标记，避免把所有内容都当成中文页面
+- 字体 fallback 增加日文、韩文、阿拉伯文、希伯来文和通用 Noto 字体链
+- CI 里加入 `npm run test:fixtures` 样本回归流，覆盖西语重音、意大利语重音、日语、韩语、中文、阿拉伯语、希伯来语、emoji、代码块、表格和混合文字方向
+- 样本库会同时检查 PDF HTML、Markdown 和 JSON data sidecar，避免只在某一种输出里“看起来正常”
+
+这里的“多语言支持”指的是保留原语言导出，不是自动翻译。PDF、Markdown 和 JSON sidecars 都应该保留原始文本。
+
+## 输出类型归档
+
+`0.7.15` 开始把 ChatGPT 的轻量工作台输出分成两层处理：
+
+- PDF 是给人看的阅读档案：公式、基础图表、代码、表格和图片尽量静态渲染；视频、音频、交互卡片和大文件以清晰卡片或源码降级展示。
+- JSON / asset sidecars 是给机器和后续恢复用的证据档案：每个非纯文本对象都会尽量记录 `kind`、`renderStatus`、`degraded`、`degradationReason`、来源消息和链接/素材线索。
+
+这意味着导出目标不是“把所有交互原样塞进 PDF”，而是保证内容不静默丢失：能读的进 PDF，不能静态表达的进 JSON，并在 PDF 中留下可理解的降级记录。
+
+当前 PDF 静态渲染优先支持：
+
+- 行内 / 块级公式，包括常见上下标、分数、根号和数学符号
+- Mermaid flowchart、sequenceDiagram、erDiagram、stateDiagram
+- 简单 `chart` 代码块，支持 JSON 或 CSV-like 数据生成柱状图、折线图
+- GIF、远程图片、视频、音频和交互内容的清晰降级卡片
 
 ## Hybrid、Fast 和 Full
 

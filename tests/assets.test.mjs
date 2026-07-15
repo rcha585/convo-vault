@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const require = createRequire(import.meta.url);
-const { buildAssetManifest } = require("../tools/advanced-pdf/assets.js");
+const { buildAssetManifest, buildOutputObjectIndex } = require("../tools/advanced-pdf/assets.js");
 
 test("asset manifest deduplicates cached AI image bytes and references user files", async () => {
   const cacheRoot = await mkdtemp(path.join(os.tmpdir(), "convo-vault-assets-"));
@@ -53,4 +53,63 @@ test("asset manifest deduplicates cached AI image bytes and references user file
   const cachedImagePath = path.join(cacheRoot, cachedImages[0].cachePath);
   assert.equal((await stat(cachedImagePath)).isFile(), true);
   assert.equal((await readFile(cachedImagePath)).length, cachedImages[0].sizeBytes);
+});
+
+test("output object index classifies static, reference, and degraded export objects", () => {
+  const payload = {
+    title: "Output objects",
+    messages: [
+      {
+        id: "assistant-output",
+        role: "assistant",
+        turnNumber: 1,
+        markdown: [
+          "Inline formula: \\(x + y\\).",
+          "",
+          "$$",
+          "x = y + z",
+          "$$",
+          "",
+          "```mermaid",
+          "sequenceDiagram",
+          "  A->>B: hello",
+          "```",
+          "",
+          "```mermaid",
+          "erDiagram",
+          "  USER ||--o{ FILE : owns",
+          "```",
+          "",
+          "![remote](https://example.test/remote.png)",
+          "![animated](https://example.test/animated.gif)",
+          "[File: report.pdf](https://example.test/report.pdf)",
+          "[File: model.xlsx](https://example.test/model.xlsx)",
+          "[File: demo.mp4](https://example.test/demo.mp4)",
+          "[Interactive: Dashboard](https://example.test/dashboard)",
+          "[Source: Docs](https://example.test/docs)"
+        ].join("\n")
+      }
+    ]
+  };
+
+  const index = buildOutputObjectIndex(payload);
+
+  assert.equal(index.counts.total, 11);
+  assert.equal(index.counts.degraded, 4);
+  assert.deepEqual(index.counts.byKind, {
+    math: 2,
+    diagram: 2,
+    image: 1,
+    gif: 1,
+    document: 1,
+    spreadsheet: 1,
+    video: 1,
+    interactive: 1,
+    citation: 1
+  });
+  assert.equal(index.counts.byDegradationReason["remote-image-reference-only"], 1);
+  assert.equal(index.counts.byDegradationReason["animated-media-static-poster"], 1);
+  assert.equal(index.counts.byDegradationReason["media-not-playable-in-pdf"], 1);
+  assert.equal(index.counts.byDegradationReason["interactive-content-static-record"], 1);
+  assert.ok(index.objects.every((object) => object.objectId && object.messageId === "assistant-output"));
 });

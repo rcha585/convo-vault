@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "exporterVersion": "0.7.15",
+  "title": "Visual rendering fixture",
+  "source": "https://chatgpt.com/c/visual-rendering",
+  "exportedAt": "2026-07-15T01:45:00.000Z",
+  "captureMode": "hybrid",
+  "language": "en",
+  "messages": [
+    {
+      "id": "visual-user-1",
+      "role": "user",
+      "turnNumber": 1,
+      "order": 1,
+      "timestamp": "2026-07-15T01:44:00.000Z",
+      "markdown": "Please render advanced formulas, a state diagram, and simple charts in the exported PDF.",
+      "preview": "Please render advanced formulas, a state diagram, and simple charts in the exported PDF."
+    },
+    {
+      "id": "visual-assistant-1",
+      "role": "assistant",
+      "turnNumber": 2,
+      "order": 2,
+      "timestamp": "2026-07-15T01:44:10.000Z",
+      "markdown": "Advanced formula examples:\n\nInline: \\(\\frac{\\sqrt{x_1^2 + y_1^2}}{\\Delta t} \\le \\alpha\\).\n\n$$\n\\sum_{i=1}^{n} x_i = \\frac{n(n+1)}{2}\n$$\n\n```mermaid\nstateDiagram-v2\n  [*] --> Idle\n  Idle --> Running: start\n  Running --> Complete: finish\n  Complete --> [*]\n```\n\n```chart\n{\n  \"type\": \"bar\",\n  \"title\": \"Export coverage\",\n  \"labels\": [\"Text\", \"Images\", \"Charts\"],\n  \"values\": [98, 76, 64]\n}\n```\n\n```chart\nline\nlabel,value\nFast,20\nHybrid,28\nFull,24\n```",
+      "preview": "Advanced formula examples with a state diagram and simple bar/line charts.",
+      "codeBlockCount": 3,
+      "imageCount": 0,
+      "fileCount": 0
+    }
+  ]
+}

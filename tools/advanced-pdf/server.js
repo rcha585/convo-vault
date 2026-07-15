@@ -6,7 +6,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
 const { captureConversationWithEdge, findEdgeExecutable, getCacheRoot } = require("./capture");
-const { buildAssetManifest } = require("./assets");
+const { buildAssetManifest, buildOutputObjectIndex } = require("./assets");
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.CGCE_ADVANCED_PDF_PORT || 38474);
@@ -439,6 +439,7 @@ function normalizePayload(body) {
     title: payload.title || "ChatGPT Conversation",
     source: payload.source || "",
     exportedAt: payload.exportedAt || new Date().toISOString(),
+    language: payload.language || payload.locale || payload.documentLanguage || "",
     captureMode: payload.captureMode || "",
     messageCount: payload.messageCount || messages.length,
     messages
@@ -480,6 +481,8 @@ function writeDataSidecars(directory, baseName, payload) {
     conversation: bundle.conversation,
     messages: bundle.messages,
     qaPairs: bundle.qaPairs,
+    outputObjects: bundle.outputObjects,
+    outputObjectCounts: bundle.outputObjectCounts,
     topics: bundle.topics,
     entities: bundle.entities
   }, null, 2);
@@ -502,6 +505,7 @@ function writeDataSidecars(directory, baseName, payload) {
 
 function buildDataBundle(payload) {
   const messages = payload.messages.map((message, index) => buildDataMessage(message, index));
+  const outputObjectIndex = buildOutputObjectIndex(payload);
   const conversation = {
     schemaVersion: 1,
     exporterVersion: payload.exporterVersion || "",
@@ -509,12 +513,15 @@ function buildDataBundle(payload) {
     source: payload.source || "",
     exportedAt: payload.exportedAt || new Date().toISOString(),
     generatedAt: new Date().toISOString(),
+    language: payload.language || "",
     captureMode: payload.captureMode || "",
     messageCount: messages.length,
     roles: countBy(messages, (message) => message.role),
     thinkingCount: messages.filter((message) => message.thinkingMarkdown).length,
     imageCount: messages.reduce((sum, message) => sum + (message.counts?.images || 0), 0),
-    fileCount: messages.reduce((sum, message) => sum + (message.counts?.files || 0), 0)
+    fileCount: messages.reduce((sum, message) => sum + (message.counts?.files || 0), 0),
+    outputObjectCount: outputObjectIndex.counts.total,
+    degradedObjectCount: outputObjectIndex.counts.degraded
   };
   const qaPairs = buildQaPairs(messages);
   const topics = buildTopics(messages);
@@ -525,6 +532,8 @@ function buildDataBundle(payload) {
     conversation,
     messages,
     qaPairs,
+    outputObjects: outputObjectIndex.objects,
+    outputObjectCounts: outputObjectIndex.counts,
     topics,
     entities,
     messagesJsonl: messages.map((message) => JSON.stringify(message)).join("\n") + "\n",
@@ -619,6 +628,8 @@ function buildSummaryMarkdown(conversation, qaPairs, topics, entities) {
     `- Thinking messages: ${conversation.thinkingCount}`,
     `- Images: ${conversation.imageCount}`,
     `- Files: ${conversation.fileCount}`,
+    `- Output objects: ${conversation.outputObjectCount || 0}`,
+    `- Degraded objects: ${conversation.degradedObjectCount || 0}`,
     ""
   ];
 

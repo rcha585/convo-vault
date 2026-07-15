@@ -1,6 +1,6 @@
 {
   "name": "convo-vault-backend",
-  "version": "0.7.13",
+  "version": "0.7.15",
   "private": true,
   "description": "Local high-quality renderer for Convo Vault structured exports.",
   "type": "commonjs",

@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "exporterVersion": "0.7.15",
+  "title": "Output type matrix fixture",
+  "source": "https://chatgpt.com/c/output-type-matrix",
+  "exportedAt": "2026-07-15T01:15:00.000Z",
+  "captureMode": "hybrid",
+  "language": "en",
+  "messages": [
+    {
+      "id": "output-user-1",
+      "role": "user",
+      "turnNumber": 1,
+      "order": 1,
+      "timestamp": "2026-07-15T01:14:00.000Z",
+      "markdown": "Please export this lightweight-workbench answer with formulas, diagrams, media references, attachments, and an interactive dashboard card.",
+      "preview": "Please export this lightweight-workbench answer with formulas, diagrams, media references, attachments, and an interactive dashboard card."
+    },
+    {
+      "id": "output-assistant-1",
+      "role": "assistant",
+      "turnNumber": 2,
+      "order": 2,
+      "timestamp": "2026-07-15T01:14:10.000Z",
+      "markdown": "Here is the output matrix.\n\nInline formula: \\(a^2 + b^2 = c^2\\).\n\n$$\nE = mc^2\n$$\n\n```mermaid\nsequenceDiagram\n  participant U as User\n  participant C as Convo Vault\n  U->>C: Export current ChatGPT page\n  C->>U: Return PDF + Markdown + JSON bundle\n```\n\n```mermaid\nerDiagram\n  CONVERSATION ||--o{ MESSAGE : contains\n  MESSAGE ||--o{ ASSET : references\n```\n\n![Remote product image](https://example.test/assets/product.png)\n\n![Animated walkthrough](https://example.test/assets/walkthrough.gif)\n\n[File: research-report.pdf](https://example.test/files/research-report.pdf)\n[File: finance-model.xlsx](https://example.test/files/finance-model.xlsx)\n[File: raw-data.csv](https://example.test/files/raw-data.csv)\n[File: roadmap-deck.pptx](https://example.test/files/roadmap-deck.pptx)\n[File: product-demo.mp4](https://example.test/files/product-demo.mp4)\n[File: narration.mp3](https://example.test/files/narration.mp3)\n\n[Interactive: KPI dashboard](https://example.test/apps/kpi-dashboard)\n\n[Source: product docs](https://example.test/docs/product-output-types)",
+      "preview": "Here is the output matrix with formulas, diagrams, media, files, an interactive dashboard, and a source link.",
+      "codeBlockCount": 2,
+      "imageCount": 2,
+      "fileCount": 6
+    }
+  ]
+}
