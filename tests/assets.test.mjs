@@ -6,7 +6,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const require = createRequire(import.meta.url);
-const { buildAssetManifest, buildOutputObjectIndex } = require("../tools/advanced-pdf/assets.js");
+const {
+  buildAssetManifest,
+  buildOutputObjectIndex,
+  dedupeEmbeddedImageAssets,
+  externalizeEmbeddedImageAssets
+} = require("../tools/advanced-pdf/assets.js");
 
 test("asset manifest deduplicates cached AI image bytes and references user files", async () => {
   const cacheRoot = await mkdtemp(path.join(os.tmpdir(), "convo-vault-assets-"));
@@ -53,6 +58,66 @@ test("asset manifest deduplicates cached AI image bytes and references user file
   const cachedImagePath = path.join(cacheRoot, cachedImages[0].cachePath);
   assert.equal((await stat(cachedImagePath)).isFile(), true);
   assert.equal((await readFile(cachedImagePath)).length, cachedImages[0].sizeBytes);
+});
+
+test("asset manifest detects image bytes when the data URI MIME is generic", async () => {
+  const cacheRoot = await mkdtemp(path.join(os.tmpdir(), "convo-vault-assets-sniff-"));
+  const genericPng = "data:application/octet-stream;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+  const payload = {
+    title: "Generic image MIME test",
+    messages: [{
+      id: "user-image",
+      role: "user",
+      turnNumber: 1,
+      markdown: `![Uploaded image](${genericPng})`
+    }]
+  };
+
+  const manifest = buildAssetManifest(payload, { cacheRoot });
+  const image = manifest.assets.find((asset) => asset.storage === "local-cache");
+
+  assert.equal(image.kind, "image");
+  assert.equal(image.mimeType, "image/png");
+  assert.match(image.cachePath, /\.png$/);
+  assert.equal((await stat(path.join(cacheRoot, image.cachePath))).isFile(), true);
+});
+
+test("bundle payload externalizes and deduplicates repeated embedded image layers", async () => {
+  const cacheRoot = await mkdtemp(path.join(os.tmpdir(), "convo-vault-assets-externalized-"));
+  const first = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+  const second = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+  const payload = {
+    title: "Layered generated images",
+    messages: [{
+      id: "assistant-gallery",
+      role: "assistant",
+      turnNumber: 1,
+      markdown: [
+        `![first main](${first})`,
+        `![first preview](${first})`,
+        `![first blur](${first})`,
+        `![second main](${second})`,
+        `![second preview](${second})`,
+        "## Intentional reuse",
+        `![first reused](${first})`
+      ].join("\n\n")
+    }]
+  };
+
+  const manifest = buildAssetManifest(payload, { cacheRoot });
+  const renderPayload = dedupeEmbeddedImageAssets(payload, manifest);
+  const externalized = externalizeEmbeddedImageAssets(payload, manifest);
+  const markdown = externalized.messages[0].markdown;
+  const renderMarkdown = renderPayload.messages[0].markdown;
+
+  assert.equal(manifest.assets.filter((asset) => asset.storage === "local-cache").length, 2);
+  assert.equal((renderMarkdown.match(/data:image\//g) || []).length, 3);
+  assert.match(renderMarkdown, /Intentional reuse[\s\S]*first reused/);
+  assert.doesNotMatch(renderMarkdown, /first preview|first blur|second preview/);
+  assert.equal((markdown.match(/!\[[^\]]*]\(assets\/sha256\//g) || []).length, 3);
+  assert.doesNotMatch(markdown, /data:image\//);
+  assert.match(markdown, /Intentional reuse[\s\S]*first reused/);
+  assert.doesNotMatch(markdown, /first preview|first blur|second preview/);
 });
 
 test("output object index classifies static, reference, and degraded export objects", () => {

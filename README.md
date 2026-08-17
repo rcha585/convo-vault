@@ -1,5 +1,7 @@
 # Convo Vault
 
+> Knowledge base experiment: Raw Pack v0.1 is available under [`tools/knowledge-pack/`](tools/knowledge-pack/README.md). It imports mixed local files into an Obsidian-compatible, immutable raw evidence layer with hashes, manifests, duplicate detection, and optional PDF page assets. Private Vault folders are excluded from Git.
+
 如果在 ChatGPT 里遇到一段值得长期保存的对话，怎么办？
 
 如果一段长对话里混着代码、表格、图片、文件线索和思考过程，手动复制太痛苦，怎么办？
@@ -10,11 +12,18 @@
 
 Convo Vault 是一个本地优先的 Chrome 扩展，用来把 ChatGPT 对话导出成可以长期保存、检索和二次处理的本地档案。它会读取你当前打开的 ChatGPT 对话，把选中的消息打包成本地 `.zip`，里面包含可读的 Markdown、PDF，以及适合后续放进 Obsidian、知识库、搜索索引或 RAG 流程的结构化数据。
 
-当前版本：`0.7.15`
+当前版本：`0.7.22`
 
 ## 最近更新
 
-`0.7.15` 主要把导出从“文本 + 基础 PDF”推进到“轻量工作台归档”：
+`0.7.22` 修复图片型对话的完整抓取和 Bundle 性能问题：
+
+- Full/Hybrid 图片序列化会按稳定资源身份去掉相邻的主图、预览层和模糊层重复节点，同时保留不同清晰度版本和正文后的有意重复引用
+- Bundle 内的图片按 SHA-256 内容哈希只保存一次，Markdown 与 JSON 改为引用 `assets/` 路径，避免重复写入大段 Base64
+- 资产分析会跳过 Base64 正文的链接与文件名扫描；七张高清图的真实样本从约 245 MB、140 秒降到约 32 MB、13 秒
+- Hybrid 针对 ImageGen 等非标准 assistant 节点的兼容修复仍在后续完善；当前此类对话建议使用 Full 模式
+
+`0.7.21` 主要把导出从“文本 + 基础 PDF”推进到“轻量工作台归档”，并改进了思考活动的结构化排版：
 
 - 新增输出类型矩阵：公式、Mermaid、图表、图片、GIF、文件、视频、音频、交互卡片和引用都会进入 PDF/JSON 的归档逻辑
 - PDF 支持更好的公式静态排版，包含常见上下标、分数、根号和数学符号
@@ -113,7 +122,7 @@ Convo Vault 的界面和按钮目前保持英文，但导出的对话内容按 U
 
 ## 输出类型归档
 
-`0.7.15` 开始把 ChatGPT 的轻量工作台输出分成两层处理：
+`0.7.21` 开始把 ChatGPT 的轻量工作台输出分成两层处理：
 
 - PDF 是给人看的阅读档案：公式、基础图表、代码、表格和图片尽量静态渲染；视频、音频、交互卡片和大文件以清晰卡片或源码降级展示。
 - JSON / asset sidecars 是给机器和后续恢复用的证据档案：每个非纯文本对象都会尽量记录 `kind`、`renderStatus`、`degraded`、`degradationReason`、来源消息和链接/素材线索。

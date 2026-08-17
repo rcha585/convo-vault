@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.15";
+  const EXPORTER_VERSION = "0.7.22";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -42,6 +42,11 @@
   const THINKING_FLYOUT_AUTO_OPEN_LIMIT = 48;
   const FAST_THINKING_FLYOUT_AUTO_OPEN_LIMIT = 0;
   const THINKING_FLYOUT_OPEN_TIMEOUT_MS = 1400;
+  const THINKING_FLYOUT_SETTLE_TIMEOUT_MS = 4500;
+  const FAST_THINKING_FLYOUT_SETTLE_TIMEOUT_MS = 2800;
+  const THINKING_FLYOUT_SETTLE_POLL_MS = 150;
+  const THINKING_FLYOUT_STABLE_PASSES = 3;
+  const THINKING_FLYOUT_NO_PANEL_GRACE_MS = 700;
   const DEBUG_EVENT_LIMIT = 500;
   const DETAILED_DEBUG_LOG = false;
   const ADVANCED_PDF_IMAGE_EMBED_LIMIT = 160;
@@ -184,7 +189,13 @@
   const THINKING_STATUS_RE = /\b(?:thought|thinking|reasoned)\s*(?:for)?\s*\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds?)\b|\u5df2\u601d\u8003\s*\d+(?:\.\d+)?\s*(?:s|\u79d2)?|\u601d\u8003\s*\d+(?:\.\d+)?\s*(?:s|\u79d2)/i;
   const THINKING_FLYOUT_TITLE_RE = /^(?:\u601d\u8003|\u63a8\u7406|thinking|reasoning)$/i;
   const THINKING_FLYOUT_DONE_RE = /^(?:\u5b8c\u6210|done|completed)$/i;
-  const THINKING_FLYOUT_STOP_RE = /^(?:\u8bb0\u5fc6|memory|memories|past chat|saved memory|web search|deep research|references?)\b/i;
+  const THINKING_FLYOUT_ACTIVE_RE = /^(?:\u6b63\u5728\u641c\u7d22|\u641c\u7d22\u4e2d|searching\b|browsing\b|researching\b|loading\b|working\b)/i;
+  const THINKING_FLYOUT_STOP_RE = /^(?:web search|deep research|references?)\b/i;
+  const THINKING_FLYOUT_STEP_LABEL_RE = /^(?:\u8bb0\u5fc6|memory|memories|past chat|saved memory|\u6587\u4ef6|file|files?|\u7f51\u9875|web|web pages?)(?:\s*[\u00b7:]\s*\d+)?$/i;
+  const THINKING_FLYOUT_CODE_TITLE_RE = /^(?:python|javascript|typescript|bash|shell|sql|json|html|css|markdown|code|terminal)$/i;
+  const THINKING_FLYOUT_RESULT_RE = /^(?:true|false|none|stdout|stderr|output|result|encoding\b|sample\b|b[\u0027\"]|\d+\s+)/i;
+  const THINKING_FLYOUT_SOURCES_RE = /^(?:\u6e90|\u6765\u6e90|sources?)\s*(?:[\u00b7:]\s*\d+)?$/i;
+  const THINKING_SOURCE_TRIGGER_RE = /^(?:\u6e90|\u6765\u6e90|sources?)$/i;
   const EXPAND_CUE_RE = /\b(show\s+more|show\s+all|expand|expanded|continue|read\s+more|more|details?|view\s+more)\b|\u5c55\u5f00|\u663e\u793a\u66f4\u591a|\u67e5\u770b\u66f4\u591a|\u7ee7\u7eed|\u66f4\u591a/i;
   const EXPANDABLE_BUTTON_SELECTORS = [
     "button.group__menu-item",
@@ -364,7 +375,8 @@
     await enrichVisibleThinkingFlyouts(messages, debugLog, {
       autoOpenLimit: FAST_THINKING_FLYOUT_AUTO_OPEN_LIMIT,
       allowGlobalFallback: false,
-      requireMountedRoot: true
+      requireMountedRoot: true,
+      settleTimeoutMs: FAST_THINKING_FLYOUT_SETTLE_TIMEOUT_MS
     });
     debugLog.mark("enrichedFastThinkingFlyouts");
 
@@ -1720,8 +1732,8 @@
   }
 
   function createPortableMessageSnapshot(message, index = 0) {
-    const markdown = String(message?.markdown || "");
-    const thinkingMarkdown = String(message?.thinkingMarkdown || "");
+    const markdown = dedupeMarkdownImageReferences(message?.markdown || "");
+    const thinkingMarkdown = dedupeMarkdownImageReferences(message?.thinkingMarkdown || "");
     const imageCount = countMarkdownImages(`${markdown}\n${thinkingMarkdown}`);
     const imagesEmbedded = Math.min(imageCount, message?.imagesEmbedded || 0);
 
@@ -1757,6 +1769,78 @@
     message.imagesEmbedded = embedded;
     message.imagesFailed = options.embedAttempted ? Math.max(0, imageCount - embedded) : Math.min(message.imagesFailed || 0, imageCount);
     return message;
+  }
+
+  function dedupeMarkdownImageReferences(markdown) {
+    const imagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)(?:\s*<!-- Image base64 embedding is temporarily disabled during scanning to avoid page side effects\. -->)?/g;
+    const source = String(markdown || "");
+    const seen = new Set();
+    let previousMatchEnd = 0;
+
+    return cleanMarkdown(source.replace(imagePattern, (match, _alt, url, offset) => {
+      if (hasSubstantiveImageGap(source.slice(previousMatchEnd, offset))) {
+        seen.clear();
+      }
+      previousMatchEnd = offset + match.length;
+      const identity = getMarkdownImageIdentity(url);
+
+      if (!identity || !seen.has(identity)) {
+        if (identity) {
+          seen.add(identity);
+        }
+        return match;
+      }
+
+      return "";
+    }));
+  }
+
+  function hasSubstantiveImageGap(value) {
+    return Boolean(String(value || "")
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .trim());
+  }
+
+  function getMarkdownImageIdentity(url) {
+    const value = String(url || "").trim();
+
+    if (!value) {
+      return "";
+    }
+
+    const pointerMatch = value.match(/^(?:file-service|sediment):\/\/([^/?#]+)/i);
+    if (pointerMatch?.[1]) {
+      return `chatgpt-asset:${pointerMatch[1]}`;
+    }
+
+    if (/^data:/i.test(value)) {
+      return value;
+    }
+
+    try {
+      const parsed = new URL(value, location.href);
+      const estuaryId = /\/backend-api\/estuary\/content/i.test(parsed.pathname)
+        ? parsed.searchParams.get("id") || ""
+        : "";
+      if (estuaryId) {
+        return `chatgpt-estuary:${estuaryId}:${parsed.searchParams.get("p") || ""}`;
+      }
+
+      const fileMatch = parsed.pathname.match(/\/backend-api\/files\/([^/?#]+)(?:\/([^/?#]+))?/i);
+      if (fileMatch?.[1]) {
+        return `chatgpt-file:${fileMatch[1]}:${fileMatch[2] || "metadata"}`;
+      }
+
+      const sedimentMatch = parsed.pathname.match(/\/backend-api\/sediment\/files\/([^/?#]+)(?:\/([^/?#]+))?/i);
+      if (sedimentMatch?.[1]) {
+        return `chatgpt-sediment:${sedimentMatch[1]}:${sedimentMatch[2] || "metadata"}`;
+      }
+
+      parsed.hash = "";
+      return parsed.href;
+    } catch (_) {
+      return value;
+    }
   }
 
   function countEmbeddedMarkdownImages(markdown) {
@@ -5782,13 +5866,63 @@
     }
 
     const opened = await enrichThinkingFlyoutsByOpeningTriggers(messages, debugLog, options);
+    const settled = await settleVisibleThinkingFlyoutSnapshots(messages, options);
 
     debugLog?.event("thinkingFlyout.enriched", {
       available: snapshots.length,
       visibleApplied: applied,
       autoAttempted: opened.attempted,
-      autoApplied: opened.applied
+      autoApplied: opened.applied,
+      settled: settled.settled,
+      settledSnapshots: settled.snapshotCount,
+      settledSourceCount: settled.sourceCount
     });
+  }
+
+  async function settleVisibleThinkingFlyoutSnapshots(messages, options = {}) {
+    const timeoutMs = Number.isFinite(options.settleTimeoutMs)
+      ? Math.max(0, options.settleTimeoutMs)
+      : THINKING_FLYOUT_SETTLE_TIMEOUT_MS;
+    const startedAt = Date.now();
+    let previousSignature = "";
+    let stablePasses = 0;
+    let snapshotCount = 0;
+    let sourceCount = 0;
+    let sawPanel = false;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const snapshots = getVisibleThinkingFlyoutSnapshots();
+
+      if (snapshots.length) {
+        sawPanel = true;
+        snapshotCount = snapshots.length;
+        sourceCount = snapshots.reduce((sum, snapshot) => sum + (snapshot.sources?.length || 0), 0);
+
+        for (const snapshot of snapshots) {
+          applyThinkingFlyoutSnapshot(snapshot, messages);
+        }
+
+        const signature = snapshots
+          .map((snapshot) => `${snapshot.signature}:${snapshot.sources?.length || 0}`)
+          .join("|");
+        stablePasses = signature === previousSignature ? stablePasses + 1 : 1;
+        previousSignature = signature;
+
+        const hasCompletedStatus = snapshots.some((snapshot) => snapshot.completed);
+        const hasActiveStatus = snapshots.some((snapshot) => snapshot.active);
+        const elapsed = Date.now() - startedAt;
+
+        if (stablePasses >= THINKING_FLYOUT_STABLE_PASSES && (hasCompletedStatus || (!hasActiveStatus && elapsed >= 900))) {
+          return { settled: true, snapshotCount, sourceCount };
+        }
+      } else if (!sawPanel && Date.now() - startedAt >= THINKING_FLYOUT_NO_PANEL_GRACE_MS) {
+        return { settled: false, snapshotCount: 0, sourceCount: 0 };
+      }
+
+      await sleep(THINKING_FLYOUT_SETTLE_POLL_MS);
+    }
+
+    return { settled: sawPanel, snapshotCount, sourceCount };
   }
 
   async function enrichThinkingFlyoutsByOpeningTriggers(messages, debugLog = null, options = {}) {
@@ -6008,7 +6142,7 @@
 
   function getGlobalThinkingTriggerScores(message, expectedStatus) {
     const triggers = [...document.querySelectorAll("button, [role='button']")]
-      .filter(isThinkingDetailTriggerElement);
+      .filter(isThinkingPanelTriggerElement);
     const sourceMessageId = message.sourceMessageId || "";
     const order = Number(message.order);
     const previewNeedle = getThinkingPreviewNeedle(message.preview || message.markdown || "");
@@ -6083,7 +6217,7 @@
       return null;
     }
 
-    return [...root.querySelectorAll("button, [role='button']")].find(isThinkingDetailTriggerElement) || null;
+    return [...root.querySelectorAll("button, [role='button']")].find(isThinkingPanelTriggerElement) || null;
   }
 
   function countThinkingTriggersInRoot(root) {
@@ -6091,7 +6225,11 @@
       return 0;
     }
 
-    return [...root.querySelectorAll("button, [role='button']")].filter(isThinkingDetailTriggerElement).length;
+    return [...root.querySelectorAll("button, [role='button']")].filter(isThinkingPanelTriggerElement).length;
+  }
+
+  function isThinkingPanelTriggerElement(element) {
+    return isThinkingDetailTriggerElement(element) || isThinkingSourceTriggerElement(element);
   }
 
   function isThinkingDetailTriggerElement(element) {
@@ -6110,6 +6248,23 @@
     }
 
     return true;
+  }
+
+  function isThinkingSourceTriggerElement(element) {
+    if (!element?.matches || element.closest("#chatgpt-exporter-selector-host, nav, header, aside, [role='menu']")) {
+      return false;
+    }
+
+    const cueTexts = [
+      element.getAttribute("aria-label") || "",
+      element.getAttribute("title") || "",
+      element.getAttribute("data-testid") || "",
+      getElementText(element)
+    ]
+      .map((text) => String(text).replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+
+    return cueTexts.some((text) => THINKING_SOURCE_TRIGGER_RE.test(text));
   }
 
   async function waitForThinkingFlyoutSnapshot(previousSignatures, timeoutMs) {
@@ -6145,9 +6300,9 @@
 
   function getThinkingFlyoutDiagnostic() {
     const roots = [
-      ...document.querySelectorAll('[data-stage-thread-flyout="true"], [data-testid="stage-thread-flyout"], [data-testid="screen-threadFlyout"]')
+      ...document.querySelectorAll('[data-stage-thread-flyout="true"], [data-testid="stage-thread-flyout"], [data-testid="screen-threadFlyout"], [data-testid="screen-threadFlyOut"]')
     ];
-    const screenFlyouts = [...document.querySelectorAll('[data-testid="screen-threadFlyout"]')];
+    const screenFlyouts = [...document.querySelectorAll('[data-testid="screen-threadFlyout"], [data-testid="screen-threadFlyOut"]')];
     const reasoningPanels = [...document.querySelectorAll([
       'section[aria-label*="\u63a8\u7406"]',
       'section[aria-label*="\u601d\u8003"]',
@@ -6172,6 +6327,7 @@
   function getThinkingSnapshotDebug(snapshot) {
     return {
       markdownLength: snapshot.markdown?.length || 0,
+      sourceCount: snapshot.sources?.length || 0,
       status: snapshot.status || "",
       duration: snapshot.duration || "",
       signature: snapshot.signature || "",
@@ -6196,7 +6352,7 @@
 
   function getVisibleThinkingFlyoutSnapshots() {
     const roots = uniqueElements([
-      ...document.querySelectorAll('[data-stage-thread-flyout="true"], [data-testid="stage-thread-flyout"], [data-testid="screen-threadFlyout"]')
+      ...document.querySelectorAll('[data-stage-thread-flyout="true"], [data-testid="stage-thread-flyout"], [data-testid="screen-threadFlyout"], [data-testid="screen-threadFlyOut"]')
     ]);
     const panels = [];
 
@@ -6207,6 +6363,7 @@
 
       panels.push(...root.querySelectorAll([
         '[data-testid="screen-threadFlyout"]',
+        '[data-testid="screen-threadFlyOut"]',
         'section[aria-label*="\u63a8\u7406"]',
         'section[aria-label*="\u601d\u8003"]',
         'section[aria-label*="reasoning" i]',
@@ -6250,15 +6407,23 @@
 
   function extractThinkingFlyoutSnapshot(panel) {
     const lines = getThinkingFlyoutLines(panel);
-    const markdown = formatThinkingFlyoutLinesAsMarkdown(lines);
+    const sources = extractThinkingFlyoutSources(panel);
+    const markdown = extractThinkingFlyoutStructuredMarkdown(panel, lines, sources)
+      || formatThinkingFlyoutLinesAsMarkdown(lines, sources);
     const status = lines.find((line) => THINKING_STATUS_RE.test(line)) || "";
 
     return {
       panel,
       markdown,
+      sources,
       status,
+      completed: lines.some((line) => THINKING_FLYOUT_DONE_RE.test(line)),
+      active: lines.some((line) => THINKING_FLYOUT_ACTIVE_RE.test(line)),
       duration: extractThinkingDuration(status || getElementText(panel)),
-      signature: hashString(markdown || getElementText(panel))
+      signature: hashString([
+        markdown,
+        ...sources.map((source) => `${source.label}\n${source.url}`)
+      ].join("\n"))
     };
   }
 
@@ -6270,7 +6435,7 @@
     const result = [];
 
     for (const line of lines) {
-      if (THINKING_FLYOUT_STOP_RE.test(line)) {
+      if (THINKING_FLYOUT_STOP_RE.test(line) || THINKING_FLYOUT_SOURCES_RE.test(line)) {
         break;
       }
 
@@ -6282,6 +6447,280 @@
     }
 
     return result;
+  }
+
+  function extractThinkingFlyoutStructuredMarkdown(panel, lines = [], sources = []) {
+    const entries = extractThinkingFlyoutStepEntries(panel);
+
+    if (!entries.length) {
+      return "";
+    }
+
+    const items = [];
+
+    for (const entry of entries) {
+      const blocks = extractThinkingFlyoutStepBlocks(entry.contentRoot);
+
+      if (!blocks.length) {
+        continue;
+      }
+
+      const renderedBlocks = blocks.map(renderThinkingFlyoutStructuredBlock).filter(Boolean);
+
+      if (!renderedBlocks.length) {
+        continue;
+      }
+
+      items.push([
+        `#### ${entry.heading}`,
+        renderedBlocks.join("\n\n")
+      ].join("\n\n"));
+    }
+
+    if (!items.length) {
+      return "";
+    }
+
+    const statusLines = lines
+      .filter((line) => THINKING_STATUS_RE.test(line) || THINKING_FLYOUT_DONE_RE.test(line))
+      .map((line) => `✓ ${line}`);
+    const sourceLines = sources.map((source) => {
+      const label = escapeMarkdownLinkLabel(source.label || compactUrlLabel(source.url));
+      return `- [Source: ${label}](${source.url})`;
+    });
+
+    return cleanMarkdown([
+      items.join("\n\n"),
+      statusLines.join("\n"),
+      sourceLines.length ? `### Sources\n\n${sourceLines.join("\n")}` : ""
+    ].filter(Boolean).join("\n\n"));
+  }
+
+  function extractThinkingFlyoutStepEntries(panel) {
+    if (!panel?.querySelectorAll) {
+      return [];
+    }
+
+    const entries = [];
+    const seenContainers = new Set();
+
+    for (const element of panel.querySelectorAll("div")) {
+      const className = String(element.className || "");
+      const heading = getElementText(element);
+
+      if (!isVisibleElement(element)
+        || !className.includes("text-token-text-primary")
+        || !className.includes("text-[14px]")
+        || !heading
+        || heading.length > 140
+        || element.querySelector("pre, p, ul, ol, blockquote")) {
+        continue;
+      }
+
+      if (THINKING_FLYOUT_TITLE_RE.test(heading)
+        || THINKING_STATUS_RE.test(heading)
+        || THINKING_FLYOUT_DONE_RE.test(heading)) {
+        continue;
+      }
+
+      const location = findThinkingFlyoutStepLocation(element, panel);
+
+      if (!location || seenContainers.has(location.container)) {
+        continue;
+      }
+
+      seenContainers.add(location.container);
+      entries.push({
+        heading: heading.replace(/\s+/g, " ").trim(),
+        contentRoot: location.contentRoot,
+        container: location.container
+      });
+    }
+
+    return entries;
+  }
+
+  function findThinkingFlyoutStepLocation(heading, panel) {
+    let current = heading.parentElement;
+
+    while (current && current !== panel) {
+      const contentRoot = Array.from(current.children || [])
+        .find((child) => !child.contains(heading) && hasThinkingFlyoutStructuredContent(child));
+
+      if (contentRoot) {
+        return { container: current, contentRoot };
+      }
+
+      current = current.parentElement;
+    }
+
+    return null;
+  }
+
+  function hasThinkingFlyoutStructuredContent(element) {
+    return Boolean(element?.querySelector?.("p, pre, ul, ol, blockquote, h1, h2, h3, h4, h5, h6"));
+  }
+
+  function extractThinkingFlyoutStepBlocks(contentRoot) {
+    if (!contentRoot?.querySelectorAll) {
+      return [];
+    }
+
+    const outerPreNodes = Array.from(contentRoot.querySelectorAll("pre"))
+      .filter((pre) => !pre.parentElement?.closest("pre"));
+    const outerPreSet = new Set(outerPreNodes);
+    const nodes = Array.from(contentRoot.querySelectorAll("p, pre, ul, ol, blockquote, h1, h2, h3, h4, h5, h6"))
+      .filter((node) => outerPreSet.has(node) || !node.closest("pre"));
+    const blocks = [];
+
+    for (const node of nodes) {
+      if (node.tagName === "PRE") {
+        if (!outerPreSet.has(node)) {
+          continue;
+        }
+
+        const codeBlock = extractThinkingFlyoutCodeCard(node);
+
+        if (codeBlock) {
+          blocks.push(codeBlock);
+        }
+        continue;
+      }
+
+      if (node.matches("UL, OL")) {
+        const lines = Array.from(node.querySelectorAll(":scope > li"))
+          .map((item) => getElementText(item))
+          .filter(Boolean)
+          .map((line) => `- ${line}`);
+
+        if (lines.length) {
+          blocks.push({ kind: "text", text: lines.join("\n") });
+        }
+        continue;
+      }
+
+      const text = getElementText(node);
+
+      if (text) {
+        blocks.push({
+          kind: node.tagName === "BLOCKQUOTE" ? "quote" : "text",
+          text
+        });
+      }
+    }
+
+    return blocks;
+  }
+
+  function extractThinkingFlyoutCodeCard(pre) {
+    const nestedPres = Array.from(pre.querySelectorAll("pre"));
+    const commandPre = nestedPres.find((candidate) => String(candidate.className || "").includes("cm-content"))
+      || nestedPres.find((candidate) => candidate.querySelector("code"))
+      || (pre.querySelector("code") ? pre.querySelector("code").closest("pre") : null);
+    const labelNode = Array.from(pre.querySelectorAll("div, span"))
+      .find((candidate) => {
+        const className = String(candidate.className || "");
+        const value = getElementText(candidate);
+        return className.includes("font-medium")
+          && value.length <= 32
+          && THINKING_FLYOUT_CODE_TITLE_RE.test(value);
+      });
+    const label = labelNode ? getElementText(labelNode) : "Code";
+    const rawCode = commandPre
+      ? getPreservedThinkingFlyoutText(commandPre)
+      : pre.querySelector("code")
+        ? getPreservedThinkingFlyoutText(pre.querySelector("code"))
+        : getPreservedThinkingFlyoutText(pre);
+    const codeLines = stripThinkingFlyoutCodeLabel(rawCode, label);
+    const resultLines = nestedPres
+      .filter((candidate) => candidate !== commandPre)
+      .map(getPreservedThinkingFlyoutText)
+      .flatMap((value) => value ? value.split("\n") : [])
+      .filter((line, index, all) => line || index === 0 || all[index - 1]);
+
+    if (!codeLines.length && !resultLines.length) {
+      return null;
+    }
+
+    return {
+      kind: "code",
+      label,
+      codeLines,
+      resultLines
+    };
+  }
+
+  function getPreservedThinkingFlyoutText(element) {
+    return String(element?.innerText || element?.textContent || "")
+      .replace(/\r\n?/g, "\n")
+      .trim();
+  }
+
+  function stripThinkingFlyoutCodeLabel(text, label) {
+    const lines = String(text || "").split("\n");
+
+    if (lines.length && label && lines[0].trim() === label) {
+      lines.shift();
+    }
+
+    return lines;
+  }
+
+  function renderThinkingFlyoutStructuredBlock(block) {
+    if (block.kind === "code") {
+      const sections = [
+        `##### ${block.label || "Code"}`,
+        renderThinkingCodeFence(block.codeLines, "text")
+      ];
+
+      if (block.resultLines.length) {
+        sections.push(`##### Result\n\n${renderThinkingCodeFence(block.resultLines, "text")}`);
+      }
+
+      return sections.join("\n\n");
+    }
+
+    if (block.kind === "quote") {
+      return block.text.split("\n").map((line) => `> ${line}`).join("\n");
+    }
+
+    return block.text;
+  }
+
+  function extractThinkingFlyoutSources(panel) {
+    if (!panel?.querySelectorAll) {
+      return [];
+    }
+
+    const sources = [];
+    const seen = new Set();
+
+    for (const anchor of panel.querySelectorAll("a[href]")) {
+      const href = String(anchor.href || anchor.getAttribute("href") || "").trim();
+
+      if (!/^https?:\/\//i.test(href)) {
+        continue;
+      }
+
+      const label = getElementText(anchor).replace(/\s+/g, " ").trim();
+      const key = `${label}\n${href}`;
+
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      sources.push({
+        label: label.slice(0, 180) || compactUrlLabel(href),
+        url: href
+      });
+
+      if (sources.length >= 60) {
+        break;
+      }
+    }
+
+    return sources;
   }
 
   function isThinkingFlyoutNoiseLine(line) {
@@ -6300,7 +6739,7 @@
       || /^\u5173\u95ed$/.test(line);
   }
 
-  function formatThinkingFlyoutLinesAsMarkdown(lines) {
+  function formatThinkingFlyoutLinesAsMarkdown(lines, sources = []) {
     const contentLines = [];
     const statusLines = [];
 
@@ -6318,18 +6757,124 @@
       const line = contentLines[index];
       const next = contentLines[index + 1] || "";
 
+      if (THINKING_FLYOUT_STEP_LABEL_RE.test(line)) {
+        const countMatch = next.match(/^[\u00b7:]\s*(\d+)$/);
+        const count = countMatch ? countMatch[1] : "";
+        items.push(`#### ${line}${count ? ` (${count})` : ""}`);
+        if (countMatch) {
+          index += 1;
+        }
+        continue;
+      }
+
+      if (THINKING_FLYOUT_CODE_TITLE_RE.test(line) && next) {
+        const block = collectThinkingCodeBlock(contentLines, index + 1);
+        items.push([
+          `##### ${line}`,
+          renderThinkingCodeFence(block.codeLines, "text"),
+          block.resultLines.length ? `##### Result\n\n${renderThinkingCodeFence(block.resultLines, "text")}` : ""
+        ].filter(Boolean).join("\n\n"));
+        index = block.endIndex;
+        continue;
+      }
+
+      if (isThinkingFlyoutStepHeadingSafe(line, next)) {
+        items.push(`#### ${line}`);
+        continue;
+      }
+
       if (next && isLikelyThinkingFlyoutHeadingSafe(line, next)) {
         items.push(`- **${line}**\n  ${next}`);
         index += 1;
       } else {
-        items.push(`- ${line}`);
+        items.push(formatThinkingFlyoutContentLine(line));
       }
     }
 
+    const sourceLines = sources.map((source) => {
+      const label = escapeMarkdownLinkLabel(source.label || compactUrlLabel(source.url));
+      return `- [Source: ${label}](${source.url})`;
+    });
+
     return cleanMarkdown([
       items.join("\n"),
-      statusLines.map((line) => `\u2713 ${line}`).join("\n")
+      statusLines.map((line) => `\u2713 ${line}`).join("\n"),
+      sourceLines.length ? `### Sources\n\n${sourceLines.join("\n")}` : ""
     ].filter(Boolean).join("\n\n"));
+  }
+
+  function isThinkingFlyoutStepHeadingSafe(line, nextLine) {
+    const value = String(line || "").trim();
+    const next = String(nextLine || "").trim();
+
+    return Boolean(
+      value
+      && next
+      && value.length <= 52
+      && (next.length >= 24 || THINKING_FLYOUT_CODE_TITLE_RE.test(next))
+      && !THINKING_FLYOUT_STEP_LABEL_RE.test(value)
+      && !THINKING_FLYOUT_CODE_TITLE_RE.test(value)
+      && !THINKING_STATUS_RE.test(value)
+      && !THINKING_FLYOUT_DONE_RE.test(value)
+      && !THINKING_FLYOUT_RESULT_RE.test(value)
+      && !/^[-*+\u2022\u00b7]\s/.test(value)
+      && !/^https?:\/\//i.test(value)
+      && !/^(?:[\w.-]+\.)+[a-z]{2,}(?:\/|$)/i.test(value)
+      && !/[:=]$/.test(value)
+      && !/^\d{1,4}[\/-]\d{1,2}[\/-]\d{1,4}/.test(value)
+    );
+  }
+
+  function collectThinkingCodeBlock(lines, startIndex) {
+    const codeLines = [];
+    const resultLines = [];
+    let resultMode = false;
+    let index = startIndex;
+
+    for (; index < lines.length; index += 1) {
+      const line = String(lines[index] || "");
+      const next = lines[index + 1] || "";
+
+      if (
+        THINKING_FLYOUT_STEP_LABEL_RE.test(line)
+        || THINKING_FLYOUT_SOURCES_RE.test(line)
+        || THINKING_STATUS_RE.test(line)
+        || THINKING_FLYOUT_DONE_RE.test(line)
+        || isThinkingFlyoutStepHeadingSafe(line, next)
+      ) {
+        break;
+      }
+
+      if (!resultMode && THINKING_FLYOUT_RESULT_RE.test(line) && codeLines.length) {
+        resultMode = true;
+      }
+
+      (resultMode ? resultLines : codeLines).push(line);
+    }
+
+    return {
+      codeLines,
+      resultLines,
+      endIndex: Math.max(startIndex - 1, index - 1)
+    };
+  }
+
+  function renderThinkingCodeFence(lines, language = "text") {
+    const body = lines
+      .map((line) => String(line || "").replace(/```/g, "`` `"))
+      .join("\n")
+      .trim();
+    return `\`\`\`${language}\n${body}\n\`\`\``;
+  }
+
+  function formatThinkingFlyoutContentLine(line) {
+    const value = String(line || "").trim();
+
+    if (/^[-*+]\s+/.test(value) || /^\u2022\s+/.test(value) || /^-{3,}$/.test(value)) {
+      return value;
+    }
+
+    return `- ${value}`;
   }
 
   function isLikelyThinkingFlyoutHeading(line, nextLine) {
@@ -6378,7 +6923,9 @@
     }
 
     return assistantMessages.find((message) => isNodeInViewport(message.sourceNode) && isThinThinkingMarkdown(message.thinkingMarkdown))
+      || assistantMessages.find((message) => isNodeInViewport(message.sourceNode))
       || assistantMessages.find((message) => isThinThinkingMarkdown(message.thinkingMarkdown))
+      || assistantMessages[assistantMessages.length - 1]
       || assistantMessages[0];
   }
 
@@ -6399,7 +6946,10 @@
 
   function isThinThinkingMarkdown(markdown) {
     const value = cleanMarkdown(markdown);
-    return !value || value.length < 90 || (THINKING_STATUS_RE.test(value) && value.length < 160);
+    return !value
+      || /^fast\|/i.test(value)
+      || value.length < 90
+      || (THINKING_STATUS_RE.test(value) && value.length < 160);
   }
 
   function isVisibleElement(element) {
@@ -6551,6 +7101,10 @@
       state.skipElements = previousSkipElements;
     }
 
+    markdown = dedupeMarkdownImageReferences(markdown);
+    thinkingMarkdown = dedupeMarkdownImageReferences(thinkingMarkdown);
+    const serializedImageCount = countMarkdownImages(`${markdown}\n${thinkingMarkdown}`);
+
     return {
       role,
       sourceNode: node,
@@ -6566,9 +7120,9 @@
       serializationAttempts,
       codeBlockCount: state.codeBlockCount,
       fileCount: state.fileCount,
-      imageCount: state.imageCount,
-      imagesEmbedded: state.imagesEmbedded,
-      imagesFailed: state.imagesFailed,
+      imageCount: serializedImageCount,
+      imagesEmbedded: Math.min(serializedImageCount, state.imagesEmbedded),
+      imagesFailed: Math.min(serializedImageCount, state.imagesFailed),
       imageEvents: state.imageEvents
     };
   }

@@ -5,3 +5,16 @@ output/
 .convo-vault/
 dist/
 CURRENT_PROGRESS.md
+vault-private/
+vault-private-*/
+tools/knowledge-pack/tmp/
+.env
+.env.*
+!.env.example
+config.local.*
+catalog-private/
+datasets-private/
+embeddings/
+vector-store/
+*.local.json
+*.local.yaml
