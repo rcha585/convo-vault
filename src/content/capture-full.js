@@ -5,13 +5,17 @@
 
     return {
       async captureFromDom(options = {}) {
+        const signal = options.signal || null;
+        throwIfCaptureCancelled(signal);
         const settleMs = Number.isFinite(options.settleMs) ? Math.max(0, options.settleMs) : CAPTURE_SETTLE_MS;
 
         if (settleMs) {
           await sleep(settleMs);
+          throwIfCaptureCancelled(signal);
         }
 
         for (const node of options.nodes || getCandidateMessageNodes(debugLog)) {
+          throwIfCaptureCancelled(signal);
           const stableKey = getStableNodeKey(node);
           const existingByStableKey = stableKey && capturedStableKeys.has(stableKey) ? messagesByKey.get(stableKey) : null;
           const shouldRevisit = shouldRevisitMessageNode(node) || shouldRevisitCapturedMessage(node, existingByStableKey);
@@ -293,12 +297,13 @@
     };
   }
 
-  async function loadOlderMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budget = null) {
+  async function loadOlderMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budget = null, signal = null) {
     let stableAtTopCount = 0;
     let previousSignature = getConversationSignature(scrollTarget);
-    await collector.captureFromDom();
+    await collector.captureFromDom({ signal });
 
     for (let attempt = 0; attempt < TOP_LOAD_ATTEMPTS; attempt += 1) {
+      throwIfCaptureCancelled(signal);
       if (Date.now() >= deadline) {
         debugLog?.progress("loadOlder.timeout", { attempt, maxScanMs: budget?.maxScanMs || MAX_SCAN_MS });
         break;
@@ -309,13 +314,14 @@
       const shouldJumpToTop = attempt === 0 || attempt % 4 === 3 || top <= step;
       setScrollTop(scrollTarget, shouldJumpToTop ? 0 : Math.max(0, top - step));
       await waitForScrollAndDomIdle();
+      throwIfCaptureCancelled(signal);
 
       if (getScrollTop(scrollTarget) <= 80) {
         setScrollTop(scrollTarget, 0);
         await waitForScrollAndDomIdle(90);
       }
 
-      await collector.captureFromDom({ settleMs: 0 });
+      await collector.captureFromDom({ settleMs: 0, signal });
 
       const currentSignature = getConversationSignature(scrollTarget);
       const atTop = getScrollTop(scrollTarget) <= 2;
@@ -340,15 +346,16 @@
     }
   }
 
-  async function walkConversation(scrollTarget, collector, debugLog = null, deadline = Infinity, budget = null) {
+  async function walkConversation(scrollTarget, collector, debugLog = null, deadline = Infinity, budget = null, signal = null) {
     let stuckCount = 0;
     let bottomStableCount = 0;
     let previousSignature = "";
     let maxAttempts = getWalkAttemptLimit(scrollTarget);
 
-    await collector.captureFromDom({ settleMs: 0 });
+    await collector.captureFromDom({ settleMs: 0, signal });
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      throwIfCaptureCancelled(signal);
       if (Date.now() >= deadline) {
         debugLog?.progress("walk.timeout", {
           attempt,
@@ -369,7 +376,8 @@
         }
 
         await waitForScrollAndDomIdle(90);
-        await collector.captureFromDom({ settleMs: 0 });
+        throwIfCaptureCancelled(signal);
+        await collector.captureFromDom({ settleMs: 0, signal });
         continue;
       }
 
@@ -377,6 +385,7 @@
       const step = getWalkScrollStep(scrollTarget);
       setScrollTop(scrollTarget, Math.min(top + step, maxTop));
       await waitForScrollAndDomIdle();
+      throwIfCaptureCancelled(signal);
 
       if (Date.now() >= deadline) {
         debugLog?.progress("walk.timeoutAfterWait", {
@@ -387,7 +396,7 @@
         break;
       }
 
-      await collector.captureFromDom({ settleMs: 0 });
+      await collector.captureFromDom({ settleMs: 0, signal });
 
       const newTop = getScrollTop(scrollTarget);
       const currentSignature = getConversationSignature(scrollTarget);
@@ -419,7 +428,7 @@
     return Math.min(WALK_ATTEMPTS, Math.max(10, estimated));
   }
 
-  async function hydrateVirtualizedTurns(collector, debugLog = null, deadline = Infinity, budget = null) {
+  async function hydrateVirtualizedTurns(collector, debugLog = null, deadline = Infinity, budget = null, signal = null) {
     const allTurns = orderTurnsForHydration(getAllTurnNodes());
     const turns = getTurnsNeedingHydration(allTurns, collector);
 
@@ -431,6 +440,7 @@
     });
 
     for (let index = 0; index < turns.length; index += 1) {
+      throwIfCaptureCancelled(signal);
       if (Date.now() >= deadline) {
         debugLog?.progress("hydrate.timeout", {
           index,
@@ -453,7 +463,7 @@
 
       const beforeTextLength = getRawElementText(turn).length;
       const beforeHasMountedText = hasMountedMessageText(turn);
-      const hydrationResult = await hydrateSingleTurn(turn, collector, deadline);
+      const hydrationResult = await hydrateSingleTurn(turn, collector, deadline, signal);
 
       debugLog?.progress("hydrate.turn", {
         index,
@@ -469,7 +479,7 @@
     }
   }
 
-  async function hydrateSingleTurn(turn, collector, deadline = Infinity) {
+  async function hydrateSingleTurn(turn, collector, deadline = Infinity, signal = null) {
     const attempts = [
       { block: "center", waitMs: TURN_HYDRATION_SETTLE_MS },
       { block: "start", waitMs: 150 },
@@ -480,6 +490,7 @@
     let attemptsUsed = 0;
 
     for (const attempt of attempts) {
+      throwIfCaptureCancelled(signal);
       if (Date.now() >= deadline || collector.hasCapturedNode(turn)) {
         break;
       }
@@ -490,7 +501,8 @@
         inline: "nearest"
       });
       await waitForScrollAndDomIdle(attempt.waitMs);
-      await collector.captureFromDom({ settleMs: 0, nodes: [turn] });
+      throwIfCaptureCancelled(signal);
+      await collector.captureFromDom({ settleMs: 0, nodes: [turn], signal });
       attemptsUsed += 1;
       afterTextLength = getRawElementText(turn).length;
       afterHasMountedText = hasMountedMessageText(turn);
@@ -507,7 +519,7 @@
     };
   }
 
-  async function recoverMissingTurnMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budgetMs = MISSING_TURN_RECOVERY_MS) {
+  async function recoverMissingTurnMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budgetMs = MISSING_TURN_RECOVERY_MS, signal = null) {
     let missingOrders = getMissingConversationTurnOrders(collector.getMessages());
 
     debugLog?.progress("missingRecovery.start", {
@@ -521,7 +533,9 @@
     }
 
     for (let pass = 0; pass < 3 && missingOrders.length && Date.now() < deadline; pass += 1) {
+      throwIfCaptureCancelled(signal);
       for (const order of missingOrders) {
+        throwIfCaptureCancelled(signal);
         if (Date.now() >= deadline) {
           break;
         }
@@ -541,8 +555,8 @@
         const beforeCount = collector.getMessageCount();
         const beforeTextLength = getRawElementText(turn).length;
         const beforeHasMountedText = hasMountedMessageText(turn);
-        const hydrationResult = await hydrateSingleTurn(turn, collector, deadline);
-        await collector.captureFromDom({ settleMs: 0, nodes: [turn] });
+        const hydrationResult = await hydrateSingleTurn(turn, collector, deadline, signal);
+        await collector.captureFromDom({ settleMs: 0, nodes: [turn], signal });
         const captured = !getMissingConversationTurnOrders(collector.getMessages()).includes(order);
 
         debugLog?.progress("missingRecovery.turn", {

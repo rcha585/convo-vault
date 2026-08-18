@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
@@ -12,7 +13,7 @@ const cases = JSON.parse(
 );
 
 test("backend Markdown and data endpoints preserve export fixture text", async (t) => {
-  const port = 39500 + Math.floor(Math.random() * 400);
+  const port = await getAvailablePort();
   const token = `fixture-token-${process.pid}-${Date.now()}`;
   const server = spawn(process.execPath, [
     path.join(repoRoot, "tools", "advanced-pdf", "server.js")
@@ -66,6 +67,24 @@ test("backend Markdown and data endpoints preserve export fixture text", async (
     assertFixtureData(data, fixtureCase);
   }
 });
+
+function getAvailablePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      probe.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve(address.port);
+      });
+    });
+  });
+}
 
 async function waitForHealth(port, token, getLogs) {
   const deadline = Date.now() + 8000;

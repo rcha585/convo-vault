@@ -307,7 +307,11 @@
   async function openMessageSelectorPanel() {
     return messageSelectorUI.open({
       loadMessages: async (onProgress, options = {}) => {
-        return messageExtractor.collect({ onProgress, captureMode: options.captureMode });
+        return messageExtractor.collect({
+          onProgress,
+          captureMode: options.captureMode,
+          signal: options.signal
+        });
       },
       exportMessages: (messages, options) => exportSelectedMessages(messages, options)
     });
@@ -321,26 +325,40 @@
       throw new Error("No conversation messages were found on this page.");
     }
 
-    return exportSelectedMessages(messages);
+    if (!result.completeness?.complete) {
+      throw new Error(formatCaptureCompletenessError(result.completeness));
+    }
+
+    return exportSelectedMessages(messages, {
+      captureMode: result.captureMode,
+      completeness: result.completeness,
+      debugLog: result.debugLog || null
+    });
   }
 
   async function collectConversationMessages(options = {}) {
     const onProgress = typeof options.onProgress === "function" ? options.onProgress : () => {};
     const captureMode = normalizeCaptureMode(options.captureMode);
+    const signal = options.signal || null;
     const debugLog = createDebugLog({ captureMode });
     debugLog.event("capture.mode", { captureMode });
+    throwIfCaptureCancelled(signal);
 
     if (captureMode === "fast") {
       try {
         const messages = await collectFastCanonicalMessages(debugLog, onProgress, {
-          finishDebug: true
+          finishDebug: true,
+          signal
         });
-        return {
+        return createValidatedCaptureResult({
           messages,
           debugLog,
           captureMode
-        };
+        }, { signal });
       } catch (error) {
+        if (isCaptureCancelledError(error)) {
+          throw error;
+        }
         debugLog.event("fastCapture.failed", {
           error: error?.message || String(error)
         });
@@ -349,22 +367,27 @@
     }
 
     if (captureMode === "hybrid") {
-      return collectHybridConversationMessages(debugLog, onProgress);
+      const result = await collectHybridConversationMessages(debugLog, onProgress, { signal });
+      return createValidatedCaptureResult(result, { signal });
     }
 
     const messages = await collectFullDomMessages(debugLog, onProgress, {
-      finishDebug: true
+      finishDebug: true,
+      signal
     });
-    return {
+    return createValidatedCaptureResult({
       messages,
       debugLog,
       captureMode: "full"
-    };
+    }, { signal });
   }
 
   async function collectFastCanonicalMessages(debugLog, onProgress, options = {}) {
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     onProgress("Loading conversation data...");
-    const messages = await collectFastConversationMessages(debugLog);
+    const messages = await collectFastConversationMessages(debugLog, { signal });
+    throwIfCaptureCancelled(signal);
 
     if (!messages.length) {
       debugLog.event("fastCapture.empty", {});
@@ -376,8 +399,10 @@
       autoOpenLimit: FAST_THINKING_FLYOUT_AUTO_OPEN_LIMIT,
       allowGlobalFallback: false,
       requireMountedRoot: true,
-      settleTimeoutMs: FAST_THINKING_FLYOUT_SETTLE_TIMEOUT_MS
+      settleTimeoutMs: FAST_THINKING_FLYOUT_SETTLE_TIMEOUT_MS,
+      signal
     });
+    throwIfCaptureCancelled(signal);
     debugLog.mark("enrichedFastThinkingFlyouts");
 
     if (options.finishDebug !== false) {
@@ -388,11 +413,14 @@
     return messages;
   }
 
-  async function collectHybridConversationMessages(debugLog, onProgress) {
+  async function collectHybridConversationMessages(debugLog, onProgress, options = {}) {
+    const signal = options.signal || null;
     try {
       const fastMessages = await collectFastCanonicalMessages(debugLog, onProgress, {
-        finishDebug: false
+        finishDebug: false,
+        signal
       });
+      throwIfCaptureCancelled(signal);
       debugLog.event("hybridCapture.fastReady", {
         messageCount: fastMessages.length
       });
@@ -402,9 +430,13 @@
       try {
         fullMessages = await collectFullDomMessages(debugLog, onProgress, {
           finishDebug: false,
-          progressPrefix: "Full enrichment: "
+          progressPrefix: "Full enrichment: ",
+          signal
         });
       } catch (error) {
+        if (isCaptureCancelledError(error)) {
+          throw error;
+        }
         debugLog.event("hybridCapture.fullFailed", {
           error: error?.message || String(error)
         });
@@ -413,15 +445,20 @@
 
       const reconciliation = reconcileHybridMessages(fastMessages, fullMessages, debugLog);
       const messages = reconciliation.messages;
+      throwIfCaptureCancelled(signal);
       debugLog.event("hybridCapture.reconciled", reconciliation.report);
       debugLog.finish(messages);
       onProgress(`Hybrid ready. ${messages.length} canonical messages, ${reconciliation.report.enrichedMessages} enriched, ${reconciliation.report.ignoredFullOnlyMessages} Full-only candidate(s) ignored.`);
       return {
         messages,
         debugLog,
-        captureMode: "hybrid"
+        captureMode: "hybrid",
+        reconciliationReport: reconciliation.report
       };
     } catch (error) {
+      if (isCaptureCancelledError(error)) {
+        throw error;
+      }
       debugLog.event("hybridCapture.failed", {
         error: error?.message || String(error)
       });
@@ -430,6 +467,8 @@
   }
 
   async function collectFullDomMessages(debugLog, onProgress, options = {}) {
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     const progressPrefix = options.progressPrefix || "";
     const scrollTarget = getBestScrollTarget();
     const originalScrollTop = getScrollTop(scrollTarget);
@@ -445,24 +484,28 @@
       // stable, then walk downward and capture each visible batch.
       debugLog.mark("start");
       onProgress(`${progressPrefix}Loading older messages...`);
-      await loadOlderMessages(scrollTarget, collector, debugLog, scanDeadline, scanBudget);
+      await loadOlderMessages(scrollTarget, collector, debugLog, scanDeadline, scanBudget, signal);
+      throwIfCaptureCancelled(signal);
       debugLog.mark("loadedOlderMessages");
       onProgress(`${progressPrefix}Scanning conversation...`);
-      await walkConversation(scrollTarget, collector, debugLog, walkDeadline, scanBudget);
+      await walkConversation(scrollTarget, collector, debugLog, walkDeadline, scanBudget, signal);
+      throwIfCaptureCancelled(signal);
       debugLog.mark("walkedConversation");
       onProgress(`${progressPrefix}Hydrating virtualized messages...`);
       const hydrateDeadline = Math.max(scanDeadline, Date.now() + scanBudget.hydrateReservedMs);
-      await hydrateVirtualizedTurns(collector, debugLog, hydrateDeadline, scanBudget);
+      await hydrateVirtualizedTurns(collector, debugLog, hydrateDeadline, scanBudget, signal);
+      throwIfCaptureCancelled(signal);
       debugLog.mark("hydratedVirtualizedTurns");
-      await collector.captureFromDom();
+      await collector.captureFromDom({ signal });
       debugLog.mark("finalCapture");
       onProgress(`${progressPrefix}Recovering missed turns...`);
       const missingBeforeRecovery = getMissingConversationTurnOrders(collector.getMessages());
       const recoveryBudgetMs = getMissingRecoveryBudgetMs(missingBeforeRecovery.length, scanBudget.pageTurnCount);
       const recoveryDeadline = Date.now() + recoveryBudgetMs;
-      await recoverMissingTurnMessages(scrollTarget, collector, debugLog, recoveryDeadline, recoveryBudgetMs);
+      await recoverMissingTurnMessages(scrollTarget, collector, debugLog, recoveryDeadline, recoveryBudgetMs, signal);
+      throwIfCaptureCancelled(signal);
       debugLog.mark("recoveredMissingTurns");
-      await collector.captureFromDom({ settleMs: 0 });
+      await collector.captureFromDom({ settleMs: 0, signal });
 
       const messages = finalizeCollectedMessages(collector.getMessages(), debugLog);
 
@@ -471,10 +514,12 @@
       }
 
       onProgress(`${progressPrefix}Loading message timestamps...`);
-      await enrichMessageTimestamps(messages, debugLog);
+      await enrichMessageTimestamps(messages, debugLog, { signal });
+      throwIfCaptureCancelled(signal);
       debugLog.mark("enrichedTimestamps");
       onProgress(`${progressPrefix}Loading thinking details...`);
-      await enrichVisibleThinkingFlyouts(messages, debugLog);
+      await enrichVisibleThinkingFlyouts(messages, debugLog, { signal });
+      throwIfCaptureCancelled(signal);
       debugLog.mark("enrichedThinkingFlyouts");
 
       if (options.finishDebug !== false) {
@@ -495,6 +540,7 @@
   function reconcileHybridMessages(fastMessages, fullMessages, debugLog = null) {
     const fullMatches = new Map();
     const fullOnlyCandidates = [];
+    const substantiveFullOnlyCandidates = [];
     const usedFullMessages = new Set();
     let enrichedMessages = 0;
 
@@ -512,11 +558,17 @@
       const key = getHybridMessageKey(fullMessage);
 
       if (!key) {
-        fullOnlyCandidates.push({
+        const candidate = {
           role: fullMessage.role,
           order: fullMessage.order,
           reason: "missing-order-or-role",
           preview: fullMessage.preview || makeMessagePreview(fullMessage)
+        };
+        fullOnlyCandidates.push(candidate);
+        substantiveFullOnlyCandidates.push({
+          ...candidate,
+          identity: getCapturedMessageIdentity(fullMessage),
+          imageCount: fullMessage.imageCount || countMarkdownImages(`${fullMessage.markdown || ""}\n${fullMessage.thinkingMarkdown || ""}`)
         });
         continue;
       }
@@ -558,6 +610,13 @@
         reason: "not-in-fast-canonical-path",
         preview: fullMessage.preview || makeMessagePreview(fullMessage)
       });
+      substantiveFullOnlyCandidates.push({
+        role: fullMessage.role,
+        order: fullMessage.order,
+        identity: getCapturedMessageIdentity(fullMessage),
+        imageCount: fullMessage.imageCount || countMarkdownImages(`${fullMessage.markdown || ""}\n${fullMessage.thinkingMarkdown || ""}`),
+        preview: fullMessage.preview || makeMessagePreview(fullMessage)
+      });
     }
 
     const ignoredSamples = fullOnlyCandidates.slice(0, 12);
@@ -568,12 +627,17 @@
       matchedFullCandidates: usedFullMessages.size,
       enrichedMessages,
       ignoredFullOnlyMessages: fullOnlyCandidates.length,
-      ignoredSamples
+      ignoredSamples,
+      substantiveFullOnlyMessages: substantiveFullOnlyCandidates.length,
+      substantiveFullOnlyAssistantMessages: substantiveFullOnlyCandidates.filter((candidate) => candidate.role === "assistant").length,
+      substantiveSamples: substantiveFullOnlyCandidates.slice(0, 12)
     };
 
     debugLog?.event("hybridCapture.fullOnlyCandidates", {
       count: fullOnlyCandidates.length,
-      samples: ignoredSamples
+      samples: ignoredSamples,
+      substantiveCount: substantiveFullOnlyCandidates.length,
+      substantiveSamples: substantiveFullOnlyCandidates.slice(0, 12)
     });
 
     return {
@@ -730,9 +794,349 @@
     );
   }
 
+  function createCaptureCancelledError(reason = "Capture cancelled.") {
+    const message = typeof reason === "string"
+      ? reason
+      : reason?.message || "Capture cancelled.";
+    const error = new Error(message);
+    error.name = "CaptureCancelledError";
+    error.code = "CAPTURE_CANCELLED";
+    return error;
+  }
+
+  function isCaptureCancelledError(error) {
+    return error?.name === "CaptureCancelledError"
+      || error?.code === "CAPTURE_CANCELLED";
+  }
+
+  function throwIfCaptureCancelled(signal) {
+    if (signal?.aborted) {
+      throw createCaptureCancelledError(signal.reason);
+    }
+  }
+
+  function createValidatedCaptureResult(result, options = {}) {
+    throwIfCaptureCancelled(options.signal);
+    const messages = result?.messages || [];
+    const captureMode = normalizeCaptureMode(result?.captureMode);
+    const completeness = buildCaptureCompletenessReport(messages, {
+      captureMode,
+      reconciliationReport: result?.reconciliationReport || null,
+      expectedSummary: result?.debugLog?.getFinalSummary?.() || null
+    });
+
+    result?.debugLog?.event("capture.completeness", completeness);
+    return {
+      ...result,
+      captureMode,
+      completeness
+    };
+  }
+
+  function buildCaptureCompletenessReport(messages, options = {}) {
+    const captureMode = normalizeCaptureMode(options.captureMode);
+    const expected = options.expectedStructure || getExpectedConversationStructure(options.expectedSummary);
+    const capturedEntries = messages.map((message, index) => ({
+      identity: getCapturedMessageIdentity(message, index),
+      order: getCapturedConversationOrder(message),
+      role: String(message?.role || "unknown").toLowerCase()
+    }));
+    const capturedIdentities = [...new Set(capturedEntries.map((entry) => entry.identity).filter(Boolean))];
+    const capturedIdentitySet = new Set(capturedIdentities);
+    const missingIdentities = expected.identities.filter((identity) => !capturedIdentitySet.has(identity));
+    const capturedOrders = [...new Set(capturedEntries
+      .map((entry) => entry.order)
+      .filter((order) => Number.isFinite(order) && order > 0 && order < 1_000_000))]
+      .sort((a, b) => a - b);
+    const capturedOrderSet = new Set(capturedOrders);
+    const missingConversationOrders = expected.orders.filter((order) => !capturedOrderSet.has(order));
+    const roleSequence = getRoleSequenceDiagnostics(messages);
+    const userMessages = roleSequence.userMessages;
+    const assistantMessages = roleSequence.assistantMessages;
+    const imageStats = getCaptureImageCompletenessStats(messages);
+    const issues = [];
+    const warnings = [];
+    const coverageKnown = expected.identities.length > 0;
+    const capturedStartRole = messages[0]?.role || "";
+    const capturedEndRole = messages[messages.length - 1]?.role || "";
+    const reconciliationReport = options.reconciliationReport || {};
+    const substantiveFullOnlyMessages = Number(reconciliationReport.substantiveFullOnlyMessages || 0);
+
+    if (!coverageKnown) {
+      issues.push({
+        code: "expected-structure-unavailable",
+        message: "The page did not expose a stable expected conversation structure."
+      });
+    }
+
+    if (coverageKnown && capturedIdentities.length < expected.identities.length) {
+      issues.push({
+        code: "identity-coverage",
+        message: `Captured ${capturedIdentities.length}/${expected.identities.length} unique conversation identities.`
+      });
+    }
+
+    if (missingConversationOrders.length) {
+      issues.push({
+        code: "missing-orders",
+        message: `Missing conversation order(s): ${formatNumberRanges(missingConversationOrders)}.`
+      });
+    } else if (missingIdentities.length) {
+      issues.push({
+        code: "missing-identities",
+        message: `Missing ${missingIdentities.length} expected conversation identity/identities.`
+      });
+    }
+
+    if (expected.roles.user > userMessages) {
+      issues.push({
+        code: "missing-user-messages",
+        message: `Captured ${userMessages}/${expected.roles.user} expected user messages.`
+      });
+    }
+
+    if (expected.roles.assistant > assistantMessages) {
+      issues.push({
+        code: "missing-assistant-messages",
+        message: `Captured ${assistantMessages}/${expected.roles.assistant} expected assistant messages.`
+      });
+    }
+
+    if (expected.startRole && capturedStartRole !== expected.startRole) {
+      issues.push({
+        code: "start-role-mismatch",
+        message: `Expected the conversation to start with ${expected.startRole}, captured ${capturedStartRole || "nothing"}.`
+      });
+    }
+
+    if (expected.endRole && capturedEndRole !== expected.endRole) {
+      issues.push({
+        code: "end-role-mismatch",
+        message: `Expected the conversation to end with ${expected.endRole}, captured ${capturedEndRole || "nothing"}.`
+      });
+    }
+
+    if (imageStats.failures > 0) {
+      issues.push({
+        code: "image-failures",
+        message: `${imageStats.failures} image reference(s) failed during capture.`
+      });
+    }
+
+    if (captureMode === "hybrid" && substantiveFullOnlyMessages > 0) {
+      issues.push({
+        code: "hybrid-full-only-messages",
+        message: `Hybrid found ${substantiveFullOnlyMessages} substantive Full-only message(s); use Full to retain them.`
+      });
+    }
+
+    if (roleSequence.sameRolePairs.length) {
+      warnings.push({
+        code: "same-role-adjacency",
+        message: `${roleSequence.sameRolePairs.length} same-role adjacency pair(s) detected.`,
+        pairs: roleSequence.sameRolePairs
+      });
+    }
+
+    const complete = issues.length === 0;
+    return {
+      complete,
+      requiresOverride: !complete,
+      captureMode,
+      coverageKnown,
+      expected: {
+        uniqueIdentities: expected.identities.length,
+        conversationOrders: expected.orders,
+        userMessages: expected.roles.user,
+        assistantMessages: expected.roles.assistant,
+        startRole: expected.startRole,
+        endRole: expected.endRole,
+        sameRoleAdjacencies: expected.sameRolePairs
+      },
+      captured: {
+        messages: messages.length,
+        uniqueIdentities: capturedIdentities.length,
+        conversationOrders: capturedOrders,
+        userMessages,
+        assistantMessages,
+        startRole: capturedStartRole,
+        endRole: capturedEndRole,
+        sameRoleAdjacencies: roleSequence.sameRolePairs
+      },
+      missingConversationOrders,
+      missingIdentities,
+      images: imageStats,
+      hybrid: {
+        substantiveFullOnlyMessages,
+        substantiveFullOnlyAssistantMessages: Number(reconciliationReport.substantiveFullOnlyAssistantMessages || 0),
+        substantiveSamples: reconciliationReport.substantiveSamples || []
+      },
+      issues,
+      warnings
+    };
+  }
+
+  function getExpectedConversationStructure(summary = null) {
+    const turns = getAllTurnNodes();
+    const entries = [];
+    const seen = new Set();
+
+    turns.forEach((turn, index) => {
+      const identity = getExpectedTurnIdentity(turn, index);
+
+      if (!identity || seen.has(identity)) {
+        return;
+      }
+
+      seen.add(identity);
+      entries.push({
+        identity,
+        order: getConversationTurnNumber(turn),
+        role: detectRoleDetails(turn, index).role
+      });
+    });
+
+    const roles = entries.reduce((counts, entry) => {
+      if (entry.role === "user" || entry.role === "assistant") {
+        counts[entry.role] += 1;
+      }
+      return counts;
+    }, { user: 0, assistant: 0 });
+    const sameRolePairs = [];
+
+    for (let index = 1; index < entries.length; index += 1) {
+      if (entries[index].role === entries[index - 1].role) {
+        sameRolePairs.push({
+          previousOrder: entries[index - 1].order,
+          order: entries[index].order,
+          role: entries[index].role
+        });
+      }
+    }
+
+    const domOrders = entries
+      .map((entry) => entry.order)
+      .filter((order) => Number.isFinite(order) && order > 0 && order < 1_000_000);
+    let summaryOrders = [
+      ...(summary?.capturedTurnOrders || []),
+      ...(summary?.missingTurnOrders || [])
+    ]
+      .map(Number)
+      .filter((order) => Number.isFinite(order) && order > 0 && order < 1_000_000);
+    const expectedTurnCount = Number(summary?.expectedTurnCount || 0);
+
+    if (!summaryOrders.length && Number.isInteger(expectedTurnCount) && expectedTurnCount > 0 && expectedTurnCount < 1_000_000) {
+      summaryOrders = Array.from({ length: expectedTurnCount }, (_, index) => index + 1);
+    }
+
+    const orders = [...new Set([...domOrders, ...summaryOrders])].sort((a, b) => a - b);
+    return {
+      identities: orders.length
+        ? orders.map((order) => `order:${order}`)
+        : entries.map((entry) => entry.identity),
+      orders,
+      roles,
+      startRole: entries[0]?.role || "",
+      endRole: entries[entries.length - 1]?.role || "",
+      sameRolePairs
+    };
+  }
+
+  function getExpectedTurnIdentity(turn, index = 0) {
+    const order = getConversationTurnNumber(turn);
+
+    if (Number.isFinite(order) && order > 0 && order < 1_000_000) {
+      return `order:${Math.floor(order)}`;
+    }
+
+    const messageId = turn?.getAttribute?.("data-message-id") || turn?.querySelector?.("[data-message-id]")?.getAttribute("data-message-id") || "";
+    const turnId = getTurnId(turn);
+    const turnContainer = turn?.getAttribute?.("data-turn-id-container") || turn?.getAttribute?.("data-turn-container") || "";
+    const testId = turn?.getAttribute?.("data-testid") || "";
+
+    if (messageId) return `message:${messageId}`;
+    if (turnId) return `turn:${turnId}`;
+    if (turnContainer) return `container:${turnContainer}`;
+    if (testId) return `test:${testId}`;
+    return `dom-index:${index}`;
+  }
+
+  function getCapturedMessageIdentity(message, index = 0) {
+    const order = getCapturedConversationOrder(message);
+
+    if (Number.isFinite(order) && order > 0 && order < 1_000_000) {
+      return `order:${Math.floor(order)}`;
+    }
+
+    if (message?.sourceMessageId) return `message:${message.sourceMessageId}`;
+    if (message?.sourceTurnId) return `turn:${message.sourceTurnId}`;
+    if (message?.sourceTurnContainer) return `container:${message.sourceTurnContainer}`;
+    if (message?.sourceTestId) return `test:${message.sourceTestId}`;
+    if (message?.id) return `id:${message.id}`;
+    return `capture-index:${index}`;
+  }
+
+  function getCapturedConversationOrder(message) {
+    const order = Number(message?.conversationOrder ?? message?.order ?? message?.turnNumber);
+    return Number.isFinite(order) ? Math.floor(order) : NaN;
+  }
+
+  function getCaptureImageCompletenessStats(messages) {
+    const urls = [];
+    let embedded = 0;
+    let failures = 0;
+
+    for (const message of messages) {
+      const markdown = `${message?.markdown || ""}\n${message?.thinkingMarkdown || ""}`;
+      urls.push(...extractMarkdownImageUrls(markdown));
+      embedded += countEmbeddedMarkdownImages(markdown);
+      failures += Math.max(0, Number(message?.imagesFailed || 0));
+    }
+
+    return {
+      references: urls.length,
+      uniqueIdentities: new Set(urls.map(getMarkdownImageIdentity).filter(Boolean)).size,
+      embedded,
+      failures
+    };
+  }
+
+  function extractMarkdownImageUrls(markdown) {
+    return [...String(markdown || "").matchAll(/!\[[^\]]*]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)]
+      .map((match) => match[1] || "")
+      .filter(Boolean);
+  }
+
+  function formatNumberRanges(values) {
+    const numbers = [...new Set(values
+      .map(Number)
+      .filter((value) => Number.isFinite(value)))]
+      .sort((a, b) => a - b);
+    const ranges = [];
+    let start = numbers[0];
+    let end = numbers[0];
+
+    for (let index = 1; index <= numbers.length; index += 1) {
+      const value = numbers[index];
+
+      if (value === end + 1) {
+        end = value;
+        continue;
+      }
+
+      if (start != null) {
+        ranges.push(start === end ? String(start) : `${start}-${end}`);
+      }
+      start = value;
+      end = value;
+    }
+
+    return ranges.join(", ");
+  }
+
   function normalizeCaptureMode(value) {
     const mode = String(value || "").toLowerCase();
-    return ["fast", "full", "hybrid"].includes(mode) ? mode : "hybrid";
+    return ["fast", "full", "hybrid"].includes(mode) ? mode : "full";
   }
 
   function formatCaptureMode(value) {
@@ -750,6 +1154,10 @@
   async function exportSelectedMessages(messages, options = {}) {
     if (!messages.length) {
       throw new Error("Select at least one message to export.");
+    }
+
+    if (options.completeness && !options.completeness.complete && !options.allowIncomplete) {
+      throw new Error(formatCaptureCompletenessError(options.completeness));
     }
 
     const exportedAt = new Date();
@@ -871,6 +1279,14 @@
       imagesEmbedded: messages.reduce((total, message) => total + message.imagesEmbedded, 0),
       imagesFailed: messages.reduce((total, message) => total + message.imagesFailed, 0)
     };
+  }
+
+  function formatCaptureCompletenessError(report) {
+    const issueText = (report?.issues || [])
+      .map((issue) => issue.message)
+      .filter(Boolean)
+      .join(" ");
+    return `Capture is incomplete and normal export is blocked.${issueText ? ` ${issueText}` : ""}`;
   }
 
   function createExportMetadata(messages, exportedAt = new Date()) {
@@ -2165,6 +2581,73 @@
     }, 1600);
   }
 
+  function createCaptureJobManager() {
+    let nextJobId = 0;
+    let activeJob = null;
+    let loadedSnapshot = null;
+
+    return {
+      start(captureMode) {
+        this.cancel("Superseded by a newer capture job.");
+        loadedSnapshot = null;
+        const controller = new AbortController();
+        activeJob = Object.freeze({
+          id: ++nextJobId,
+          captureMode: normalizeCaptureMode(captureMode),
+          controller,
+          signal: controller.signal,
+          startedAt: Date.now()
+        });
+        return activeJob;
+      },
+      cancel(reason = "Capture cancelled.") {
+        const job = activeJob;
+        activeJob = null;
+
+        if (job && !job.signal.aborted) {
+          job.controller.abort(reason);
+        }
+
+        return job;
+      },
+      isCurrent(job) {
+        return Boolean(job && activeJob?.id === job.id && !job.signal.aborted);
+      },
+      commit(job, result) {
+        if (!this.isCurrent(job)) {
+          throw createCaptureCancelledError("A stale capture job cannot replace the loaded snapshot.");
+        }
+
+        const snapshot = Object.freeze({
+          jobId: job.id,
+          captureMode: job.captureMode,
+          messages: Object.freeze([...(result?.messages || [])]),
+          debugLog: result?.debugLog || null,
+          completeness: result?.completeness || null,
+          reconciliationReport: result?.reconciliationReport || null,
+          completedAt: Date.now()
+        });
+        activeJob = null;
+        loadedSnapshot = snapshot;
+        return snapshot;
+      },
+      fail(job) {
+        if (activeJob?.id === job?.id) {
+          activeJob = null;
+        }
+      },
+      clearSnapshot() {
+        loadedSnapshot = null;
+      },
+      getActiveJob() {
+        return activeJob;
+      },
+      getLoadedSnapshot() {
+        return loadedSnapshot;
+      }
+    };
+  }
+
   function createMessageSelectorUI() {
     const hostId = "chatgpt-exporter-selector-host";
     let host = null;
@@ -2172,15 +2655,26 @@
     let messages = [];
     let selectedIds = new Set();
     let api = null;
-    let currentDebugLog = null;
-    let currentCaptureMode = "hybrid";
+    let panelPhase = "idle";
+    const captureJobs = createCaptureJobManager();
 
     return {
       open(nextApi) {
         api = nextApi;
         ensurePanel();
-        setPanelBusy(true, "Loading conversation...");
-        reloadMessages();
+        const activeJob = captureJobs.getActiveJob();
+        const loadedSnapshot = captureJobs.getLoadedSnapshot();
+
+        if (activeJob) {
+          setPanelPhase("scanning", `Scanning with ${formatCaptureMode(activeJob.captureMode)}...`);
+        } else if (loadedSnapshot) {
+          setPanelPhase(loadedSnapshot.completeness?.complete ? "ready" : "incomplete");
+        } else {
+          renderMessageList();
+          renderCompletenessReport(null);
+          setPanelPhase("idle", "Choose a mode, then click Start Scan. Opening the selector does not scan.");
+        }
+
         return { ok: true, panelOpen: true };
       }
     };
@@ -2204,12 +2698,14 @@
 
     function bindPanelEvents() {
       shadow.querySelector("[data-action='close']").addEventListener("click", () => {
+        cancelActiveScan("Capture cancelled because the selector was closed.");
         host.style.display = "none";
       });
-      shadow.querySelector("[data-action='refresh']").addEventListener("click", () => {
-        if (api) {
-          reloadMessages();
-        }
+      shadow.querySelector("[data-action='start-scan']").addEventListener("click", () => {
+        startScan();
+      });
+      shadow.querySelector("[data-action='cancel-scan']").addEventListener("click", () => {
+        cancelActiveScan("Capture cancelled by the user.");
       });
       shadow.querySelector("[data-action='select-all']").addEventListener("click", () => {
         selectedIds = new Set(messages.map((message) => message.id));
@@ -2231,11 +2727,18 @@
         exportCheckedMessages();
       });
       shadow.querySelector("[data-option='capture-mode']").addEventListener("change", () => {
-        currentCaptureMode = getSelectedCaptureMode();
+        cancelActiveScan("Capture cancelled because the mode changed.");
+        captureJobs.clearSnapshot();
+        messages = [];
+        selectedIds = new Set();
+        resetIncompleteOverride();
+        renderMessageList();
+        renderCompletenessReport(null);
         updateExportButtonLabel();
-        if (api) {
-          reloadMessages();
-        }
+        setPanelPhase("idle", `Mode set to ${formatCaptureMode(getSelectedCaptureMode())}. Click Start Scan.`);
+      });
+      shadow.querySelector("[data-option='allow-incomplete']").addEventListener("change", () => {
+        updateExportAvailability();
       });
       shadow.querySelector(".cgce-list").addEventListener("change", (event) => {
         const checkbox = event.target.closest("input[type='checkbox'][data-message-id]");
@@ -2268,7 +2771,7 @@
       const list = shadow.querySelector(".cgce-list");
 
       if (!messages.length) {
-        list.innerHTML = '<div class="cgce-empty">No messages found on this page.</div>';
+        list.innerHTML = '<div class="cgce-empty">No scan loaded. Choose a mode and click Start Scan.</div>';
         return;
       }
 
@@ -2279,23 +2782,87 @@
       }
     }
 
-    async function reloadMessages() {
-      setPanelBusy(true, "Reloading conversation...");
+    async function startScan() {
+      if (!api) {
+        setPanelStatus("The capture service is not ready.", true);
+        return;
+      }
+
+      const job = captureJobs.start(getSelectedCaptureMode());
+      messages = [];
+      selectedIds = new Set();
+      resetIncompleteOverride();
+      renderMessageList();
+      renderCompletenessReport(null);
+      setPanelPhase("scanning", `Starting one ${formatCaptureMode(job.captureMode)} capture job...`);
 
       try {
-        currentCaptureMode = getSelectedCaptureMode();
-        const result = await api.loadMessages((message) => setPanelStatus(message), {
-          captureMode: currentCaptureMode
+        const result = await api.loadMessages((message) => {
+          if (captureJobs.isCurrent(job)) {
+            setPanelStatus(message);
+          }
+        }, {
+          captureMode: job.captureMode,
+          signal: job.signal
         });
-        messages = result.messages || result;
-        currentDebugLog = result.debugLog || null;
+
+        if (!captureJobs.isCurrent(job)) {
+          return;
+        }
+
+        setPanelPhase("validating", "Validating conversation structure and media coverage...");
+        throwIfCaptureCancelled(job.signal);
+        const completeness = result?.completeness || buildCaptureCompletenessReport(result?.messages || result, {
+          captureMode: job.captureMode,
+          reconciliationReport: result?.reconciliationReport || null
+        });
+        const snapshot = captureJobs.commit(job, {
+          ...result,
+          messages: result?.messages || result,
+          completeness
+        });
+        messages = [...snapshot.messages];
         selectedIds = new Set(messages.map((message) => message.id));
         renderMessageList();
+        renderCompletenessReport(snapshot.completeness);
         updateSelectionSummary();
-        setPanelBusy(false, `Ready. ${messages.length} messages found with ${formatCaptureMode(currentCaptureMode)}.`);
+
+        if (snapshot.completeness?.complete) {
+          setPanelPhase("ready", `Ready. ${messages.length} messages validated with ${formatCaptureMode(snapshot.captureMode)}.`);
+        } else {
+          setPanelPhase("incomplete", formatIncompleteCaptureStatus(snapshot.completeness), true);
+        }
       } catch (error) {
-        setPanelBusy(false, error.message || String(error), true);
+        const isCurrent = captureJobs.isCurrent(job);
+        captureJobs.fail(job);
+
+        if (isCaptureCancelledError(error) || job.signal.aborted || !isCurrent) {
+          return;
+        }
+
+        messages = [];
+        selectedIds = new Set();
+        renderMessageList();
+        renderCompletenessReport(null);
+        setPanelPhase("idle", error.message || String(error), true);
       }
+    }
+
+    function cancelActiveScan(reason) {
+      const cancelledJob = captureJobs.cancel(reason);
+
+      if (!cancelledJob) {
+        return false;
+      }
+
+      messages = [];
+      selectedIds = new Set();
+      captureJobs.clearSnapshot();
+      resetIncompleteOverride();
+      renderMessageList();
+      renderCompletenessReport(null);
+      setPanelPhase("cancelled", reason);
+      return true;
     }
 
     function createMessageRow(message) {
@@ -2338,7 +2905,7 @@
       const node = resolveMessageNode(message);
 
       if (!node?.isConnected) {
-        setPanelStatus("That message is not currently mounted in the page. Try Reload messages.", true);
+        setPanelStatus("That message is not currently mounted in the page. Run the scan again if you need to jump to it.", true);
         return;
       }
 
@@ -2391,11 +2958,10 @@
       const selected = messages.filter((message) => selectedIds.has(message.id));
       const userCount = selected.filter((message) => message.role === "user").length;
       const assistantCount = selected.filter((message) => message.role === "assistant").length;
-      const exportButton = shadow.querySelector("[data-action='export']");
 
-      exportButton.disabled = !selected.length;
       setPanelStatus(`${selected.length}/${messages.length} selected. ${userCount} user, ${assistantCount} assistant.`);
       updateExportButtonLabel();
+      updateExportAvailability();
     }
 
     function getSelectedMessages() {
@@ -2408,16 +2974,29 @@
 
     function exportCheckedMessages() {
       const selected = getSelectedMessages();
+      const snapshot = captureJobs.getLoadedSnapshot();
 
       if (!selected.length) {
         setPanelStatus("Select at least one message first.", true);
         return;
       }
 
+      if (!snapshot) {
+        setPanelStatus("Run and validate a scan before exporting.", true);
+        return;
+      }
+
+      if (!snapshot.completeness?.complete && !allowsIncompleteExport()) {
+        setPanelStatus("This capture is incomplete. Review the missing coverage and explicitly enable the override to export it.", true);
+        return;
+      }
+
       runExport(selected, {
         format: "bundle",
-        captureMode: getSelectedCaptureMode(),
-        debugLog: shouldDownloadDebugLog() ? currentDebugLog : null
+        captureMode: snapshot.captureMode,
+        completeness: snapshot.completeness,
+        allowIncomplete: allowsIncompleteExport(),
+        debugLog: shouldDownloadDebugLog() ? snapshot.debugLog : null
       });
     }
 
@@ -2426,11 +3005,13 @@
         const busyLabel = options.format === "bundle"
           ? "Generating export bundle..."
           : "Exporting selected messages...";
-        setPanelBusy(true, busyLabel);
+        setPanelPhase("exporting", busyLabel);
         const result = await api.exportMessages(selected, options);
-        setPanelBusy(false, formatExportResult(result));
+        const snapshot = captureJobs.getLoadedSnapshot();
+        setPanelPhase(snapshot?.completeness?.complete ? "ready" : "incomplete", formatExportResult(result));
       } catch (error) {
-        setPanelBusy(false, error.message || String(error), true);
+        const snapshot = captureJobs.getLoadedSnapshot();
+        setPanelPhase(snapshot?.completeness?.complete ? "ready" : snapshot ? "incomplete" : "idle", error.message || String(error), true);
       }
     }
 
@@ -2454,21 +3035,126 @@
 
     function updateExportButtonLabel() {
       const exportButton = shadow.querySelector("[data-action='export']");
-      exportButton.textContent = `Export Loaded ${formatCaptureMode(getSelectedCaptureMode())} Bundle`;
+      const snapshot = captureJobs.getLoadedSnapshot();
+      exportButton.textContent = snapshot
+        ? `Export Loaded ${formatCaptureMode(snapshot.captureMode)} Bundle`
+        : "Export Bundle";
     }
 
     function shouldDownloadDebugLog() {
       return Boolean(shadow.querySelector("[data-option='debug-log']")?.checked);
     }
 
-    function setPanelBusy(isBusy, message, isError = false) {
-      shadow.querySelector("[data-action='export']").disabled = isBusy || selectedIds.size === 0;
-      shadow.querySelector("[data-action='refresh']").disabled = isBusy;
+    function setPanelPhase(nextPhase, message = "", isError = false) {
+      panelPhase = nextPhase;
+      const isCaptureBusy = nextPhase === "scanning" || nextPhase === "validating";
+      const isBusy = isCaptureBusy || nextPhase === "exporting";
+      const hasMessages = messages.length > 0;
+      const modeSelect = shadow.querySelector("[data-option='capture-mode']");
+      const startButton = shadow.querySelector("[data-action='start-scan']");
+      const cancelButton = shadow.querySelector("[data-action='cancel-scan']");
+
+      modeSelect.disabled = isBusy;
+      startButton.disabled = isBusy || !api;
+      startButton.textContent = captureJobs.getLoadedSnapshot() ? "Scan Again" : "Start Scan";
+      cancelButton.disabled = !isCaptureBusy;
+      cancelButton.hidden = !isCaptureBusy;
+
+      for (const action of shadow.querySelectorAll(".cgce-action")) {
+        action.disabled = isBusy || !hasMessages;
+      }
+
       shadow.querySelector(".cgce-panel").classList.toggle("is-busy", isBusy);
+      shadow.querySelector(".cgce-panel").dataset.phase = nextPhase;
+      updateExportAvailability();
 
       if (message) {
         setPanelStatus(message, isError);
       }
+    }
+
+    function updateExportAvailability() {
+      const exportButton = shadow.querySelector("[data-action='export']");
+      const snapshot = captureJobs.getLoadedSnapshot();
+      const phaseAllowsExport = panelPhase === "ready" || panelPhase === "incomplete";
+      const completenessAllowsExport = Boolean(snapshot?.completeness?.complete || allowsIncompleteExport());
+      exportButton.disabled = !phaseAllowsExport
+        || !snapshot
+        || selectedIds.size === 0
+        || !completenessAllowsExport;
+      updateOverrideVisibility();
+    }
+
+    function allowsIncompleteExport() {
+      return Boolean(shadow.querySelector("[data-option='allow-incomplete']")?.checked);
+    }
+
+    function resetIncompleteOverride() {
+      const checkbox = shadow.querySelector("[data-option='allow-incomplete']");
+
+      if (checkbox) {
+        checkbox.checked = false;
+      }
+    }
+
+    function updateOverrideVisibility() {
+      const wrapper = shadow.querySelector("[data-control='incomplete-override']");
+      const snapshot = captureJobs.getLoadedSnapshot();
+
+      if (wrapper) {
+        wrapper.hidden = !snapshot || Boolean(snapshot.completeness?.complete);
+      }
+    }
+
+    function renderCompletenessReport(report) {
+      const container = shadow.querySelector(".cgce-integrity");
+      container.replaceChildren();
+      container.hidden = !report;
+
+      if (!report) {
+        return;
+      }
+
+      container.classList.toggle("is-incomplete", !report.complete);
+      const heading = document.createElement("strong");
+      heading.textContent = report.complete ? "Completeness check passed" : "Incomplete capture";
+      const metrics = document.createElement("span");
+      metrics.textContent = [
+        `${report.captured.uniqueIdentities}/${report.expected.uniqueIdentities} identities`,
+        `${report.captured.userMessages}/${report.expected.userMessages} user`,
+        `${report.captured.assistantMessages}/${report.expected.assistantMessages} assistant`,
+        `${report.images.references} image refs`,
+        `${report.images.uniqueIdentities} unique`,
+        `${report.images.embedded} embedded`,
+        `${report.images.failures} failed`
+      ].join(" | ");
+      container.append(heading, metrics);
+
+      if (report.issues.length) {
+        const list = document.createElement("ul");
+
+        for (const issue of report.issues) {
+          const item = document.createElement("li");
+          item.textContent = issue.message;
+          list.append(item);
+        }
+
+        container.append(list);
+      }
+
+      if (report.warnings.length) {
+        const warning = document.createElement("span");
+        warning.textContent = report.warnings.map((item) => item.message).join(" ");
+        container.append(warning);
+      }
+    }
+
+    function formatIncompleteCaptureStatus(report) {
+      const missing = report?.missingConversationOrders || [];
+      const missingSummary = missing.length
+        ? ` Missing order(s): ${formatNumberRanges(missing)}.`
+        : "";
+      return `Incomplete: ${report?.captured?.messages || 0} captured, ${report?.captured?.userMessages || 0} user + ${report?.captured?.assistantMessages || 0} assistant.${missingSummary} Normal export is blocked.`;
     }
 
     function setPanelStatus(message, isError = false) {
@@ -2669,6 +3355,33 @@
             color: #b42318;
           }
 
+          .cgce-integrity {
+            display: grid;
+            gap: 4px;
+            padding: 9px 10px;
+            border: 1px solid #b7dfd7;
+            border-radius: 6px;
+            background: #f0fdfa;
+            color: #134e4a;
+            font-size: 11px;
+            line-height: 1.4;
+          }
+
+          .cgce-integrity.is-incomplete {
+            border-color: #f2b8b5;
+            background: #fff5f4;
+            color: #8a1c13;
+          }
+
+          .cgce-integrity ul {
+            margin: 2px 0 0;
+            padding-left: 18px;
+          }
+
+          [hidden] {
+            display: none !important;
+          }
+
           .cgce-option {
             display: flex;
             align-items: center;
@@ -2723,6 +3436,42 @@
             padding: 0 10px;
           }
 
+          .cgce-scan-controls {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+          }
+
+          .cgce-scan,
+          .cgce-cancel {
+            min-height: 36px;
+            border: 1px solid #0f766e;
+            border-radius: 7px;
+            background: #ffffff;
+            color: #0f766e;
+            font-size: 13px;
+            font-weight: 750;
+            cursor: pointer;
+          }
+
+          .cgce-scan {
+            background: #0f766e;
+            color: #ffffff;
+          }
+
+          .cgce-cancel {
+            border-color: #cfd7e3;
+            color: #334155;
+          }
+
+          .cgce-scan:disabled,
+          .cgce-cancel:disabled,
+          .cgce-action:disabled,
+          .cgce-select:disabled {
+            cursor: not-allowed;
+            opacity: 0.58;
+          }
+
           .cgce-export {
             min-height: 40px;
             border: 0;
@@ -2765,7 +3514,6 @@
               <p class="cgce-subtitle">Choose a capture mode, review loaded turns, then export the bundle.</p>
             </div>
             <div class="cgce-icon-buttons">
-              <button class="cgce-icon-button" type="button" data-action="refresh" title="Reload messages" aria-label="Reload messages">R</button>
               <button class="cgce-icon-button" type="button" data-action="close" title="Close" aria-label="Close">X</button>
             </div>
           </header>
@@ -2778,13 +3526,14 @@
           <div class="cgce-list" role="list"></div>
           <footer class="cgce-footer">
             <div class="cgce-status" role="status" aria-live="polite"></div>
+            <div class="cgce-integrity" hidden></div>
             <div class="cgce-footer-row">
               <label class="cgce-format">
                 <span>Mode</span>
                 <select class="cgce-select" data-option="capture-mode">
-                  <option value="hybrid" selected>Hybrid</option>
+                  <option value="full" selected>Full (Recommended)</option>
+                  <option value="hybrid">Hybrid (Experimental for ImageGen)</option>
                   <option value="fast">Fast</option>
-                  <option value="full">Full</option>
                 </select>
               </label>
               <label class="cgce-option">
@@ -2792,7 +3541,15 @@
                 <span>Debug log</span>
               </label>
             </div>
-            <button class="cgce-export" type="button" data-action="export">Export Loaded Hybrid Bundle</button>
+            <div class="cgce-scan-controls">
+              <button class="cgce-scan" type="button" data-action="start-scan">Start Scan</button>
+              <button class="cgce-cancel" type="button" data-action="cancel-scan" hidden disabled>Cancel</button>
+            </div>
+            <label class="cgce-option" data-control="incomplete-override" hidden>
+              <input type="checkbox" data-option="allow-incomplete">
+              <span>Export this incomplete snapshot anyway</span>
+            </label>
+            <button class="cgce-export" type="button" data-action="export" disabled>Export Bundle</button>
           </footer>
         </aside>
       `;
@@ -2806,13 +3563,17 @@
 
     return {
       async captureFromDom(options = {}) {
+        const signal = options.signal || null;
+        throwIfCaptureCancelled(signal);
         const settleMs = Number.isFinite(options.settleMs) ? Math.max(0, options.settleMs) : CAPTURE_SETTLE_MS;
 
         if (settleMs) {
           await sleep(settleMs);
+          throwIfCaptureCancelled(signal);
         }
 
         for (const node of options.nodes || getCandidateMessageNodes(debugLog)) {
+          throwIfCaptureCancelled(signal);
           const stableKey = getStableNodeKey(node);
           const existingByStableKey = stableKey && capturedStableKeys.has(stableKey) ? messagesByKey.get(stableKey) : null;
           const shouldRevisit = shouldRevisitMessageNode(node) || shouldRevisitCapturedMessage(node, existingByStableKey);
@@ -3094,12 +3855,13 @@
     };
   }
 
-  async function loadOlderMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budget = null) {
+  async function loadOlderMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budget = null, signal = null) {
     let stableAtTopCount = 0;
     let previousSignature = getConversationSignature(scrollTarget);
-    await collector.captureFromDom();
+    await collector.captureFromDom({ signal });
 
     for (let attempt = 0; attempt < TOP_LOAD_ATTEMPTS; attempt += 1) {
+      throwIfCaptureCancelled(signal);
       if (Date.now() >= deadline) {
         debugLog?.progress("loadOlder.timeout", { attempt, maxScanMs: budget?.maxScanMs || MAX_SCAN_MS });
         break;
@@ -3110,13 +3872,14 @@
       const shouldJumpToTop = attempt === 0 || attempt % 4 === 3 || top <= step;
       setScrollTop(scrollTarget, shouldJumpToTop ? 0 : Math.max(0, top - step));
       await waitForScrollAndDomIdle();
+      throwIfCaptureCancelled(signal);
 
       if (getScrollTop(scrollTarget) <= 80) {
         setScrollTop(scrollTarget, 0);
         await waitForScrollAndDomIdle(90);
       }
 
-      await collector.captureFromDom({ settleMs: 0 });
+      await collector.captureFromDom({ settleMs: 0, signal });
 
       const currentSignature = getConversationSignature(scrollTarget);
       const atTop = getScrollTop(scrollTarget) <= 2;
@@ -3141,15 +3904,16 @@
     }
   }
 
-  async function walkConversation(scrollTarget, collector, debugLog = null, deadline = Infinity, budget = null) {
+  async function walkConversation(scrollTarget, collector, debugLog = null, deadline = Infinity, budget = null, signal = null) {
     let stuckCount = 0;
     let bottomStableCount = 0;
     let previousSignature = "";
     let maxAttempts = getWalkAttemptLimit(scrollTarget);
 
-    await collector.captureFromDom({ settleMs: 0 });
+    await collector.captureFromDom({ settleMs: 0, signal });
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      throwIfCaptureCancelled(signal);
       if (Date.now() >= deadline) {
         debugLog?.progress("walk.timeout", {
           attempt,
@@ -3170,7 +3934,8 @@
         }
 
         await waitForScrollAndDomIdle(90);
-        await collector.captureFromDom({ settleMs: 0 });
+        throwIfCaptureCancelled(signal);
+        await collector.captureFromDom({ settleMs: 0, signal });
         continue;
       }
 
@@ -3178,6 +3943,7 @@
       const step = getWalkScrollStep(scrollTarget);
       setScrollTop(scrollTarget, Math.min(top + step, maxTop));
       await waitForScrollAndDomIdle();
+      throwIfCaptureCancelled(signal);
 
       if (Date.now() >= deadline) {
         debugLog?.progress("walk.timeoutAfterWait", {
@@ -3188,7 +3954,7 @@
         break;
       }
 
-      await collector.captureFromDom({ settleMs: 0 });
+      await collector.captureFromDom({ settleMs: 0, signal });
 
       const newTop = getScrollTop(scrollTarget);
       const currentSignature = getConversationSignature(scrollTarget);
@@ -3220,7 +3986,7 @@
     return Math.min(WALK_ATTEMPTS, Math.max(10, estimated));
   }
 
-  async function hydrateVirtualizedTurns(collector, debugLog = null, deadline = Infinity, budget = null) {
+  async function hydrateVirtualizedTurns(collector, debugLog = null, deadline = Infinity, budget = null, signal = null) {
     const allTurns = orderTurnsForHydration(getAllTurnNodes());
     const turns = getTurnsNeedingHydration(allTurns, collector);
 
@@ -3232,6 +3998,7 @@
     });
 
     for (let index = 0; index < turns.length; index += 1) {
+      throwIfCaptureCancelled(signal);
       if (Date.now() >= deadline) {
         debugLog?.progress("hydrate.timeout", {
           index,
@@ -3254,7 +4021,7 @@
 
       const beforeTextLength = getRawElementText(turn).length;
       const beforeHasMountedText = hasMountedMessageText(turn);
-      const hydrationResult = await hydrateSingleTurn(turn, collector, deadline);
+      const hydrationResult = await hydrateSingleTurn(turn, collector, deadline, signal);
 
       debugLog?.progress("hydrate.turn", {
         index,
@@ -3270,7 +4037,7 @@
     }
   }
 
-  async function hydrateSingleTurn(turn, collector, deadline = Infinity) {
+  async function hydrateSingleTurn(turn, collector, deadline = Infinity, signal = null) {
     const attempts = [
       { block: "center", waitMs: TURN_HYDRATION_SETTLE_MS },
       { block: "start", waitMs: 150 },
@@ -3281,6 +4048,7 @@
     let attemptsUsed = 0;
 
     for (const attempt of attempts) {
+      throwIfCaptureCancelled(signal);
       if (Date.now() >= deadline || collector.hasCapturedNode(turn)) {
         break;
       }
@@ -3291,7 +4059,8 @@
         inline: "nearest"
       });
       await waitForScrollAndDomIdle(attempt.waitMs);
-      await collector.captureFromDom({ settleMs: 0, nodes: [turn] });
+      throwIfCaptureCancelled(signal);
+      await collector.captureFromDom({ settleMs: 0, nodes: [turn], signal });
       attemptsUsed += 1;
       afterTextLength = getRawElementText(turn).length;
       afterHasMountedText = hasMountedMessageText(turn);
@@ -3308,7 +4077,7 @@
     };
   }
 
-  async function recoverMissingTurnMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budgetMs = MISSING_TURN_RECOVERY_MS) {
+  async function recoverMissingTurnMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budgetMs = MISSING_TURN_RECOVERY_MS, signal = null) {
     let missingOrders = getMissingConversationTurnOrders(collector.getMessages());
 
     debugLog?.progress("missingRecovery.start", {
@@ -3322,7 +4091,9 @@
     }
 
     for (let pass = 0; pass < 3 && missingOrders.length && Date.now() < deadline; pass += 1) {
+      throwIfCaptureCancelled(signal);
       for (const order of missingOrders) {
+        throwIfCaptureCancelled(signal);
         if (Date.now() >= deadline) {
           break;
         }
@@ -3342,8 +4113,8 @@
         const beforeCount = collector.getMessageCount();
         const beforeTextLength = getRawElementText(turn).length;
         const beforeHasMountedText = hasMountedMessageText(turn);
-        const hydrationResult = await hydrateSingleTurn(turn, collector, deadline);
-        await collector.captureFromDom({ settleMs: 0, nodes: [turn] });
+        const hydrationResult = await hydrateSingleTurn(turn, collector, deadline, signal);
+        await collector.captureFromDom({ settleMs: 0, nodes: [turn], signal });
         const captured = !getMissingConversationTurnOrders(collector.getMessages()).includes(order);
 
         debugLog?.progress("missingRecovery.turn", {
@@ -4924,7 +5695,9 @@
     return Boolean(time && time === text && TIMESTAMP_CUE_RE.test(text));
   }
 
-  async function collectFastConversationMessages(debugLog = null) {
+  async function collectFastConversationMessages(debugLog = null, options = {}) {
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     const conversationId = getCurrentConversationId();
 
     if (!conversationId) {
@@ -4933,8 +5706,10 @@
 
     const data = await fetchConversationData(conversationId, {
       timeoutMs: CONVERSATION_API_FETCH_TIMEOUT_MS,
-      debugLog
+      debugLog,
+      signal
     });
+    throwIfCaptureCancelled(signal);
     const messages = buildMessagesFromConversationApi(data, debugLog);
 
     debugLog?.event("fastCapture.loaded", {
@@ -5499,7 +6274,9 @@
       .join("\n\n");
   }
 
-  async function enrichMessageTimestamps(messages, debugLog = null) {
+  async function enrichMessageTimestamps(messages, debugLog = null, options = {}) {
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     const messagesNeedingApiTime = messages.filter((message) => message?.sourceMessageId);
 
     if (!messagesNeedingApiTime.length) {
@@ -5515,7 +6292,8 @@
     }
 
     try {
-      const data = await fetchConversationData(conversationId);
+      const data = await fetchConversationData(conversationId, { signal });
+      throwIfCaptureCancelled(signal);
       const timestampMap = buildConversationTimestampMap(data);
       let applied = 0;
 
@@ -5534,6 +6312,9 @@
         applied
       });
     } catch (error) {
+      if (isCaptureCancelledError(error)) {
+        throw error;
+      }
       debugLog?.event("timestamps.failed", {
         conversationId,
         error: error?.message || String(error)
@@ -5564,9 +6345,12 @@
 
   async function fetchConversationData(conversationId, options = {}) {
     const debugLog = options.debugLog || null;
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     const timeoutMs = Number(options.timeoutMs || CONVERSATION_TIMESTAMP_FETCH_TIMEOUT_MS);
     const attemptTimeoutMs = Math.min(timeoutMs, CONVERSATION_API_ATTEMPT_TIMEOUT_MS);
-    const accessToken = await getChatGptAccessToken(debugLog, attemptTimeoutMs);
+    const accessToken = await getChatGptAccessToken(debugLog, attemptTimeoutMs, signal);
+    throwIfCaptureCancelled(signal);
     const attempts = buildConversationApiAttempts(conversationId, accessToken);
     const failures = [];
 
@@ -5577,8 +6361,10 @@
     });
 
     for (const attempt of attempts) {
+      throwIfCaptureCancelled(signal);
       try {
-        const data = await fetchConversationApiAttempt(attempt, attemptTimeoutMs);
+        const data = await fetchConversationApiAttempt(attempt, attemptTimeoutMs, signal);
+        throwIfCaptureCancelled(signal);
         const mapping = getConversationApiMapping(data);
         const linearMessages = getConversationApiLinearMessages(data);
         const mappingCount = Object.keys(mapping).length;
@@ -5603,6 +6389,9 @@
         });
         return data;
       } catch (error) {
+        if (isCaptureCancelledError(error)) {
+          throw error;
+        }
         const reason = error?.message || String(error);
         failures.push(`${attempt.label}: ${reason}`);
         debugLog?.event("conversationApi.probe.failed", {
@@ -5685,7 +6474,7 @@
     return uniqueStrings(routes);
   }
 
-  async function fetchConversationApiAttempt(attempt, timeoutMs) {
+  async function fetchConversationApiAttempt(attempt, timeoutMs, signal = null) {
     const headers = {
       accept: "application/json",
       ...(attempt.headers || {})
@@ -5697,6 +6486,7 @@
 
     const response = await fetchWithTimeout(attempt.url, {
       timeoutMs,
+      signal,
       credentials: "include",
       cache: "no-store",
       headers
@@ -5728,7 +6518,8 @@
   let cachedChatGptAccessToken = "";
   let chatGptAccessTokenLoaded = false;
 
-  async function getChatGptAccessToken(debugLog = null, timeoutMs = CONVERSATION_API_ATTEMPT_TIMEOUT_MS) {
+  async function getChatGptAccessToken(debugLog = null, timeoutMs = CONVERSATION_API_ATTEMPT_TIMEOUT_MS, signal = null) {
+    throwIfCaptureCancelled(signal);
     if (chatGptAccessTokenLoaded) {
       return cachedChatGptAccessToken;
     }
@@ -5739,6 +6530,7 @@
       const url = new URL("/api/auth/session", location.origin);
       const response = await fetchWithTimeout(url.href, {
         timeoutMs,
+        signal,
         credentials: "include",
         cache: "no-store",
         headers: {
@@ -5758,6 +6550,10 @@
       });
       return cachedChatGptAccessToken;
     } catch (error) {
+      if (isCaptureCancelledError(error)) {
+        chatGptAccessTokenLoaded = false;
+        throw error;
+      }
       debugLog?.event("conversationApi.token.failed", {
         error: error?.message || String(error)
       });
@@ -5779,21 +6575,36 @@
 
   async function fetchWithTimeout(url, options = {}) {
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), Number(options.timeoutMs || CONVERSATION_API_ATTEMPT_TIMEOUT_MS));
+    const externalSignal = options.signal || null;
+    const timeoutMs = Number(options.timeoutMs || CONVERSATION_API_ATTEMPT_TIMEOUT_MS);
+    let timedOut = false;
+    const abortFromExternalSignal = () => controller.abort(externalSignal?.reason);
+
+    throwIfCaptureCancelled(externalSignal);
+    externalSignal?.addEventListener("abort", abortFromExternalSignal, { once: true });
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
 
     try {
+      const { timeoutMs: _timeoutMs, signal: _signal, ...fetchOptions } = options;
       return await fetch(url, {
-        ...options,
+        ...fetchOptions,
         signal: controller.signal
       });
     } catch (error) {
       if (error?.name === "AbortError") {
+        if (externalSignal?.aborted) {
+          throw createCaptureCancelledError(externalSignal.reason);
+        }
         throw new Error("timeout");
       }
 
       throw error;
     } finally {
       window.clearTimeout(timeoutId);
+      externalSignal?.removeEventListener("abort", abortFromExternalSignal);
     }
   }
 
@@ -5852,6 +6663,8 @@
   }
 
   async function enrichVisibleThinkingFlyouts(messages, debugLog = null, options = {}) {
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     const snapshots = getVisibleThinkingFlyoutSnapshots();
     let applied = 0;
 
@@ -5862,11 +6675,14 @@
     });
 
     for (const snapshot of snapshots) {
+      throwIfCaptureCancelled(signal);
       applied += applyThinkingFlyoutSnapshot(snapshot, messages) ? 1 : 0;
     }
 
     const opened = await enrichThinkingFlyoutsByOpeningTriggers(messages, debugLog, options);
+    throwIfCaptureCancelled(signal);
     const settled = await settleVisibleThinkingFlyoutSnapshots(messages, options);
+    throwIfCaptureCancelled(signal);
 
     debugLog?.event("thinkingFlyout.enriched", {
       available: snapshots.length,
@@ -5880,6 +6696,7 @@
   }
 
   async function settleVisibleThinkingFlyoutSnapshots(messages, options = {}) {
+    const signal = options.signal || null;
     const timeoutMs = Number.isFinite(options.settleTimeoutMs)
       ? Math.max(0, options.settleTimeoutMs)
       : THINKING_FLYOUT_SETTLE_TIMEOUT_MS;
@@ -5891,6 +6708,7 @@
     let sawPanel = false;
 
     while (Date.now() - startedAt < timeoutMs) {
+      throwIfCaptureCancelled(signal);
       const snapshots = getVisibleThinkingFlyoutSnapshots();
 
       if (snapshots.length) {
@@ -5920,12 +6738,14 @@
       }
 
       await sleep(THINKING_FLYOUT_SETTLE_POLL_MS);
+      throwIfCaptureCancelled(signal);
     }
 
     return { settled: sawPanel, snapshotCount, sourceCount };
   }
 
   async function enrichThinkingFlyoutsByOpeningTriggers(messages, debugLog = null, options = {}) {
+    const signal = options.signal || null;
     const limit = Number.isFinite(options.autoOpenLimit) ? options.autoOpenLimit : THINKING_FLYOUT_AUTO_OPEN_LIMIT;
     const assistantMessages = messages
       .filter((message) => message.role === "assistant" && isThinThinkingMarkdown(message.thinkingMarkdown))
@@ -5941,11 +6761,13 @@
     });
 
     for (const message of assistantMessages) {
+      throwIfCaptureCancelled(signal);
       if (attempted >= limit) {
         break;
       }
 
       const triggerResult = await findMountedThinkingTriggerForMessage(message, options);
+      throwIfCaptureCancelled(signal);
       const trigger = triggerResult.trigger;
 
       if (!trigger) {
@@ -5969,7 +6791,7 @@
           beforeSnapshotCount: beforeSnapshots.length
         });
         trigger.click();
-        const snapshot = await waitForThinkingFlyoutSnapshot(beforeSignatures, THINKING_FLYOUT_OPEN_TIMEOUT_MS);
+        const snapshot = await waitForThinkingFlyoutSnapshot(beforeSignatures, THINKING_FLYOUT_OPEN_TIMEOUT_MS, signal);
         const wasApplied = snapshot ? applyThinkingFlyoutSnapshot(snapshot, messages, message) : false;
 
         debugLog?.event("thinkingFlyout.autoResult", {
@@ -5983,6 +6805,9 @@
           applied += 1;
         }
       } catch (error) {
+        if (isCaptureCancelledError(error)) {
+          throw error;
+        }
         debugLog?.event("thinkingFlyout.openFailed", {
           message: getThinkingDebugMessageInfo(message),
           error: error?.message || String(error)
@@ -6007,6 +6832,8 @@
   }
 
   async function findMountedThinkingTriggerForMessage(message, options = {}) {
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     const candidates = [
       message.sourceNode,
       message.sourceNode?.closest?.("[data-turn-id-container], [data-turn-container], [data-turn-id], [data-testid*='conversation-turn']"),
@@ -6026,6 +6853,7 @@
     }
 
     for (const candidate of uniqueElements(candidates)) {
+      throwIfCaptureCancelled(signal);
       const trigger = findThinkingTriggerInRoot(candidate);
       const candidateInfo = {
         source: "before-scroll",
@@ -6045,6 +6873,7 @@
 
       candidate.scrollIntoView?.({ block: "center", inline: "nearest" });
       await sleep(120);
+      throwIfCaptureCancelled(signal);
 
       const mountedTrigger = findThinkingTriggerInRoot(candidate);
       diagnostics.push({
@@ -6071,7 +6900,7 @@
       };
     }
 
-    const globalResult = await findGlobalThinkingTriggerForMessage(message);
+    const globalResult = await findGlobalThinkingTriggerForMessage(message, signal);
 
     if (globalResult.trigger) {
       diagnostics.push(...globalResult.candidates);
@@ -6102,7 +6931,8 @@
     return getAllTurnNodes().find((turn) => getConversationTurnNumber(turn) === number) || null;
   }
 
-  async function findGlobalThinkingTriggerForMessage(message) {
+  async function findGlobalThinkingTriggerForMessage(message, signal = null) {
+    throwIfCaptureCancelled(signal);
     const expectedStatus = normalizeThinkingStatus(message.thinkingMarkdown);
     const triggerScores = getGlobalThinkingTriggerScores(message, expectedStatus);
 
@@ -6131,6 +6961,7 @@
 
     best.root?.scrollIntoView?.({ block: "center", inline: "nearest" });
     await sleep(120);
+    throwIfCaptureCancelled(signal);
 
     return {
       trigger: best.trigger,
@@ -6267,11 +7098,12 @@
     return cueTexts.some((text) => THINKING_SOURCE_TRIGGER_RE.test(text));
   }
 
-  async function waitForThinkingFlyoutSnapshot(previousSignatures, timeoutMs) {
+  async function waitForThinkingFlyoutSnapshot(previousSignatures, timeoutMs, signal = null) {
     const startedAt = Date.now();
     let bestSnapshot = null;
 
     while (Date.now() - startedAt < timeoutMs) {
+      throwIfCaptureCancelled(signal);
       const snapshots = getVisibleThinkingFlyoutSnapshots();
       const freshSnapshot = snapshots.find((snapshot) => !previousSignatures.has(snapshot.signature) && snapshot.markdown);
 
@@ -6281,6 +7113,7 @@
 
       bestSnapshot = snapshots.find((snapshot) => snapshot.markdown) || bestSnapshot;
       await sleep(100);
+      throwIfCaptureCancelled(signal);
     }
 
     return previousSignatures.size ? null : bestSnapshot;
