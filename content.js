@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.23";
+  const EXPORTER_VERSION = "0.7.24";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -656,6 +656,13 @@
     const thinkingMarkdown = thinkingSource === "full" ? fullMessage.thinkingMarkdown : fastMessage.thinkingMarkdown;
     const hybridSource = markdownSource === "full" || thinkingSource === "full" ? "fast+full" : "fast";
     const finalImageCount = countMarkdownImages(`${markdown}\n${thinkingMarkdown}`);
+    const imagesEmbedded = Math.min(finalImageCount, Math.max(fastMessage.imagesEmbedded || 0, fullMessage.imagesEmbedded || 0));
+    const imagesFailed = Math.max(fastMessage.imagesFailed || 0, fullMessage.imagesFailed || 0);
+    const failedImageReferences = Math.min(Math.max(0, finalImageCount - imagesEmbedded), imagesFailed);
+    const imagesDeferred = Math.min(
+      Math.max(0, finalImageCount - imagesEmbedded - failedImageReferences),
+      Math.max(fastMessage.imagesDeferred || 0, fullMessage.imagesDeferred || 0)
+    );
 
     return {
       ...fastMessage,
@@ -670,8 +677,9 @@
       codeBlockCount: Math.max(fastMessage.codeBlockCount || 0, fullMessage.codeBlockCount || 0),
       fileCount: Math.max(fastMessage.fileCount || 0, fullMessage.fileCount || 0),
       imageCount: finalImageCount,
-      imagesEmbedded: Math.min(finalImageCount, Math.max(fastMessage.imagesEmbedded || 0, fullMessage.imagesEmbedded || 0)),
-      imagesFailed: Math.min(finalImageCount, Math.max(fastMessage.imagesFailed || 0, fullMessage.imagesFailed || 0)),
+      imagesEmbedded,
+      imagesDeferred,
+      imagesFailed,
       captureMode: "hybrid",
       hybridSource,
       hybridMarkdownSource: markdownSource,
@@ -996,33 +1004,17 @@
       });
     });
 
-    const roles = entries.reduce((counts, entry) => {
-      if (entry.role === "user" || entry.role === "assistant") {
-        counts[entry.role] += 1;
-      }
-      return counts;
-    }, { user: 0, assistant: 0 });
-    const sameRolePairs = [];
-
-    for (let index = 1; index < entries.length; index += 1) {
-      if (entries[index].role === entries[index - 1].role) {
-        sameRolePairs.push({
-          previousOrder: entries[index - 1].order,
-          order: entries[index].order,
-          role: entries[index].role
-        });
-      }
-    }
-
     const domOrders = entries
       .map((entry) => entry.order)
-      .filter((order) => Number.isFinite(order) && order > 0 && order < 1_000_000);
+      .filter((order) => Number.isFinite(order) && order > 0 && order < 1_000_000)
+      .map(Math.floor);
     let summaryOrders = [
       ...(summary?.capturedTurnOrders || []),
       ...(summary?.missingTurnOrders || [])
     ]
       .map(Number)
-      .filter((order) => Number.isFinite(order) && order > 0 && order < 1_000_000);
+      .filter((order) => Number.isFinite(order) && order > 0 && order < 1_000_000)
+      .map(Math.floor);
     const expectedTurnCount = Number(summary?.expectedTurnCount || 0);
 
     if (!summaryOrders.length && Number.isInteger(expectedTurnCount) && expectedTurnCount > 0 && expectedTurnCount < 1_000_000) {
@@ -1030,14 +1022,42 @@
     }
 
     const orders = [...new Set([...domOrders, ...summaryOrders])].sort((a, b) => a - b);
+    const canonicalEntries = orders.length
+      ? orders.map((order) => {
+        const candidates = entries.filter((entry) => Math.floor(entry.order) === order);
+        const role = candidates.find((entry) => entry.role === "user" || entry.role === "assistant")?.role
+          || candidates[0]?.role
+          || "";
+        return { identity: `order:${order}`, order, role };
+      })
+      : entries;
+    const roles = canonicalEntries.reduce((counts, entry) => {
+      if (entry.role === "user" || entry.role === "assistant") {
+        counts[entry.role] += 1;
+      }
+      return counts;
+    }, { user: 0, assistant: 0 });
+    const sameRolePairs = [];
+
+    for (let index = 1; index < canonicalEntries.length; index += 1) {
+      const current = canonicalEntries[index];
+      const previous = canonicalEntries[index - 1];
+
+      if ((current.role === "user" || current.role === "assistant") && current.role === previous.role) {
+        sameRolePairs.push({
+          previousOrder: previous.order,
+          order: current.order,
+          role: current.role
+        });
+      }
+    }
+
     return {
-      identities: orders.length
-        ? orders.map((order) => `order:${order}`)
-        : entries.map((entry) => entry.identity),
+      identities: canonicalEntries.map((entry) => entry.identity),
       orders,
       roles,
-      startRole: entries[0]?.role || "",
-      endRole: entries[entries.length - 1]?.role || "",
+      startRole: canonicalEntries[0]?.role || "",
+      endRole: canonicalEntries[canonicalEntries.length - 1]?.role || "",
       sameRolePairs
     };
   }
@@ -1084,12 +1104,14 @@
   function getCaptureImageCompletenessStats(messages) {
     const urls = [];
     let embedded = 0;
+    let deferred = 0;
     let failures = 0;
 
     for (const message of messages) {
       const markdown = `${message?.markdown || ""}\n${message?.thinkingMarkdown || ""}`;
       urls.push(...extractMarkdownImageUrls(markdown));
       embedded += countEmbeddedMarkdownImages(markdown);
+      deferred += Math.max(0, Number(message?.imagesDeferred || 0));
       failures += Math.max(0, Number(message?.imagesFailed || 0));
     }
 
@@ -1097,6 +1119,7 @@
       references: urls.length,
       uniqueIdentities: new Set(urls.map(getMarkdownImageIdentity).filter(Boolean)).size,
       embedded,
+      deferred,
       failures
     };
   }
@@ -1943,6 +1966,7 @@
           fileCount: message.fileCount,
           imageCount: message.imageCount,
           imagesEmbedded: message.imagesEmbedded,
+          imagesDeferred: message.imagesDeferred,
           imagesFailed: message.imagesFailed,
           imageEvents: message.imageEvents || [],
           node: summarizeNode(message.sourceNode),
@@ -2139,6 +2163,7 @@
       fileCount: message?.fileCount || 0,
       imageCount: message?.imageCount || 0,
       imagesEmbedded: message?.imagesEmbedded || 0,
+      imagesDeferred: message?.imagesDeferred || 0,
       imagesFailed: message?.imagesFailed || 0,
       usedWholeNodeFallback: Boolean(message?.usedWholeNodeFallback),
       serializationAttempts: (message?.serializationAttempts || []).slice(0, 8),
@@ -2152,6 +2177,12 @@
     const thinkingMarkdown = dedupeMarkdownImageReferences(message?.thinkingMarkdown || "");
     const imageCount = countMarkdownImages(`${markdown}\n${thinkingMarkdown}`);
     const imagesEmbedded = Math.min(imageCount, message?.imagesEmbedded || 0);
+    const imagesFailed = Math.max(0, message?.imagesFailed || 0);
+    const failedImageReferences = Math.min(Math.max(0, imageCount - imagesEmbedded), imagesFailed);
+    const imagesDeferred = Math.min(
+      Math.max(0, imageCount - imagesEmbedded - failedImageReferences),
+      message?.imagesDeferred || 0
+    );
 
     return {
       id: message?.id || `message-${index + 1}`,
@@ -2171,7 +2202,8 @@
       fileCount: message?.fileCount || 0,
       imageCount,
       imagesEmbedded,
-      imagesFailed: Math.min(Math.max(0, imageCount - imagesEmbedded), message?.imagesFailed || 0),
+      imagesDeferred,
+      imagesFailed,
       hybridSource: message?.hybridSource || "",
       hybridMarkdownSource: message?.hybridMarkdownSource || "",
       hybridThinkingSource: message?.hybridThinkingSource || ""
@@ -2181,14 +2213,20 @@
   function refreshPortableMessageImageStats(message, options = {}) {
     const imageCount = countMarkdownImages(`${message?.markdown || ""}\n${message?.thinkingMarkdown || ""}`);
     const embedded = countEmbeddedMarkdownImages(`${message?.markdown || ""}\n${message?.thinkingMarkdown || ""}`);
+    const priorFailures = Math.max(0, message.imagesFailed || 0);
     message.imageCount = imageCount;
     message.imagesEmbedded = embedded;
-    message.imagesFailed = options.embedAttempted ? Math.max(0, imageCount - embedded) : Math.min(message.imagesFailed || 0, imageCount);
+    message.imagesFailed = options.embedAttempted
+      ? Math.max(0, imageCount - embedded) + Math.max(0, priorFailures - imageCount)
+      : priorFailures;
+    message.imagesDeferred = options.embedAttempted
+      ? 0
+      : Math.min(message.imagesDeferred || 0, Math.max(0, imageCount - embedded - message.imagesFailed));
     return message;
   }
 
   function dedupeMarkdownImageReferences(markdown) {
-    const imagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)(?:\s*<!-- Image base64 embedding is temporarily disabled during scanning to avoid page side effects\. -->)?/g;
+    const imagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)(?:\s*<!-- (?:Image base64 embedding is temporarily disabled during scanning to avoid page side effects|Image base64 embedding is deferred until export to avoid page side effects)\. -->)?/g;
     const source = String(markdown || "");
     const seen = new Set();
     let previousMatchEnd = 0;
@@ -3126,6 +3164,7 @@
         `${report.images.references} image refs`,
         `${report.images.uniqueIdentities} unique`,
         `${report.images.embedded} embedded`,
+        `${report.images.deferred} deferred`,
         `${report.images.failures} failed`
       ].join(" | ");
       container.append(heading, metrics);
@@ -4688,6 +4727,7 @@
     primaryMessage.imageCount = Math.max(primaryMessage.imageCount || 0, previousMessage.imageCount || 0);
     primaryMessage.fileCount = Math.max(primaryMessage.fileCount || 0, previousMessage.fileCount || 0);
     primaryMessage.imagesEmbedded = Math.max(primaryMessage.imagesEmbedded || 0, previousMessage.imagesEmbedded || 0);
+    primaryMessage.imagesDeferred = Math.max(primaryMessage.imagesDeferred || 0, previousMessage.imagesDeferred || 0);
     primaryMessage.imagesFailed = Math.max(primaryMessage.imagesFailed || 0, previousMessage.imagesFailed || 0);
 
     return primaryMessage;
@@ -5805,6 +5845,7 @@
         fileCount: countApiFileAttachments(message),
         imageCount: countMarkdownImages(markdown),
         imagesEmbedded: 0,
+        imagesDeferred: countMarkdownImages(markdown),
         imagesFailed: 0,
         captureMode: "fast"
       });
@@ -7955,7 +7996,8 @@
       fileCount: state.fileCount,
       imageCount: serializedImageCount,
       imagesEmbedded: Math.min(serializedImageCount, state.imagesEmbedded),
-      imagesFailed: Math.min(serializedImageCount, state.imagesFailed),
+      imagesDeferred: Math.min(serializedImageCount, state.imagesDeferred),
+      imagesFailed: Math.max(0, state.imagesFailed),
       imageEvents: state.imageEvents
     };
   }
@@ -7966,6 +8008,7 @@
       fileCount: 0,
       imageCount: 0,
       imagesEmbedded: 0,
+      imagesDeferred: 0,
       imagesFailed: 0,
       imageEvents: [],
       includeHidden,
@@ -8719,18 +8762,25 @@
 
     if (!src) {
       state.imagesFailed += 1;
+      state.imageEvents?.push({
+        type: "img",
+        src: "",
+        ok: false,
+        reason: "image source is missing"
+      });
       return "";
     }
 
-    state.imagesFailed += 1;
+    state.imagesDeferred += 1;
     state.imageEvents?.push({
       type: "img",
       src,
-      ok: false,
+      ok: true,
       skipped: true,
-      reason: "base64 embedding disabled during message scan"
+      deferred: true,
+      reason: "base64 embedding deferred until export"
     });
-    return `![${escapeMarkdownLinkLabel(alt)}](${src})\n\n<!-- Image base64 embedding is temporarily disabled during scanning to avoid page side effects. -->`;
+    return `![${escapeMarkdownLinkLabel(alt)}](${src})\n\n<!-- Image base64 embedding is deferred until export to avoid page side effects. -->`;
   }
 
   async function backgroundImageElementToMarkdown(element, state) {

@@ -53,6 +53,9 @@ test("content script is generated from modular Hybrid, Fast, and Full sources", 
   assert.match(generated, /hybridCapture\.reconciled/);
   assert.match(generated, /hybridCapture\.fullOnlyCandidates/);
   assert.match(generated, /function refreshPortableMessageImageStats/);
+  assert.match(generated, /imagesDeferred/);
+  assert.match(generated, /base64 embedding deferred until export/);
+  assert.doesNotMatch(generated, /base64 embedding disabled during message scan/);
   assert.match(generated, /function dedupeMarkdownImageReferences/);
   assert.match(generated, /chatgpt-asset:/);
   assert.match(generated, /function stripMarkdownImagesFromLinkLabel/);

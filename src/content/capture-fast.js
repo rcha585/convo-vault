@@ -108,6 +108,7 @@
         fileCount: countApiFileAttachments(message),
         imageCount: countMarkdownImages(markdown),
         imagesEmbedded: 0,
+        imagesDeferred: countMarkdownImages(markdown),
         imagesFailed: 0,
         captureMode: "fast"
       });

@@ -121,6 +121,7 @@
           fileCount: message.fileCount,
           imageCount: message.imageCount,
           imagesEmbedded: message.imagesEmbedded,
+          imagesDeferred: message.imagesDeferred,
           imagesFailed: message.imagesFailed,
           imageEvents: message.imageEvents || [],
           node: summarizeNode(message.sourceNode),

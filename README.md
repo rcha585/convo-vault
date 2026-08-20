@@ -12,9 +12,15 @@
 
 Convo Vault 是一个本地优先的 Chrome 扩展，用来把 ChatGPT 对话导出成可以长期保存、检索和二次处理的本地档案。它会读取你当前打开的 ChatGPT 对话，把选中的消息打包成本地 `.zip`，里面包含可读的 Markdown、PDF，以及适合后续放进 Obsidian、知识库、搜索索引或 RAG 流程的结构化数据。
 
-当前版本：`0.7.23`
+当前版本：`0.7.24`
 
 ## 最近更新
+
+`0.7.24` 修复完整性闸门的误报：
+
+- 期望角色统计现在与有序的 canonical turn 身份使用同一组数据，不再把 ChatGPT 页面里无序号的重复 DOM 外壳误算成额外的 user message
+- Full 扫描中保留 URL、等到导出时再 Base64 化的图片现在标记为 `deferred`，不再误记为 `failed`；真正缺失来源或导出嵌入失败的图片仍会触发完整性拦截
+- Selector 的完整性详情会分别显示 embedded、deferred 和 failed 图片数量
 
 `0.7.23` 改进 Selector 扫描生命周期与完整性保护：
 

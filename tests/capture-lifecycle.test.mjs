@@ -98,6 +98,61 @@ test("completeness gate accepts structurally complete Full capture", () => {
   assert.equal(report.images.uniqueIdentities, 1);
 });
 
+test("completeness gate ignores duplicate unnumbered turn shells and accepts deferred images", () => {
+  const context = loadCompletenessFunction();
+  const imageMarkdown = Array.from({ length: 8 }, (_, index) => `![image-${index + 1}](https://example.test/image-${index + 1}.png)`).join("\n\n");
+  const messages = Array.from({ length: 6 }, (_, index) => ({
+    id: `m${index + 1}`,
+    role: index % 2 === 0 ? "user" : "assistant",
+    order: index + 1,
+    markdown: index === 0 ? imageMarkdown : `Message ${index + 1}`,
+    imagesDeferred: index === 0 ? 8 : 0,
+    imagesFailed: 0
+  }));
+  context.mockTurns.push(
+    ...messages.map((message) => ({
+      identity: `order:${message.order}`,
+      order: message.order,
+      role: message.role
+    })),
+    { identity: "turn:duplicate-user-shell", order: Number.NaN, role: "user" }
+  );
+
+  const report = context.buildCaptureCompletenessReport(messages, { captureMode: "full" });
+
+  assert.equal(report.complete, true);
+  assert.equal(report.expected.uniqueIdentities, 6);
+  assert.equal(report.expected.userMessages, 3);
+  assert.equal(report.expected.assistantMessages, 3);
+  assert.equal(report.captured.userMessages, 3);
+  assert.equal(report.captured.assistantMessages, 3);
+  assert.equal(report.images.references, 8);
+  assert.equal(report.images.deferred, 8);
+  assert.equal(report.images.failures, 0);
+});
+
+test("completeness gate still blocks real image failures", () => {
+  const context = loadCompletenessFunction();
+  const messages = [
+    { id: "u1", role: "user", order: 1, markdown: "Question" },
+    {
+      id: "a1",
+      role: "assistant",
+      order: 2,
+      markdown: "![failed](https://example.test/failed.png)",
+      imagesFailed: 1
+    }
+  ];
+  const report = context.buildCaptureCompletenessReport(messages, {
+    captureMode: "full",
+    expectedStructure: makeExpectedStructure(2, 1, 1)
+  });
+
+  assert.equal(report.complete, false);
+  assert.equal(report.images.failures, 1);
+  assert.ok(report.issues.some((issue) => issue.code === "image-failures"));
+});
+
 test("completeness gate keeps debug-summary turn coverage after DOM virtualization", () => {
   const context = loadCompletenessFunction();
   const messages = [
@@ -152,7 +207,9 @@ function makeExpectedStructure(count, userMessages, assistantMessages) {
 }
 
 function loadCompletenessFunction() {
+  const mockTurns = [];
   const context = {
+    mockTurns,
     normalizeCaptureMode(value) {
       const mode = String(value || "").toLowerCase();
       return ["fast", "full", "hybrid"].includes(mode) ? mode : "full";
@@ -184,6 +241,7 @@ function loadCompletenessFunction() {
         references: urls.length,
         uniqueIdentities: new Set(urls).size,
         embedded: urls.filter((url) => url.startsWith("data:image/")).length,
+        deferred: messages.reduce((sum, message) => sum + Number(message.imagesDeferred || 0), 0),
         failures: messages.reduce((sum, message) => sum + Number(message.imagesFailed || 0), 0)
       };
     },
@@ -191,16 +249,18 @@ function loadCompletenessFunction() {
       return values.join(", ");
     },
     getAllTurnNodes() {
-      return [];
+      return mockTurns;
     },
-    getExpectedTurnIdentity() {
-      return "";
+    getExpectedTurnIdentity(turn, index = 0) {
+      const order = Number(turn?.order);
+      return Number.isFinite(order) ? `order:${Math.floor(order)}` : turn?.identity || `dom-index:${index}`;
     },
-    getConversationTurnNumber() {
-      return Number.NaN;
+    getConversationTurnNumber(turn) {
+      const order = Number(turn?.order);
+      return Number.isFinite(order) ? order : Number.NaN;
     },
-    detectRoleDetails() {
-      return { role: "unknown" };
+    detectRoleDetails(turn) {
+      return { role: turn?.role || "unknown" };
     }
   };
   vm.createContext(context);
