@@ -1,0 +1,12 @@
+{
+  "synthetic": true,
+  "conversation_id": "sample-conversation-001",
+  "title": "Raw Pack import test",
+  "messages": [
+    { "id": "m1", "role": "user", "text": "Please preserve the source." },
+    { "id": "m2", "role": "assistant", "text": "The source will remain immutable." }
+  ],
+  "attachments": [
+    { "name": "missing-example.png", "status": "missing" }
+  ]
+}

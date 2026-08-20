@@ -1,4 +1,6 @@
-  async function collectFastConversationMessages(debugLog = null) {
+  async function collectFastConversationMessages(debugLog = null, options = {}) {
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     const conversationId = getCurrentConversationId();
 
     if (!conversationId) {
@@ -7,8 +9,10 @@
 
     const data = await fetchConversationData(conversationId, {
       timeoutMs: CONVERSATION_API_FETCH_TIMEOUT_MS,
-      debugLog
+      debugLog,
+      signal
     });
+    throwIfCaptureCancelled(signal);
     const messages = buildMessagesFromConversationApi(data, debugLog);
 
     debugLog?.event("fastCapture.loaded", {
@@ -104,6 +108,7 @@
         fileCount: countApiFileAttachments(message),
         imageCount: countMarkdownImages(markdown),
         imagesEmbedded: 0,
+        imagesDeferred: countMarkdownImages(markdown),
         imagesFailed: 0,
         captureMode: "fast"
       });
@@ -573,7 +578,9 @@
       .join("\n\n");
   }
 
-  async function enrichMessageTimestamps(messages, debugLog = null) {
+  async function enrichMessageTimestamps(messages, debugLog = null, options = {}) {
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     const messagesNeedingApiTime = messages.filter((message) => message?.sourceMessageId);
 
     if (!messagesNeedingApiTime.length) {
@@ -589,7 +596,8 @@
     }
 
     try {
-      const data = await fetchConversationData(conversationId);
+      const data = await fetchConversationData(conversationId, { signal });
+      throwIfCaptureCancelled(signal);
       const timestampMap = buildConversationTimestampMap(data);
       let applied = 0;
 
@@ -608,6 +616,9 @@
         applied
       });
     } catch (error) {
+      if (isCaptureCancelledError(error)) {
+        throw error;
+      }
       debugLog?.event("timestamps.failed", {
         conversationId,
         error: error?.message || String(error)
@@ -638,9 +649,12 @@
 
   async function fetchConversationData(conversationId, options = {}) {
     const debugLog = options.debugLog || null;
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     const timeoutMs = Number(options.timeoutMs || CONVERSATION_TIMESTAMP_FETCH_TIMEOUT_MS);
     const attemptTimeoutMs = Math.min(timeoutMs, CONVERSATION_API_ATTEMPT_TIMEOUT_MS);
-    const accessToken = await getChatGptAccessToken(debugLog, attemptTimeoutMs);
+    const accessToken = await getChatGptAccessToken(debugLog, attemptTimeoutMs, signal);
+    throwIfCaptureCancelled(signal);
     const attempts = buildConversationApiAttempts(conversationId, accessToken);
     const failures = [];
 
@@ -651,8 +665,10 @@
     });
 
     for (const attempt of attempts) {
+      throwIfCaptureCancelled(signal);
       try {
-        const data = await fetchConversationApiAttempt(attempt, attemptTimeoutMs);
+        const data = await fetchConversationApiAttempt(attempt, attemptTimeoutMs, signal);
+        throwIfCaptureCancelled(signal);
         const mapping = getConversationApiMapping(data);
         const linearMessages = getConversationApiLinearMessages(data);
         const mappingCount = Object.keys(mapping).length;
@@ -677,6 +693,9 @@
         });
         return data;
       } catch (error) {
+        if (isCaptureCancelledError(error)) {
+          throw error;
+        }
         const reason = error?.message || String(error);
         failures.push(`${attempt.label}: ${reason}`);
         debugLog?.event("conversationApi.probe.failed", {
@@ -759,7 +778,7 @@
     return uniqueStrings(routes);
   }
 
-  async function fetchConversationApiAttempt(attempt, timeoutMs) {
+  async function fetchConversationApiAttempt(attempt, timeoutMs, signal = null) {
     const headers = {
       accept: "application/json",
       ...(attempt.headers || {})
@@ -771,6 +790,7 @@
 
     const response = await fetchWithTimeout(attempt.url, {
       timeoutMs,
+      signal,
       credentials: "include",
       cache: "no-store",
       headers
@@ -802,7 +822,8 @@
   let cachedChatGptAccessToken = "";
   let chatGptAccessTokenLoaded = false;
 
-  async function getChatGptAccessToken(debugLog = null, timeoutMs = CONVERSATION_API_ATTEMPT_TIMEOUT_MS) {
+  async function getChatGptAccessToken(debugLog = null, timeoutMs = CONVERSATION_API_ATTEMPT_TIMEOUT_MS, signal = null) {
+    throwIfCaptureCancelled(signal);
     if (chatGptAccessTokenLoaded) {
       return cachedChatGptAccessToken;
     }
@@ -813,6 +834,7 @@
       const url = new URL("/api/auth/session", location.origin);
       const response = await fetchWithTimeout(url.href, {
         timeoutMs,
+        signal,
         credentials: "include",
         cache: "no-store",
         headers: {
@@ -832,6 +854,10 @@
       });
       return cachedChatGptAccessToken;
     } catch (error) {
+      if (isCaptureCancelledError(error)) {
+        chatGptAccessTokenLoaded = false;
+        throw error;
+      }
       debugLog?.event("conversationApi.token.failed", {
         error: error?.message || String(error)
       });
@@ -853,21 +879,36 @@
 
   async function fetchWithTimeout(url, options = {}) {
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), Number(options.timeoutMs || CONVERSATION_API_ATTEMPT_TIMEOUT_MS));
+    const externalSignal = options.signal || null;
+    const timeoutMs = Number(options.timeoutMs || CONVERSATION_API_ATTEMPT_TIMEOUT_MS);
+    let timedOut = false;
+    const abortFromExternalSignal = () => controller.abort(externalSignal?.reason);
+
+    throwIfCaptureCancelled(externalSignal);
+    externalSignal?.addEventListener("abort", abortFromExternalSignal, { once: true });
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
 
     try {
+      const { timeoutMs: _timeoutMs, signal: _signal, ...fetchOptions } = options;
       return await fetch(url, {
-        ...options,
+        ...fetchOptions,
         signal: controller.signal
       });
     } catch (error) {
       if (error?.name === "AbortError") {
+        if (externalSignal?.aborted) {
+          throw createCaptureCancelledError(externalSignal.reason);
+        }
         throw new Error("timeout");
       }
 
       throw error;
     } finally {
       window.clearTimeout(timeoutId);
+      externalSignal?.removeEventListener("abort", abortFromExternalSignal);
     }
   }
 

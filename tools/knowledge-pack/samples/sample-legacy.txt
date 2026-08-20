@@ -1,0 +1,3 @@
+SYNTHETIC LEGACY EXPORT
+User: Can this plain text be imported?
+Assistant: Yes. It should receive a hash, manifest, and stable item ID.

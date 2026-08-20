@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -174,6 +174,58 @@ for (const fixtureCase of cases) {
     }
   });
 }
+
+test("advanced PDF renderer keeps attachments after prose, embedded images, and single line breaks", async () => {
+  const payloadPath = path.join(outputDir, "attachment-linebreak.payload.json");
+  const htmlPath = path.join(outputDir, "attachment-linebreak.html");
+  const genericPng = "data:application/octet-stream;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+  const payload = {
+    title: "Attachment and line break regression",
+    exportedAt: "2026-07-24T00:00:00.000Z",
+    language: "zh",
+    messages: [{
+      id: "user-1",
+      role: "user",
+      turnNumber: 1,
+      markdown: [
+        "正文第一行",
+        "正文第二行",
+        "",
+        "[File: 金融面试问题.pptx]",
+        `![Uploaded image](${genericPng})`
+      ].join("\n")
+    }, {
+      id: "assistant-1",
+      role: "assistant",
+      turnNumber: 2,
+      thinkingMarkdown: "正在整理内容。",
+      markdown: "整理完成。"
+    }]
+  };
+
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(payloadPath, JSON.stringify(payload), "utf8");
+  await execFileAsync(process.execPath, [
+    path.join(repoRoot, "tools", "advanced-pdf", "render.js"),
+    payloadPath,
+    "--html",
+    htmlPath,
+    "--html-only"
+  ], {
+    cwd: repoRoot,
+    encoding: "utf8"
+  });
+
+  const html = await readFile(htmlPath, "utf8");
+
+  assert.match(html, /金融面试问题\.pptx/);
+  assert.match(html, /attachment-card file/);
+  assert.match(html, /<p>正文第一行<br>\s*正文第二行<\/p>/);
+  assert.match(html, /assistant-intro[\s\S]*<section class="thinking">/);
+  assert.match(html, /\.assistant-intro \{[\s\S]*break-inside: avoid;/);
+  assert.match(html, /Image Attachments/);
+  assert.match(html, /data:image\/png;base64,/);
+});
 
 async function loadFixturePayload(fixtureCase) {
   return JSON.parse(await readFile(path.join(fixturesDir, fixtureCase.payload), "utf8"));

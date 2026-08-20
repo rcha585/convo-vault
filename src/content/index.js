@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.15";
+  const EXPORTER_VERSION = "0.7.24";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -42,6 +42,11 @@
   const THINKING_FLYOUT_AUTO_OPEN_LIMIT = 48;
   const FAST_THINKING_FLYOUT_AUTO_OPEN_LIMIT = 0;
   const THINKING_FLYOUT_OPEN_TIMEOUT_MS = 1400;
+  const THINKING_FLYOUT_SETTLE_TIMEOUT_MS = 4500;
+  const FAST_THINKING_FLYOUT_SETTLE_TIMEOUT_MS = 2800;
+  const THINKING_FLYOUT_SETTLE_POLL_MS = 150;
+  const THINKING_FLYOUT_STABLE_PASSES = 3;
+  const THINKING_FLYOUT_NO_PANEL_GRACE_MS = 700;
   const DEBUG_EVENT_LIMIT = 500;
   const DETAILED_DEBUG_LOG = false;
   const ADVANCED_PDF_IMAGE_EMBED_LIMIT = 160;
@@ -184,7 +189,13 @@
   const THINKING_STATUS_RE = /\b(?:thought|thinking|reasoned)\s*(?:for)?\s*\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds?)\b|\u5df2\u601d\u8003\s*\d+(?:\.\d+)?\s*(?:s|\u79d2)?|\u601d\u8003\s*\d+(?:\.\d+)?\s*(?:s|\u79d2)/i;
   const THINKING_FLYOUT_TITLE_RE = /^(?:\u601d\u8003|\u63a8\u7406|thinking|reasoning)$/i;
   const THINKING_FLYOUT_DONE_RE = /^(?:\u5b8c\u6210|done|completed)$/i;
-  const THINKING_FLYOUT_STOP_RE = /^(?:\u8bb0\u5fc6|memory|memories|past chat|saved memory|web search|deep research|references?)\b/i;
+  const THINKING_FLYOUT_ACTIVE_RE = /^(?:\u6b63\u5728\u641c\u7d22|\u641c\u7d22\u4e2d|searching\b|browsing\b|researching\b|loading\b|working\b)/i;
+  const THINKING_FLYOUT_STOP_RE = /^(?:web search|deep research|references?)\b/i;
+  const THINKING_FLYOUT_STEP_LABEL_RE = /^(?:\u8bb0\u5fc6|memory|memories|past chat|saved memory|\u6587\u4ef6|file|files?|\u7f51\u9875|web|web pages?)(?:\s*[\u00b7:]\s*\d+)?$/i;
+  const THINKING_FLYOUT_CODE_TITLE_RE = /^(?:python|javascript|typescript|bash|shell|sql|json|html|css|markdown|code|terminal)$/i;
+  const THINKING_FLYOUT_RESULT_RE = /^(?:true|false|none|stdout|stderr|output|result|encoding\b|sample\b|b[\u0027\"]|\d+\s+)/i;
+  const THINKING_FLYOUT_SOURCES_RE = /^(?:\u6e90|\u6765\u6e90|sources?)\s*(?:[\u00b7:]\s*\d+)?$/i;
+  const THINKING_SOURCE_TRIGGER_RE = /^(?:\u6e90|\u6765\u6e90|sources?)$/i;
   const EXPAND_CUE_RE = /\b(show\s+more|show\s+all|expand|expanded|continue|read\s+more|more|details?|view\s+more)\b|\u5c55\u5f00|\u663e\u793a\u66f4\u591a|\u67e5\u770b\u66f4\u591a|\u7ee7\u7eed|\u66f4\u591a/i;
   const EXPANDABLE_BUTTON_SELECTORS = [
     "button.group__menu-item",
@@ -296,7 +307,11 @@
   async function openMessageSelectorPanel() {
     return messageSelectorUI.open({
       loadMessages: async (onProgress, options = {}) => {
-        return messageExtractor.collect({ onProgress, captureMode: options.captureMode });
+        return messageExtractor.collect({
+          onProgress,
+          captureMode: options.captureMode,
+          signal: options.signal
+        });
       },
       exportMessages: (messages, options) => exportSelectedMessages(messages, options)
     });
@@ -310,26 +325,40 @@
       throw new Error("No conversation messages were found on this page.");
     }
 
-    return exportSelectedMessages(messages);
+    if (!result.completeness?.complete) {
+      throw new Error(formatCaptureCompletenessError(result.completeness));
+    }
+
+    return exportSelectedMessages(messages, {
+      captureMode: result.captureMode,
+      completeness: result.completeness,
+      debugLog: result.debugLog || null
+    });
   }
 
   async function collectConversationMessages(options = {}) {
     const onProgress = typeof options.onProgress === "function" ? options.onProgress : () => {};
     const captureMode = normalizeCaptureMode(options.captureMode);
+    const signal = options.signal || null;
     const debugLog = createDebugLog({ captureMode });
     debugLog.event("capture.mode", { captureMode });
+    throwIfCaptureCancelled(signal);
 
     if (captureMode === "fast") {
       try {
         const messages = await collectFastCanonicalMessages(debugLog, onProgress, {
-          finishDebug: true
+          finishDebug: true,
+          signal
         });
-        return {
+        return createValidatedCaptureResult({
           messages,
           debugLog,
           captureMode
-        };
+        }, { signal });
       } catch (error) {
+        if (isCaptureCancelledError(error)) {
+          throw error;
+        }
         debugLog.event("fastCapture.failed", {
           error: error?.message || String(error)
         });
@@ -338,22 +367,27 @@
     }
 
     if (captureMode === "hybrid") {
-      return collectHybridConversationMessages(debugLog, onProgress);
+      const result = await collectHybridConversationMessages(debugLog, onProgress, { signal });
+      return createValidatedCaptureResult(result, { signal });
     }
 
     const messages = await collectFullDomMessages(debugLog, onProgress, {
-      finishDebug: true
+      finishDebug: true,
+      signal
     });
-    return {
+    return createValidatedCaptureResult({
       messages,
       debugLog,
       captureMode: "full"
-    };
+    }, { signal });
   }
 
   async function collectFastCanonicalMessages(debugLog, onProgress, options = {}) {
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     onProgress("Loading conversation data...");
-    const messages = await collectFastConversationMessages(debugLog);
+    const messages = await collectFastConversationMessages(debugLog, { signal });
+    throwIfCaptureCancelled(signal);
 
     if (!messages.length) {
       debugLog.event("fastCapture.empty", {});
@@ -364,8 +398,11 @@
     await enrichVisibleThinkingFlyouts(messages, debugLog, {
       autoOpenLimit: FAST_THINKING_FLYOUT_AUTO_OPEN_LIMIT,
       allowGlobalFallback: false,
-      requireMountedRoot: true
+      requireMountedRoot: true,
+      settleTimeoutMs: FAST_THINKING_FLYOUT_SETTLE_TIMEOUT_MS,
+      signal
     });
+    throwIfCaptureCancelled(signal);
     debugLog.mark("enrichedFastThinkingFlyouts");
 
     if (options.finishDebug !== false) {
@@ -376,11 +413,14 @@
     return messages;
   }
 
-  async function collectHybridConversationMessages(debugLog, onProgress) {
+  async function collectHybridConversationMessages(debugLog, onProgress, options = {}) {
+    const signal = options.signal || null;
     try {
       const fastMessages = await collectFastCanonicalMessages(debugLog, onProgress, {
-        finishDebug: false
+        finishDebug: false,
+        signal
       });
+      throwIfCaptureCancelled(signal);
       debugLog.event("hybridCapture.fastReady", {
         messageCount: fastMessages.length
       });
@@ -390,9 +430,13 @@
       try {
         fullMessages = await collectFullDomMessages(debugLog, onProgress, {
           finishDebug: false,
-          progressPrefix: "Full enrichment: "
+          progressPrefix: "Full enrichment: ",
+          signal
         });
       } catch (error) {
+        if (isCaptureCancelledError(error)) {
+          throw error;
+        }
         debugLog.event("hybridCapture.fullFailed", {
           error: error?.message || String(error)
         });
@@ -401,15 +445,20 @@
 
       const reconciliation = reconcileHybridMessages(fastMessages, fullMessages, debugLog);
       const messages = reconciliation.messages;
+      throwIfCaptureCancelled(signal);
       debugLog.event("hybridCapture.reconciled", reconciliation.report);
       debugLog.finish(messages);
       onProgress(`Hybrid ready. ${messages.length} canonical messages, ${reconciliation.report.enrichedMessages} enriched, ${reconciliation.report.ignoredFullOnlyMessages} Full-only candidate(s) ignored.`);
       return {
         messages,
         debugLog,
-        captureMode: "hybrid"
+        captureMode: "hybrid",
+        reconciliationReport: reconciliation.report
       };
     } catch (error) {
+      if (isCaptureCancelledError(error)) {
+        throw error;
+      }
       debugLog.event("hybridCapture.failed", {
         error: error?.message || String(error)
       });
@@ -418,6 +467,8 @@
   }
 
   async function collectFullDomMessages(debugLog, onProgress, options = {}) {
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     const progressPrefix = options.progressPrefix || "";
     const scrollTarget = getBestScrollTarget();
     const originalScrollTop = getScrollTop(scrollTarget);
@@ -433,24 +484,28 @@
       // stable, then walk downward and capture each visible batch.
       debugLog.mark("start");
       onProgress(`${progressPrefix}Loading older messages...`);
-      await loadOlderMessages(scrollTarget, collector, debugLog, scanDeadline, scanBudget);
+      await loadOlderMessages(scrollTarget, collector, debugLog, scanDeadline, scanBudget, signal);
+      throwIfCaptureCancelled(signal);
       debugLog.mark("loadedOlderMessages");
       onProgress(`${progressPrefix}Scanning conversation...`);
-      await walkConversation(scrollTarget, collector, debugLog, walkDeadline, scanBudget);
+      await walkConversation(scrollTarget, collector, debugLog, walkDeadline, scanBudget, signal);
+      throwIfCaptureCancelled(signal);
       debugLog.mark("walkedConversation");
       onProgress(`${progressPrefix}Hydrating virtualized messages...`);
       const hydrateDeadline = Math.max(scanDeadline, Date.now() + scanBudget.hydrateReservedMs);
-      await hydrateVirtualizedTurns(collector, debugLog, hydrateDeadline, scanBudget);
+      await hydrateVirtualizedTurns(collector, debugLog, hydrateDeadline, scanBudget, signal);
+      throwIfCaptureCancelled(signal);
       debugLog.mark("hydratedVirtualizedTurns");
-      await collector.captureFromDom();
+      await collector.captureFromDom({ signal });
       debugLog.mark("finalCapture");
       onProgress(`${progressPrefix}Recovering missed turns...`);
       const missingBeforeRecovery = getMissingConversationTurnOrders(collector.getMessages());
       const recoveryBudgetMs = getMissingRecoveryBudgetMs(missingBeforeRecovery.length, scanBudget.pageTurnCount);
       const recoveryDeadline = Date.now() + recoveryBudgetMs;
-      await recoverMissingTurnMessages(scrollTarget, collector, debugLog, recoveryDeadline, recoveryBudgetMs);
+      await recoverMissingTurnMessages(scrollTarget, collector, debugLog, recoveryDeadline, recoveryBudgetMs, signal);
+      throwIfCaptureCancelled(signal);
       debugLog.mark("recoveredMissingTurns");
-      await collector.captureFromDom({ settleMs: 0 });
+      await collector.captureFromDom({ settleMs: 0, signal });
 
       const messages = finalizeCollectedMessages(collector.getMessages(), debugLog);
 
@@ -459,10 +514,12 @@
       }
 
       onProgress(`${progressPrefix}Loading message timestamps...`);
-      await enrichMessageTimestamps(messages, debugLog);
+      await enrichMessageTimestamps(messages, debugLog, { signal });
+      throwIfCaptureCancelled(signal);
       debugLog.mark("enrichedTimestamps");
       onProgress(`${progressPrefix}Loading thinking details...`);
-      await enrichVisibleThinkingFlyouts(messages, debugLog);
+      await enrichVisibleThinkingFlyouts(messages, debugLog, { signal });
+      throwIfCaptureCancelled(signal);
       debugLog.mark("enrichedThinkingFlyouts");
 
       if (options.finishDebug !== false) {
@@ -483,6 +540,7 @@
   function reconcileHybridMessages(fastMessages, fullMessages, debugLog = null) {
     const fullMatches = new Map();
     const fullOnlyCandidates = [];
+    const substantiveFullOnlyCandidates = [];
     const usedFullMessages = new Set();
     let enrichedMessages = 0;
 
@@ -500,11 +558,17 @@
       const key = getHybridMessageKey(fullMessage);
 
       if (!key) {
-        fullOnlyCandidates.push({
+        const candidate = {
           role: fullMessage.role,
           order: fullMessage.order,
           reason: "missing-order-or-role",
           preview: fullMessage.preview || makeMessagePreview(fullMessage)
+        };
+        fullOnlyCandidates.push(candidate);
+        substantiveFullOnlyCandidates.push({
+          ...candidate,
+          identity: getCapturedMessageIdentity(fullMessage),
+          imageCount: fullMessage.imageCount || countMarkdownImages(`${fullMessage.markdown || ""}\n${fullMessage.thinkingMarkdown || ""}`)
         });
         continue;
       }
@@ -546,6 +610,13 @@
         reason: "not-in-fast-canonical-path",
         preview: fullMessage.preview || makeMessagePreview(fullMessage)
       });
+      substantiveFullOnlyCandidates.push({
+        role: fullMessage.role,
+        order: fullMessage.order,
+        identity: getCapturedMessageIdentity(fullMessage),
+        imageCount: fullMessage.imageCount || countMarkdownImages(`${fullMessage.markdown || ""}\n${fullMessage.thinkingMarkdown || ""}`),
+        preview: fullMessage.preview || makeMessagePreview(fullMessage)
+      });
     }
 
     const ignoredSamples = fullOnlyCandidates.slice(0, 12);
@@ -556,12 +627,17 @@
       matchedFullCandidates: usedFullMessages.size,
       enrichedMessages,
       ignoredFullOnlyMessages: fullOnlyCandidates.length,
-      ignoredSamples
+      ignoredSamples,
+      substantiveFullOnlyMessages: substantiveFullOnlyCandidates.length,
+      substantiveFullOnlyAssistantMessages: substantiveFullOnlyCandidates.filter((candidate) => candidate.role === "assistant").length,
+      substantiveSamples: substantiveFullOnlyCandidates.slice(0, 12)
     };
 
     debugLog?.event("hybridCapture.fullOnlyCandidates", {
       count: fullOnlyCandidates.length,
-      samples: ignoredSamples
+      samples: ignoredSamples,
+      substantiveCount: substantiveFullOnlyCandidates.length,
+      substantiveSamples: substantiveFullOnlyCandidates.slice(0, 12)
     });
 
     return {
@@ -580,6 +656,13 @@
     const thinkingMarkdown = thinkingSource === "full" ? fullMessage.thinkingMarkdown : fastMessage.thinkingMarkdown;
     const hybridSource = markdownSource === "full" || thinkingSource === "full" ? "fast+full" : "fast";
     const finalImageCount = countMarkdownImages(`${markdown}\n${thinkingMarkdown}`);
+    const imagesEmbedded = Math.min(finalImageCount, Math.max(fastMessage.imagesEmbedded || 0, fullMessage.imagesEmbedded || 0));
+    const imagesFailed = Math.max(fastMessage.imagesFailed || 0, fullMessage.imagesFailed || 0);
+    const failedImageReferences = Math.min(Math.max(0, finalImageCount - imagesEmbedded), imagesFailed);
+    const imagesDeferred = Math.min(
+      Math.max(0, finalImageCount - imagesEmbedded - failedImageReferences),
+      Math.max(fastMessage.imagesDeferred || 0, fullMessage.imagesDeferred || 0)
+    );
 
     return {
       ...fastMessage,
@@ -594,8 +677,9 @@
       codeBlockCount: Math.max(fastMessage.codeBlockCount || 0, fullMessage.codeBlockCount || 0),
       fileCount: Math.max(fastMessage.fileCount || 0, fullMessage.fileCount || 0),
       imageCount: finalImageCount,
-      imagesEmbedded: Math.min(finalImageCount, Math.max(fastMessage.imagesEmbedded || 0, fullMessage.imagesEmbedded || 0)),
-      imagesFailed: Math.min(finalImageCount, Math.max(fastMessage.imagesFailed || 0, fullMessage.imagesFailed || 0)),
+      imagesEmbedded,
+      imagesDeferred,
+      imagesFailed,
       captureMode: "hybrid",
       hybridSource,
       hybridMarkdownSource: markdownSource,
@@ -718,9 +802,364 @@
     );
   }
 
+  function createCaptureCancelledError(reason = "Capture cancelled.") {
+    const message = typeof reason === "string"
+      ? reason
+      : reason?.message || "Capture cancelled.";
+    const error = new Error(message);
+    error.name = "CaptureCancelledError";
+    error.code = "CAPTURE_CANCELLED";
+    return error;
+  }
+
+  function isCaptureCancelledError(error) {
+    return error?.name === "CaptureCancelledError"
+      || error?.code === "CAPTURE_CANCELLED";
+  }
+
+  function throwIfCaptureCancelled(signal) {
+    if (signal?.aborted) {
+      throw createCaptureCancelledError(signal.reason);
+    }
+  }
+
+  function createValidatedCaptureResult(result, options = {}) {
+    throwIfCaptureCancelled(options.signal);
+    const messages = result?.messages || [];
+    const captureMode = normalizeCaptureMode(result?.captureMode);
+    const completeness = buildCaptureCompletenessReport(messages, {
+      captureMode,
+      reconciliationReport: result?.reconciliationReport || null,
+      expectedSummary: result?.debugLog?.getFinalSummary?.() || null
+    });
+
+    result?.debugLog?.event("capture.completeness", completeness);
+    return {
+      ...result,
+      captureMode,
+      completeness
+    };
+  }
+
+  function buildCaptureCompletenessReport(messages, options = {}) {
+    const captureMode = normalizeCaptureMode(options.captureMode);
+    const expected = options.expectedStructure || getExpectedConversationStructure(options.expectedSummary);
+    const capturedEntries = messages.map((message, index) => ({
+      identity: getCapturedMessageIdentity(message, index),
+      order: getCapturedConversationOrder(message),
+      role: String(message?.role || "unknown").toLowerCase()
+    }));
+    const capturedIdentities = [...new Set(capturedEntries.map((entry) => entry.identity).filter(Boolean))];
+    const capturedIdentitySet = new Set(capturedIdentities);
+    const missingIdentities = expected.identities.filter((identity) => !capturedIdentitySet.has(identity));
+    const capturedOrders = [...new Set(capturedEntries
+      .map((entry) => entry.order)
+      .filter((order) => Number.isFinite(order) && order > 0 && order < 1_000_000))]
+      .sort((a, b) => a - b);
+    const capturedOrderSet = new Set(capturedOrders);
+    const missingConversationOrders = expected.orders.filter((order) => !capturedOrderSet.has(order));
+    const roleSequence = getRoleSequenceDiagnostics(messages);
+    const userMessages = roleSequence.userMessages;
+    const assistantMessages = roleSequence.assistantMessages;
+    const imageStats = getCaptureImageCompletenessStats(messages);
+    const issues = [];
+    const warnings = [];
+    const coverageKnown = expected.identities.length > 0;
+    const capturedStartRole = messages[0]?.role || "";
+    const capturedEndRole = messages[messages.length - 1]?.role || "";
+    const reconciliationReport = options.reconciliationReport || {};
+    const substantiveFullOnlyMessages = Number(reconciliationReport.substantiveFullOnlyMessages || 0);
+
+    if (!coverageKnown) {
+      issues.push({
+        code: "expected-structure-unavailable",
+        message: "The page did not expose a stable expected conversation structure."
+      });
+    }
+
+    if (coverageKnown && capturedIdentities.length < expected.identities.length) {
+      issues.push({
+        code: "identity-coverage",
+        message: `Captured ${capturedIdentities.length}/${expected.identities.length} unique conversation identities.`
+      });
+    }
+
+    if (missingConversationOrders.length) {
+      issues.push({
+        code: "missing-orders",
+        message: `Missing conversation order(s): ${formatNumberRanges(missingConversationOrders)}.`
+      });
+    } else if (missingIdentities.length) {
+      issues.push({
+        code: "missing-identities",
+        message: `Missing ${missingIdentities.length} expected conversation identity/identities.`
+      });
+    }
+
+    if (expected.roles.user > userMessages) {
+      issues.push({
+        code: "missing-user-messages",
+        message: `Captured ${userMessages}/${expected.roles.user} expected user messages.`
+      });
+    }
+
+    if (expected.roles.assistant > assistantMessages) {
+      issues.push({
+        code: "missing-assistant-messages",
+        message: `Captured ${assistantMessages}/${expected.roles.assistant} expected assistant messages.`
+      });
+    }
+
+    if (expected.startRole && capturedStartRole !== expected.startRole) {
+      issues.push({
+        code: "start-role-mismatch",
+        message: `Expected the conversation to start with ${expected.startRole}, captured ${capturedStartRole || "nothing"}.`
+      });
+    }
+
+    if (expected.endRole && capturedEndRole !== expected.endRole) {
+      issues.push({
+        code: "end-role-mismatch",
+        message: `Expected the conversation to end with ${expected.endRole}, captured ${capturedEndRole || "nothing"}.`
+      });
+    }
+
+    if (imageStats.failures > 0) {
+      issues.push({
+        code: "image-failures",
+        message: `${imageStats.failures} image reference(s) failed during capture.`
+      });
+    }
+
+    if (captureMode === "hybrid" && substantiveFullOnlyMessages > 0) {
+      issues.push({
+        code: "hybrid-full-only-messages",
+        message: `Hybrid found ${substantiveFullOnlyMessages} substantive Full-only message(s); use Full to retain them.`
+      });
+    }
+
+    if (roleSequence.sameRolePairs.length) {
+      warnings.push({
+        code: "same-role-adjacency",
+        message: `${roleSequence.sameRolePairs.length} same-role adjacency pair(s) detected.`,
+        pairs: roleSequence.sameRolePairs
+      });
+    }
+
+    const complete = issues.length === 0;
+    return {
+      complete,
+      requiresOverride: !complete,
+      captureMode,
+      coverageKnown,
+      expected: {
+        uniqueIdentities: expected.identities.length,
+        conversationOrders: expected.orders,
+        userMessages: expected.roles.user,
+        assistantMessages: expected.roles.assistant,
+        startRole: expected.startRole,
+        endRole: expected.endRole,
+        sameRoleAdjacencies: expected.sameRolePairs
+      },
+      captured: {
+        messages: messages.length,
+        uniqueIdentities: capturedIdentities.length,
+        conversationOrders: capturedOrders,
+        userMessages,
+        assistantMessages,
+        startRole: capturedStartRole,
+        endRole: capturedEndRole,
+        sameRoleAdjacencies: roleSequence.sameRolePairs
+      },
+      missingConversationOrders,
+      missingIdentities,
+      images: imageStats,
+      hybrid: {
+        substantiveFullOnlyMessages,
+        substantiveFullOnlyAssistantMessages: Number(reconciliationReport.substantiveFullOnlyAssistantMessages || 0),
+        substantiveSamples: reconciliationReport.substantiveSamples || []
+      },
+      issues,
+      warnings
+    };
+  }
+
+  function getExpectedConversationStructure(summary = null) {
+    const turns = getAllTurnNodes();
+    const entries = [];
+    const seen = new Set();
+
+    turns.forEach((turn, index) => {
+      const identity = getExpectedTurnIdentity(turn, index);
+
+      if (!identity || seen.has(identity)) {
+        return;
+      }
+
+      seen.add(identity);
+      entries.push({
+        identity,
+        order: getConversationTurnNumber(turn),
+        role: detectRoleDetails(turn, index).role
+      });
+    });
+
+    const domOrders = entries
+      .map((entry) => entry.order)
+      .filter((order) => Number.isFinite(order) && order > 0 && order < 1_000_000)
+      .map(Math.floor);
+    let summaryOrders = [
+      ...(summary?.capturedTurnOrders || []),
+      ...(summary?.missingTurnOrders || [])
+    ]
+      .map(Number)
+      .filter((order) => Number.isFinite(order) && order > 0 && order < 1_000_000)
+      .map(Math.floor);
+    const expectedTurnCount = Number(summary?.expectedTurnCount || 0);
+
+    if (!summaryOrders.length && Number.isInteger(expectedTurnCount) && expectedTurnCount > 0 && expectedTurnCount < 1_000_000) {
+      summaryOrders = Array.from({ length: expectedTurnCount }, (_, index) => index + 1);
+    }
+
+    const orders = [...new Set([...domOrders, ...summaryOrders])].sort((a, b) => a - b);
+    const canonicalEntries = orders.length
+      ? orders.map((order) => {
+        const candidates = entries.filter((entry) => Math.floor(entry.order) === order);
+        const role = candidates.find((entry) => entry.role === "user" || entry.role === "assistant")?.role
+          || candidates[0]?.role
+          || "";
+        return { identity: `order:${order}`, order, role };
+      })
+      : entries;
+    const roles = canonicalEntries.reduce((counts, entry) => {
+      if (entry.role === "user" || entry.role === "assistant") {
+        counts[entry.role] += 1;
+      }
+      return counts;
+    }, { user: 0, assistant: 0 });
+    const sameRolePairs = [];
+
+    for (let index = 1; index < canonicalEntries.length; index += 1) {
+      const current = canonicalEntries[index];
+      const previous = canonicalEntries[index - 1];
+
+      if ((current.role === "user" || current.role === "assistant") && current.role === previous.role) {
+        sameRolePairs.push({
+          previousOrder: previous.order,
+          order: current.order,
+          role: current.role
+        });
+      }
+    }
+
+    return {
+      identities: canonicalEntries.map((entry) => entry.identity),
+      orders,
+      roles,
+      startRole: canonicalEntries[0]?.role || "",
+      endRole: canonicalEntries[canonicalEntries.length - 1]?.role || "",
+      sameRolePairs
+    };
+  }
+
+  function getExpectedTurnIdentity(turn, index = 0) {
+    const order = getConversationTurnNumber(turn);
+
+    if (Number.isFinite(order) && order > 0 && order < 1_000_000) {
+      return `order:${Math.floor(order)}`;
+    }
+
+    const messageId = turn?.getAttribute?.("data-message-id") || turn?.querySelector?.("[data-message-id]")?.getAttribute("data-message-id") || "";
+    const turnId = getTurnId(turn);
+    const turnContainer = turn?.getAttribute?.("data-turn-id-container") || turn?.getAttribute?.("data-turn-container") || "";
+    const testId = turn?.getAttribute?.("data-testid") || "";
+
+    if (messageId) return `message:${messageId}`;
+    if (turnId) return `turn:${turnId}`;
+    if (turnContainer) return `container:${turnContainer}`;
+    if (testId) return `test:${testId}`;
+    return `dom-index:${index}`;
+  }
+
+  function getCapturedMessageIdentity(message, index = 0) {
+    const order = getCapturedConversationOrder(message);
+
+    if (Number.isFinite(order) && order > 0 && order < 1_000_000) {
+      return `order:${Math.floor(order)}`;
+    }
+
+    if (message?.sourceMessageId) return `message:${message.sourceMessageId}`;
+    if (message?.sourceTurnId) return `turn:${message.sourceTurnId}`;
+    if (message?.sourceTurnContainer) return `container:${message.sourceTurnContainer}`;
+    if (message?.sourceTestId) return `test:${message.sourceTestId}`;
+    if (message?.id) return `id:${message.id}`;
+    return `capture-index:${index}`;
+  }
+
+  function getCapturedConversationOrder(message) {
+    const order = Number(message?.conversationOrder ?? message?.order ?? message?.turnNumber);
+    return Number.isFinite(order) ? Math.floor(order) : NaN;
+  }
+
+  function getCaptureImageCompletenessStats(messages) {
+    const urls = [];
+    let embedded = 0;
+    let deferred = 0;
+    let failures = 0;
+
+    for (const message of messages) {
+      const markdown = `${message?.markdown || ""}\n${message?.thinkingMarkdown || ""}`;
+      urls.push(...extractMarkdownImageUrls(markdown));
+      embedded += countEmbeddedMarkdownImages(markdown);
+      deferred += Math.max(0, Number(message?.imagesDeferred || 0));
+      failures += Math.max(0, Number(message?.imagesFailed || 0));
+    }
+
+    return {
+      references: urls.length,
+      uniqueIdentities: new Set(urls.map(getMarkdownImageIdentity).filter(Boolean)).size,
+      embedded,
+      deferred,
+      failures
+    };
+  }
+
+  function extractMarkdownImageUrls(markdown) {
+    return [...String(markdown || "").matchAll(/!\[[^\]]*]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)]
+      .map((match) => match[1] || "")
+      .filter(Boolean);
+  }
+
+  function formatNumberRanges(values) {
+    const numbers = [...new Set(values
+      .map(Number)
+      .filter((value) => Number.isFinite(value)))]
+      .sort((a, b) => a - b);
+    const ranges = [];
+    let start = numbers[0];
+    let end = numbers[0];
+
+    for (let index = 1; index <= numbers.length; index += 1) {
+      const value = numbers[index];
+
+      if (value === end + 1) {
+        end = value;
+        continue;
+      }
+
+      if (start != null) {
+        ranges.push(start === end ? String(start) : `${start}-${end}`);
+      }
+      start = value;
+      end = value;
+    }
+
+    return ranges.join(", ");
+  }
+
   function normalizeCaptureMode(value) {
     const mode = String(value || "").toLowerCase();
-    return ["fast", "full", "hybrid"].includes(mode) ? mode : "hybrid";
+    return ["fast", "full", "hybrid"].includes(mode) ? mode : "full";
   }
 
   function formatCaptureMode(value) {
@@ -738,6 +1177,10 @@
   async function exportSelectedMessages(messages, options = {}) {
     if (!messages.length) {
       throw new Error("Select at least one message to export.");
+    }
+
+    if (options.completeness && !options.completeness.complete && !options.allowIncomplete) {
+      throw new Error(formatCaptureCompletenessError(options.completeness));
     }
 
     const exportedAt = new Date();
@@ -859,6 +1302,14 @@
       imagesEmbedded: messages.reduce((total, message) => total + message.imagesEmbedded, 0),
       imagesFailed: messages.reduce((total, message) => total + message.imagesFailed, 0)
     };
+  }
+
+  function formatCaptureCompletenessError(report) {
+    const issueText = (report?.issues || [])
+      .map((issue) => issue.message)
+      .filter(Boolean)
+      .join(" ");
+    return `Capture is incomplete and normal export is blocked.${issueText ? ` ${issueText}` : ""}`;
   }
 
   function createExportMetadata(messages, exportedAt = new Date()) {
@@ -1414,6 +1865,7 @@
       fileCount: message?.fileCount || 0,
       imageCount: message?.imageCount || 0,
       imagesEmbedded: message?.imagesEmbedded || 0,
+      imagesDeferred: message?.imagesDeferred || 0,
       imagesFailed: message?.imagesFailed || 0,
       usedWholeNodeFallback: Boolean(message?.usedWholeNodeFallback),
       serializationAttempts: (message?.serializationAttempts || []).slice(0, 8),
@@ -1423,10 +1875,16 @@
   }
 
   function createPortableMessageSnapshot(message, index = 0) {
-    const markdown = String(message?.markdown || "");
-    const thinkingMarkdown = String(message?.thinkingMarkdown || "");
+    const markdown = dedupeMarkdownImageReferences(message?.markdown || "");
+    const thinkingMarkdown = dedupeMarkdownImageReferences(message?.thinkingMarkdown || "");
     const imageCount = countMarkdownImages(`${markdown}\n${thinkingMarkdown}`);
     const imagesEmbedded = Math.min(imageCount, message?.imagesEmbedded || 0);
+    const imagesFailed = Math.max(0, message?.imagesFailed || 0);
+    const failedImageReferences = Math.min(Math.max(0, imageCount - imagesEmbedded), imagesFailed);
+    const imagesDeferred = Math.min(
+      Math.max(0, imageCount - imagesEmbedded - failedImageReferences),
+      message?.imagesDeferred || 0
+    );
 
     return {
       id: message?.id || `message-${index + 1}`,
@@ -1446,7 +1904,8 @@
       fileCount: message?.fileCount || 0,
       imageCount,
       imagesEmbedded,
-      imagesFailed: Math.min(Math.max(0, imageCount - imagesEmbedded), message?.imagesFailed || 0),
+      imagesDeferred,
+      imagesFailed,
       hybridSource: message?.hybridSource || "",
       hybridMarkdownSource: message?.hybridMarkdownSource || "",
       hybridThinkingSource: message?.hybridThinkingSource || ""
@@ -1456,10 +1915,88 @@
   function refreshPortableMessageImageStats(message, options = {}) {
     const imageCount = countMarkdownImages(`${message?.markdown || ""}\n${message?.thinkingMarkdown || ""}`);
     const embedded = countEmbeddedMarkdownImages(`${message?.markdown || ""}\n${message?.thinkingMarkdown || ""}`);
+    const priorFailures = Math.max(0, message.imagesFailed || 0);
     message.imageCount = imageCount;
     message.imagesEmbedded = embedded;
-    message.imagesFailed = options.embedAttempted ? Math.max(0, imageCount - embedded) : Math.min(message.imagesFailed || 0, imageCount);
+    message.imagesFailed = options.embedAttempted
+      ? Math.max(0, imageCount - embedded) + Math.max(0, priorFailures - imageCount)
+      : priorFailures;
+    message.imagesDeferred = options.embedAttempted
+      ? 0
+      : Math.min(message.imagesDeferred || 0, Math.max(0, imageCount - embedded - message.imagesFailed));
     return message;
+  }
+
+  function dedupeMarkdownImageReferences(markdown) {
+    const imagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)(?:\s*<!-- (?:Image base64 embedding is temporarily disabled during scanning to avoid page side effects|Image base64 embedding is deferred until export to avoid page side effects)\. -->)?/g;
+    const source = String(markdown || "");
+    const seen = new Set();
+    let previousMatchEnd = 0;
+
+    return cleanMarkdown(source.replace(imagePattern, (match, _alt, url, offset) => {
+      if (hasSubstantiveImageGap(source.slice(previousMatchEnd, offset))) {
+        seen.clear();
+      }
+      previousMatchEnd = offset + match.length;
+      const identity = getMarkdownImageIdentity(url);
+
+      if (!identity || !seen.has(identity)) {
+        if (identity) {
+          seen.add(identity);
+        }
+        return match;
+      }
+
+      return "";
+    }));
+  }
+
+  function hasSubstantiveImageGap(value) {
+    return Boolean(String(value || "")
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .trim());
+  }
+
+  function getMarkdownImageIdentity(url) {
+    const value = String(url || "").trim();
+
+    if (!value) {
+      return "";
+    }
+
+    const pointerMatch = value.match(/^(?:file-service|sediment):\/\/([^/?#]+)/i);
+    if (pointerMatch?.[1]) {
+      return `chatgpt-asset:${pointerMatch[1]}`;
+    }
+
+    if (/^data:/i.test(value)) {
+      return value;
+    }
+
+    try {
+      const parsed = new URL(value, location.href);
+      const estuaryId = /\/backend-api\/estuary\/content/i.test(parsed.pathname)
+        ? parsed.searchParams.get("id") || ""
+        : "";
+      if (estuaryId) {
+        return `chatgpt-estuary:${estuaryId}:${parsed.searchParams.get("p") || ""}`;
+      }
+
+      const fileMatch = parsed.pathname.match(/\/backend-api\/files\/([^/?#]+)(?:\/([^/?#]+))?/i);
+      if (fileMatch?.[1]) {
+        return `chatgpt-file:${fileMatch[1]}:${fileMatch[2] || "metadata"}`;
+      }
+
+      const sedimentMatch = parsed.pathname.match(/\/backend-api\/sediment\/files\/([^/?#]+)(?:\/([^/?#]+))?/i);
+      if (sedimentMatch?.[1]) {
+        return `chatgpt-sediment:${sedimentMatch[1]}:${sedimentMatch[2] || "metadata"}`;
+      }
+
+      parsed.hash = "";
+      return parsed.href;
+    } catch (_) {
+      return value;
+    }
   }
 
   function countEmbeddedMarkdownImages(markdown) {
@@ -1784,6 +2321,73 @@
     }, 1600);
   }
 
+  function createCaptureJobManager() {
+    let nextJobId = 0;
+    let activeJob = null;
+    let loadedSnapshot = null;
+
+    return {
+      start(captureMode) {
+        this.cancel("Superseded by a newer capture job.");
+        loadedSnapshot = null;
+        const controller = new AbortController();
+        activeJob = Object.freeze({
+          id: ++nextJobId,
+          captureMode: normalizeCaptureMode(captureMode),
+          controller,
+          signal: controller.signal,
+          startedAt: Date.now()
+        });
+        return activeJob;
+      },
+      cancel(reason = "Capture cancelled.") {
+        const job = activeJob;
+        activeJob = null;
+
+        if (job && !job.signal.aborted) {
+          job.controller.abort(reason);
+        }
+
+        return job;
+      },
+      isCurrent(job) {
+        return Boolean(job && activeJob?.id === job.id && !job.signal.aborted);
+      },
+      commit(job, result) {
+        if (!this.isCurrent(job)) {
+          throw createCaptureCancelledError("A stale capture job cannot replace the loaded snapshot.");
+        }
+
+        const snapshot = Object.freeze({
+          jobId: job.id,
+          captureMode: job.captureMode,
+          messages: Object.freeze([...(result?.messages || [])]),
+          debugLog: result?.debugLog || null,
+          completeness: result?.completeness || null,
+          reconciliationReport: result?.reconciliationReport || null,
+          completedAt: Date.now()
+        });
+        activeJob = null;
+        loadedSnapshot = snapshot;
+        return snapshot;
+      },
+      fail(job) {
+        if (activeJob?.id === job?.id) {
+          activeJob = null;
+        }
+      },
+      clearSnapshot() {
+        loadedSnapshot = null;
+      },
+      getActiveJob() {
+        return activeJob;
+      },
+      getLoadedSnapshot() {
+        return loadedSnapshot;
+      }
+    };
+  }
+
   function createMessageSelectorUI() {
     const hostId = "chatgpt-exporter-selector-host";
     let host = null;
@@ -1791,15 +2395,26 @@
     let messages = [];
     let selectedIds = new Set();
     let api = null;
-    let currentDebugLog = null;
-    let currentCaptureMode = "hybrid";
+    let panelPhase = "idle";
+    const captureJobs = createCaptureJobManager();
 
     return {
       open(nextApi) {
         api = nextApi;
         ensurePanel();
-        setPanelBusy(true, "Loading conversation...");
-        reloadMessages();
+        const activeJob = captureJobs.getActiveJob();
+        const loadedSnapshot = captureJobs.getLoadedSnapshot();
+
+        if (activeJob) {
+          setPanelPhase("scanning", `Scanning with ${formatCaptureMode(activeJob.captureMode)}...`);
+        } else if (loadedSnapshot) {
+          setPanelPhase(loadedSnapshot.completeness?.complete ? "ready" : "incomplete");
+        } else {
+          renderMessageList();
+          renderCompletenessReport(null);
+          setPanelPhase("idle", "Choose a mode, then click Start Scan. Opening the selector does not scan.");
+        }
+
         return { ok: true, panelOpen: true };
       }
     };
@@ -1823,12 +2438,14 @@
 
     function bindPanelEvents() {
       shadow.querySelector("[data-action='close']").addEventListener("click", () => {
+        cancelActiveScan("Capture cancelled because the selector was closed.");
         host.style.display = "none";
       });
-      shadow.querySelector("[data-action='refresh']").addEventListener("click", () => {
-        if (api) {
-          reloadMessages();
-        }
+      shadow.querySelector("[data-action='start-scan']").addEventListener("click", () => {
+        startScan();
+      });
+      shadow.querySelector("[data-action='cancel-scan']").addEventListener("click", () => {
+        cancelActiveScan("Capture cancelled by the user.");
       });
       shadow.querySelector("[data-action='select-all']").addEventListener("click", () => {
         selectedIds = new Set(messages.map((message) => message.id));
@@ -1850,11 +2467,18 @@
         exportCheckedMessages();
       });
       shadow.querySelector("[data-option='capture-mode']").addEventListener("change", () => {
-        currentCaptureMode = getSelectedCaptureMode();
+        cancelActiveScan("Capture cancelled because the mode changed.");
+        captureJobs.clearSnapshot();
+        messages = [];
+        selectedIds = new Set();
+        resetIncompleteOverride();
+        renderMessageList();
+        renderCompletenessReport(null);
         updateExportButtonLabel();
-        if (api) {
-          reloadMessages();
-        }
+        setPanelPhase("idle", `Mode set to ${formatCaptureMode(getSelectedCaptureMode())}. Click Start Scan.`);
+      });
+      shadow.querySelector("[data-option='allow-incomplete']").addEventListener("change", () => {
+        updateExportAvailability();
       });
       shadow.querySelector(".cgce-list").addEventListener("change", (event) => {
         const checkbox = event.target.closest("input[type='checkbox'][data-message-id]");
@@ -1887,7 +2511,7 @@
       const list = shadow.querySelector(".cgce-list");
 
       if (!messages.length) {
-        list.innerHTML = '<div class="cgce-empty">No messages found on this page.</div>';
+        list.innerHTML = '<div class="cgce-empty">No scan loaded. Choose a mode and click Start Scan.</div>';
         return;
       }
 
@@ -1898,23 +2522,87 @@
       }
     }
 
-    async function reloadMessages() {
-      setPanelBusy(true, "Reloading conversation...");
+    async function startScan() {
+      if (!api) {
+        setPanelStatus("The capture service is not ready.", true);
+        return;
+      }
+
+      const job = captureJobs.start(getSelectedCaptureMode());
+      messages = [];
+      selectedIds = new Set();
+      resetIncompleteOverride();
+      renderMessageList();
+      renderCompletenessReport(null);
+      setPanelPhase("scanning", `Starting one ${formatCaptureMode(job.captureMode)} capture job...`);
 
       try {
-        currentCaptureMode = getSelectedCaptureMode();
-        const result = await api.loadMessages((message) => setPanelStatus(message), {
-          captureMode: currentCaptureMode
+        const result = await api.loadMessages((message) => {
+          if (captureJobs.isCurrent(job)) {
+            setPanelStatus(message);
+          }
+        }, {
+          captureMode: job.captureMode,
+          signal: job.signal
         });
-        messages = result.messages || result;
-        currentDebugLog = result.debugLog || null;
+
+        if (!captureJobs.isCurrent(job)) {
+          return;
+        }
+
+        setPanelPhase("validating", "Validating conversation structure and media coverage...");
+        throwIfCaptureCancelled(job.signal);
+        const completeness = result?.completeness || buildCaptureCompletenessReport(result?.messages || result, {
+          captureMode: job.captureMode,
+          reconciliationReport: result?.reconciliationReport || null
+        });
+        const snapshot = captureJobs.commit(job, {
+          ...result,
+          messages: result?.messages || result,
+          completeness
+        });
+        messages = [...snapshot.messages];
         selectedIds = new Set(messages.map((message) => message.id));
         renderMessageList();
+        renderCompletenessReport(snapshot.completeness);
         updateSelectionSummary();
-        setPanelBusy(false, `Ready. ${messages.length} messages found with ${formatCaptureMode(currentCaptureMode)}.`);
+
+        if (snapshot.completeness?.complete) {
+          setPanelPhase("ready", `Ready. ${messages.length} messages validated with ${formatCaptureMode(snapshot.captureMode)}.`);
+        } else {
+          setPanelPhase("incomplete", formatIncompleteCaptureStatus(snapshot.completeness), true);
+        }
       } catch (error) {
-        setPanelBusy(false, error.message || String(error), true);
+        const isCurrent = captureJobs.isCurrent(job);
+        captureJobs.fail(job);
+
+        if (isCaptureCancelledError(error) || job.signal.aborted || !isCurrent) {
+          return;
+        }
+
+        messages = [];
+        selectedIds = new Set();
+        renderMessageList();
+        renderCompletenessReport(null);
+        setPanelPhase("idle", error.message || String(error), true);
       }
+    }
+
+    function cancelActiveScan(reason) {
+      const cancelledJob = captureJobs.cancel(reason);
+
+      if (!cancelledJob) {
+        return false;
+      }
+
+      messages = [];
+      selectedIds = new Set();
+      captureJobs.clearSnapshot();
+      resetIncompleteOverride();
+      renderMessageList();
+      renderCompletenessReport(null);
+      setPanelPhase("cancelled", reason);
+      return true;
     }
 
     function createMessageRow(message) {
@@ -1957,7 +2645,7 @@
       const node = resolveMessageNode(message);
 
       if (!node?.isConnected) {
-        setPanelStatus("That message is not currently mounted in the page. Try Reload messages.", true);
+        setPanelStatus("That message is not currently mounted in the page. Run the scan again if you need to jump to it.", true);
         return;
       }
 
@@ -2010,11 +2698,10 @@
       const selected = messages.filter((message) => selectedIds.has(message.id));
       const userCount = selected.filter((message) => message.role === "user").length;
       const assistantCount = selected.filter((message) => message.role === "assistant").length;
-      const exportButton = shadow.querySelector("[data-action='export']");
 
-      exportButton.disabled = !selected.length;
       setPanelStatus(`${selected.length}/${messages.length} selected. ${userCount} user, ${assistantCount} assistant.`);
       updateExportButtonLabel();
+      updateExportAvailability();
     }
 
     function getSelectedMessages() {
@@ -2027,16 +2714,29 @@
 
     function exportCheckedMessages() {
       const selected = getSelectedMessages();
+      const snapshot = captureJobs.getLoadedSnapshot();
 
       if (!selected.length) {
         setPanelStatus("Select at least one message first.", true);
         return;
       }
 
+      if (!snapshot) {
+        setPanelStatus("Run and validate a scan before exporting.", true);
+        return;
+      }
+
+      if (!snapshot.completeness?.complete && !allowsIncompleteExport()) {
+        setPanelStatus("This capture is incomplete. Review the missing coverage and explicitly enable the override to export it.", true);
+        return;
+      }
+
       runExport(selected, {
         format: "bundle",
-        captureMode: getSelectedCaptureMode(),
-        debugLog: shouldDownloadDebugLog() ? currentDebugLog : null
+        captureMode: snapshot.captureMode,
+        completeness: snapshot.completeness,
+        allowIncomplete: allowsIncompleteExport(),
+        debugLog: shouldDownloadDebugLog() ? snapshot.debugLog : null
       });
     }
 
@@ -2045,11 +2745,13 @@
         const busyLabel = options.format === "bundle"
           ? "Generating export bundle..."
           : "Exporting selected messages...";
-        setPanelBusy(true, busyLabel);
+        setPanelPhase("exporting", busyLabel);
         const result = await api.exportMessages(selected, options);
-        setPanelBusy(false, formatExportResult(result));
+        const snapshot = captureJobs.getLoadedSnapshot();
+        setPanelPhase(snapshot?.completeness?.complete ? "ready" : "incomplete", formatExportResult(result));
       } catch (error) {
-        setPanelBusy(false, error.message || String(error), true);
+        const snapshot = captureJobs.getLoadedSnapshot();
+        setPanelPhase(snapshot?.completeness?.complete ? "ready" : snapshot ? "incomplete" : "idle", error.message || String(error), true);
       }
     }
 
@@ -2073,21 +2775,127 @@
 
     function updateExportButtonLabel() {
       const exportButton = shadow.querySelector("[data-action='export']");
-      exportButton.textContent = `Export Loaded ${formatCaptureMode(getSelectedCaptureMode())} Bundle`;
+      const snapshot = captureJobs.getLoadedSnapshot();
+      exportButton.textContent = snapshot
+        ? `Export Loaded ${formatCaptureMode(snapshot.captureMode)} Bundle`
+        : "Export Bundle";
     }
 
     function shouldDownloadDebugLog() {
       return Boolean(shadow.querySelector("[data-option='debug-log']")?.checked);
     }
 
-    function setPanelBusy(isBusy, message, isError = false) {
-      shadow.querySelector("[data-action='export']").disabled = isBusy || selectedIds.size === 0;
-      shadow.querySelector("[data-action='refresh']").disabled = isBusy;
+    function setPanelPhase(nextPhase, message = "", isError = false) {
+      panelPhase = nextPhase;
+      const isCaptureBusy = nextPhase === "scanning" || nextPhase === "validating";
+      const isBusy = isCaptureBusy || nextPhase === "exporting";
+      const hasMessages = messages.length > 0;
+      const modeSelect = shadow.querySelector("[data-option='capture-mode']");
+      const startButton = shadow.querySelector("[data-action='start-scan']");
+      const cancelButton = shadow.querySelector("[data-action='cancel-scan']");
+
+      modeSelect.disabled = isBusy;
+      startButton.disabled = isBusy || !api;
+      startButton.textContent = captureJobs.getLoadedSnapshot() ? "Scan Again" : "Start Scan";
+      cancelButton.disabled = !isCaptureBusy;
+      cancelButton.hidden = !isCaptureBusy;
+
+      for (const action of shadow.querySelectorAll(".cgce-action")) {
+        action.disabled = isBusy || !hasMessages;
+      }
+
       shadow.querySelector(".cgce-panel").classList.toggle("is-busy", isBusy);
+      shadow.querySelector(".cgce-panel").dataset.phase = nextPhase;
+      updateExportAvailability();
 
       if (message) {
         setPanelStatus(message, isError);
       }
+    }
+
+    function updateExportAvailability() {
+      const exportButton = shadow.querySelector("[data-action='export']");
+      const snapshot = captureJobs.getLoadedSnapshot();
+      const phaseAllowsExport = panelPhase === "ready" || panelPhase === "incomplete";
+      const completenessAllowsExport = Boolean(snapshot?.completeness?.complete || allowsIncompleteExport());
+      exportButton.disabled = !phaseAllowsExport
+        || !snapshot
+        || selectedIds.size === 0
+        || !completenessAllowsExport;
+      updateOverrideVisibility();
+    }
+
+    function allowsIncompleteExport() {
+      return Boolean(shadow.querySelector("[data-option='allow-incomplete']")?.checked);
+    }
+
+    function resetIncompleteOverride() {
+      const checkbox = shadow.querySelector("[data-option='allow-incomplete']");
+
+      if (checkbox) {
+        checkbox.checked = false;
+      }
+    }
+
+    function updateOverrideVisibility() {
+      const wrapper = shadow.querySelector("[data-control='incomplete-override']");
+      const snapshot = captureJobs.getLoadedSnapshot();
+
+      if (wrapper) {
+        wrapper.hidden = !snapshot || Boolean(snapshot.completeness?.complete);
+      }
+    }
+
+    function renderCompletenessReport(report) {
+      const container = shadow.querySelector(".cgce-integrity");
+      container.replaceChildren();
+      container.hidden = !report;
+
+      if (!report) {
+        return;
+      }
+
+      container.classList.toggle("is-incomplete", !report.complete);
+      const heading = document.createElement("strong");
+      heading.textContent = report.complete ? "Completeness check passed" : "Incomplete capture";
+      const metrics = document.createElement("span");
+      metrics.textContent = [
+        `${report.captured.uniqueIdentities}/${report.expected.uniqueIdentities} identities`,
+        `${report.captured.userMessages}/${report.expected.userMessages} user`,
+        `${report.captured.assistantMessages}/${report.expected.assistantMessages} assistant`,
+        `${report.images.references} image refs`,
+        `${report.images.uniqueIdentities} unique`,
+        `${report.images.embedded} embedded`,
+        `${report.images.deferred} deferred`,
+        `${report.images.failures} failed`
+      ].join(" | ");
+      container.append(heading, metrics);
+
+      if (report.issues.length) {
+        const list = document.createElement("ul");
+
+        for (const issue of report.issues) {
+          const item = document.createElement("li");
+          item.textContent = issue.message;
+          list.append(item);
+        }
+
+        container.append(list);
+      }
+
+      if (report.warnings.length) {
+        const warning = document.createElement("span");
+        warning.textContent = report.warnings.map((item) => item.message).join(" ");
+        container.append(warning);
+      }
+    }
+
+    function formatIncompleteCaptureStatus(report) {
+      const missing = report?.missingConversationOrders || [];
+      const missingSummary = missing.length
+        ? ` Missing order(s): ${formatNumberRanges(missing)}.`
+        : "";
+      return `Incomplete: ${report?.captured?.messages || 0} captured, ${report?.captured?.userMessages || 0} user + ${report?.captured?.assistantMessages || 0} assistant.${missingSummary} Normal export is blocked.`;
     }
 
     function setPanelStatus(message, isError = false) {
@@ -2288,6 +3096,33 @@
             color: #b42318;
           }
 
+          .cgce-integrity {
+            display: grid;
+            gap: 4px;
+            padding: 9px 10px;
+            border: 1px solid #b7dfd7;
+            border-radius: 6px;
+            background: #f0fdfa;
+            color: #134e4a;
+            font-size: 11px;
+            line-height: 1.4;
+          }
+
+          .cgce-integrity.is-incomplete {
+            border-color: #f2b8b5;
+            background: #fff5f4;
+            color: #8a1c13;
+          }
+
+          .cgce-integrity ul {
+            margin: 2px 0 0;
+            padding-left: 18px;
+          }
+
+          [hidden] {
+            display: none !important;
+          }
+
           .cgce-option {
             display: flex;
             align-items: center;
@@ -2342,6 +3177,42 @@
             padding: 0 10px;
           }
 
+          .cgce-scan-controls {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+          }
+
+          .cgce-scan,
+          .cgce-cancel {
+            min-height: 36px;
+            border: 1px solid #0f766e;
+            border-radius: 7px;
+            background: #ffffff;
+            color: #0f766e;
+            font-size: 13px;
+            font-weight: 750;
+            cursor: pointer;
+          }
+
+          .cgce-scan {
+            background: #0f766e;
+            color: #ffffff;
+          }
+
+          .cgce-cancel {
+            border-color: #cfd7e3;
+            color: #334155;
+          }
+
+          .cgce-scan:disabled,
+          .cgce-cancel:disabled,
+          .cgce-action:disabled,
+          .cgce-select:disabled {
+            cursor: not-allowed;
+            opacity: 0.58;
+          }
+
           .cgce-export {
             min-height: 40px;
             border: 0;
@@ -2384,7 +3255,6 @@
               <p class="cgce-subtitle">Choose a capture mode, review loaded turns, then export the bundle.</p>
             </div>
             <div class="cgce-icon-buttons">
-              <button class="cgce-icon-button" type="button" data-action="refresh" title="Reload messages" aria-label="Reload messages">R</button>
               <button class="cgce-icon-button" type="button" data-action="close" title="Close" aria-label="Close">X</button>
             </div>
           </header>
@@ -2397,13 +3267,14 @@
           <div class="cgce-list" role="list"></div>
           <footer class="cgce-footer">
             <div class="cgce-status" role="status" aria-live="polite"></div>
+            <div class="cgce-integrity" hidden></div>
             <div class="cgce-footer-row">
               <label class="cgce-format">
                 <span>Mode</span>
                 <select class="cgce-select" data-option="capture-mode">
-                  <option value="hybrid" selected>Hybrid</option>
+                  <option value="full" selected>Full (Recommended)</option>
+                  <option value="hybrid">Hybrid (Experimental for ImageGen)</option>
                   <option value="fast">Fast</option>
-                  <option value="full">Full</option>
                 </select>
               </label>
               <label class="cgce-option">
@@ -2411,7 +3282,15 @@
                 <span>Debug log</span>
               </label>
             </div>
-            <button class="cgce-export" type="button" data-action="export">Export Loaded Hybrid Bundle</button>
+            <div class="cgce-scan-controls">
+              <button class="cgce-scan" type="button" data-action="start-scan">Start Scan</button>
+              <button class="cgce-cancel" type="button" data-action="cancel-scan" hidden disabled>Cancel</button>
+            </div>
+            <label class="cgce-option" data-control="incomplete-override" hidden>
+              <input type="checkbox" data-option="allow-incomplete">
+              <span>Export this incomplete snapshot anyway</span>
+            </label>
+            <button class="cgce-export" type="button" data-action="export" disabled>Export Bundle</button>
           </footer>
         </aside>
       `;
@@ -2873,6 +3752,7 @@
     primaryMessage.imageCount = Math.max(primaryMessage.imageCount || 0, previousMessage.imageCount || 0);
     primaryMessage.fileCount = Math.max(primaryMessage.fileCount || 0, previousMessage.fileCount || 0);
     primaryMessage.imagesEmbedded = Math.max(primaryMessage.imagesEmbedded || 0, previousMessage.imagesEmbedded || 0);
+    primaryMessage.imagesDeferred = Math.max(primaryMessage.imagesDeferred || 0, previousMessage.imagesDeferred || 0);
     primaryMessage.imagesFailed = Math.max(primaryMessage.imagesFailed || 0, previousMessage.imagesFailed || 0);
 
     return primaryMessage;
@@ -3915,6 +4795,8 @@
   }
 
   async function enrichVisibleThinkingFlyouts(messages, debugLog = null, options = {}) {
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     const snapshots = getVisibleThinkingFlyoutSnapshots();
     let applied = 0;
 
@@ -3925,20 +4807,77 @@
     });
 
     for (const snapshot of snapshots) {
+      throwIfCaptureCancelled(signal);
       applied += applyThinkingFlyoutSnapshot(snapshot, messages) ? 1 : 0;
     }
 
     const opened = await enrichThinkingFlyoutsByOpeningTriggers(messages, debugLog, options);
+    throwIfCaptureCancelled(signal);
+    const settled = await settleVisibleThinkingFlyoutSnapshots(messages, options);
+    throwIfCaptureCancelled(signal);
 
     debugLog?.event("thinkingFlyout.enriched", {
       available: snapshots.length,
       visibleApplied: applied,
       autoAttempted: opened.attempted,
-      autoApplied: opened.applied
+      autoApplied: opened.applied,
+      settled: settled.settled,
+      settledSnapshots: settled.snapshotCount,
+      settledSourceCount: settled.sourceCount
     });
   }
 
+  async function settleVisibleThinkingFlyoutSnapshots(messages, options = {}) {
+    const signal = options.signal || null;
+    const timeoutMs = Number.isFinite(options.settleTimeoutMs)
+      ? Math.max(0, options.settleTimeoutMs)
+      : THINKING_FLYOUT_SETTLE_TIMEOUT_MS;
+    const startedAt = Date.now();
+    let previousSignature = "";
+    let stablePasses = 0;
+    let snapshotCount = 0;
+    let sourceCount = 0;
+    let sawPanel = false;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      throwIfCaptureCancelled(signal);
+      const snapshots = getVisibleThinkingFlyoutSnapshots();
+
+      if (snapshots.length) {
+        sawPanel = true;
+        snapshotCount = snapshots.length;
+        sourceCount = snapshots.reduce((sum, snapshot) => sum + (snapshot.sources?.length || 0), 0);
+
+        for (const snapshot of snapshots) {
+          applyThinkingFlyoutSnapshot(snapshot, messages);
+        }
+
+        const signature = snapshots
+          .map((snapshot) => `${snapshot.signature}:${snapshot.sources?.length || 0}`)
+          .join("|");
+        stablePasses = signature === previousSignature ? stablePasses + 1 : 1;
+        previousSignature = signature;
+
+        const hasCompletedStatus = snapshots.some((snapshot) => snapshot.completed);
+        const hasActiveStatus = snapshots.some((snapshot) => snapshot.active);
+        const elapsed = Date.now() - startedAt;
+
+        if (stablePasses >= THINKING_FLYOUT_STABLE_PASSES && (hasCompletedStatus || (!hasActiveStatus && elapsed >= 900))) {
+          return { settled: true, snapshotCount, sourceCount };
+        }
+      } else if (!sawPanel && Date.now() - startedAt >= THINKING_FLYOUT_NO_PANEL_GRACE_MS) {
+        return { settled: false, snapshotCount: 0, sourceCount: 0 };
+      }
+
+      await sleep(THINKING_FLYOUT_SETTLE_POLL_MS);
+      throwIfCaptureCancelled(signal);
+    }
+
+    return { settled: sawPanel, snapshotCount, sourceCount };
+  }
+
   async function enrichThinkingFlyoutsByOpeningTriggers(messages, debugLog = null, options = {}) {
+    const signal = options.signal || null;
     const limit = Number.isFinite(options.autoOpenLimit) ? options.autoOpenLimit : THINKING_FLYOUT_AUTO_OPEN_LIMIT;
     const assistantMessages = messages
       .filter((message) => message.role === "assistant" && isThinThinkingMarkdown(message.thinkingMarkdown))
@@ -3954,11 +4893,13 @@
     });
 
     for (const message of assistantMessages) {
+      throwIfCaptureCancelled(signal);
       if (attempted >= limit) {
         break;
       }
 
       const triggerResult = await findMountedThinkingTriggerForMessage(message, options);
+      throwIfCaptureCancelled(signal);
       const trigger = triggerResult.trigger;
 
       if (!trigger) {
@@ -3982,7 +4923,7 @@
           beforeSnapshotCount: beforeSnapshots.length
         });
         trigger.click();
-        const snapshot = await waitForThinkingFlyoutSnapshot(beforeSignatures, THINKING_FLYOUT_OPEN_TIMEOUT_MS);
+        const snapshot = await waitForThinkingFlyoutSnapshot(beforeSignatures, THINKING_FLYOUT_OPEN_TIMEOUT_MS, signal);
         const wasApplied = snapshot ? applyThinkingFlyoutSnapshot(snapshot, messages, message) : false;
 
         debugLog?.event("thinkingFlyout.autoResult", {
@@ -3996,6 +4937,9 @@
           applied += 1;
         }
       } catch (error) {
+        if (isCaptureCancelledError(error)) {
+          throw error;
+        }
         debugLog?.event("thinkingFlyout.openFailed", {
           message: getThinkingDebugMessageInfo(message),
           error: error?.message || String(error)
@@ -4020,6 +4964,8 @@
   }
 
   async function findMountedThinkingTriggerForMessage(message, options = {}) {
+    const signal = options.signal || null;
+    throwIfCaptureCancelled(signal);
     const candidates = [
       message.sourceNode,
       message.sourceNode?.closest?.("[data-turn-id-container], [data-turn-container], [data-turn-id], [data-testid*='conversation-turn']"),
@@ -4039,6 +4985,7 @@
     }
 
     for (const candidate of uniqueElements(candidates)) {
+      throwIfCaptureCancelled(signal);
       const trigger = findThinkingTriggerInRoot(candidate);
       const candidateInfo = {
         source: "before-scroll",
@@ -4058,6 +5005,7 @@
 
       candidate.scrollIntoView?.({ block: "center", inline: "nearest" });
       await sleep(120);
+      throwIfCaptureCancelled(signal);
 
       const mountedTrigger = findThinkingTriggerInRoot(candidate);
       diagnostics.push({
@@ -4084,7 +5032,7 @@
       };
     }
 
-    const globalResult = await findGlobalThinkingTriggerForMessage(message);
+    const globalResult = await findGlobalThinkingTriggerForMessage(message, signal);
 
     if (globalResult.trigger) {
       diagnostics.push(...globalResult.candidates);
@@ -4115,7 +5063,8 @@
     return getAllTurnNodes().find((turn) => getConversationTurnNumber(turn) === number) || null;
   }
 
-  async function findGlobalThinkingTriggerForMessage(message) {
+  async function findGlobalThinkingTriggerForMessage(message, signal = null) {
+    throwIfCaptureCancelled(signal);
     const expectedStatus = normalizeThinkingStatus(message.thinkingMarkdown);
     const triggerScores = getGlobalThinkingTriggerScores(message, expectedStatus);
 
@@ -4144,6 +5093,7 @@
 
     best.root?.scrollIntoView?.({ block: "center", inline: "nearest" });
     await sleep(120);
+    throwIfCaptureCancelled(signal);
 
     return {
       trigger: best.trigger,
@@ -4155,7 +5105,7 @@
 
   function getGlobalThinkingTriggerScores(message, expectedStatus) {
     const triggers = [...document.querySelectorAll("button, [role='button']")]
-      .filter(isThinkingDetailTriggerElement);
+      .filter(isThinkingPanelTriggerElement);
     const sourceMessageId = message.sourceMessageId || "";
     const order = Number(message.order);
     const previewNeedle = getThinkingPreviewNeedle(message.preview || message.markdown || "");
@@ -4230,7 +5180,7 @@
       return null;
     }
 
-    return [...root.querySelectorAll("button, [role='button']")].find(isThinkingDetailTriggerElement) || null;
+    return [...root.querySelectorAll("button, [role='button']")].find(isThinkingPanelTriggerElement) || null;
   }
 
   function countThinkingTriggersInRoot(root) {
@@ -4238,7 +5188,11 @@
       return 0;
     }
 
-    return [...root.querySelectorAll("button, [role='button']")].filter(isThinkingDetailTriggerElement).length;
+    return [...root.querySelectorAll("button, [role='button']")].filter(isThinkingPanelTriggerElement).length;
+  }
+
+  function isThinkingPanelTriggerElement(element) {
+    return isThinkingDetailTriggerElement(element) || isThinkingSourceTriggerElement(element);
   }
 
   function isThinkingDetailTriggerElement(element) {
@@ -4259,11 +5213,29 @@
     return true;
   }
 
-  async function waitForThinkingFlyoutSnapshot(previousSignatures, timeoutMs) {
+  function isThinkingSourceTriggerElement(element) {
+    if (!element?.matches || element.closest("#chatgpt-exporter-selector-host, nav, header, aside, [role='menu']")) {
+      return false;
+    }
+
+    const cueTexts = [
+      element.getAttribute("aria-label") || "",
+      element.getAttribute("title") || "",
+      element.getAttribute("data-testid") || "",
+      getElementText(element)
+    ]
+      .map((text) => String(text).replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+
+    return cueTexts.some((text) => THINKING_SOURCE_TRIGGER_RE.test(text));
+  }
+
+  async function waitForThinkingFlyoutSnapshot(previousSignatures, timeoutMs, signal = null) {
     const startedAt = Date.now();
     let bestSnapshot = null;
 
     while (Date.now() - startedAt < timeoutMs) {
+      throwIfCaptureCancelled(signal);
       const snapshots = getVisibleThinkingFlyoutSnapshots();
       const freshSnapshot = snapshots.find((snapshot) => !previousSignatures.has(snapshot.signature) && snapshot.markdown);
 
@@ -4273,6 +5245,7 @@
 
       bestSnapshot = snapshots.find((snapshot) => snapshot.markdown) || bestSnapshot;
       await sleep(100);
+      throwIfCaptureCancelled(signal);
     }
 
     return previousSignatures.size ? null : bestSnapshot;
@@ -4292,9 +5265,9 @@
 
   function getThinkingFlyoutDiagnostic() {
     const roots = [
-      ...document.querySelectorAll('[data-stage-thread-flyout="true"], [data-testid="stage-thread-flyout"], [data-testid="screen-threadFlyout"]')
+      ...document.querySelectorAll('[data-stage-thread-flyout="true"], [data-testid="stage-thread-flyout"], [data-testid="screen-threadFlyout"], [data-testid="screen-threadFlyOut"]')
     ];
-    const screenFlyouts = [...document.querySelectorAll('[data-testid="screen-threadFlyout"]')];
+    const screenFlyouts = [...document.querySelectorAll('[data-testid="screen-threadFlyout"], [data-testid="screen-threadFlyOut"]')];
     const reasoningPanels = [...document.querySelectorAll([
       'section[aria-label*="\u63a8\u7406"]',
       'section[aria-label*="\u601d\u8003"]',
@@ -4319,6 +5292,7 @@
   function getThinkingSnapshotDebug(snapshot) {
     return {
       markdownLength: snapshot.markdown?.length || 0,
+      sourceCount: snapshot.sources?.length || 0,
       status: snapshot.status || "",
       duration: snapshot.duration || "",
       signature: snapshot.signature || "",
@@ -4343,7 +5317,7 @@
 
   function getVisibleThinkingFlyoutSnapshots() {
     const roots = uniqueElements([
-      ...document.querySelectorAll('[data-stage-thread-flyout="true"], [data-testid="stage-thread-flyout"], [data-testid="screen-threadFlyout"]')
+      ...document.querySelectorAll('[data-stage-thread-flyout="true"], [data-testid="stage-thread-flyout"], [data-testid="screen-threadFlyout"], [data-testid="screen-threadFlyOut"]')
     ]);
     const panels = [];
 
@@ -4354,6 +5328,7 @@
 
       panels.push(...root.querySelectorAll([
         '[data-testid="screen-threadFlyout"]',
+        '[data-testid="screen-threadFlyOut"]',
         'section[aria-label*="\u63a8\u7406"]',
         'section[aria-label*="\u601d\u8003"]',
         'section[aria-label*="reasoning" i]',
@@ -4397,15 +5372,23 @@
 
   function extractThinkingFlyoutSnapshot(panel) {
     const lines = getThinkingFlyoutLines(panel);
-    const markdown = formatThinkingFlyoutLinesAsMarkdown(lines);
+    const sources = extractThinkingFlyoutSources(panel);
+    const markdown = extractThinkingFlyoutStructuredMarkdown(panel, lines, sources)
+      || formatThinkingFlyoutLinesAsMarkdown(lines, sources);
     const status = lines.find((line) => THINKING_STATUS_RE.test(line)) || "";
 
     return {
       panel,
       markdown,
+      sources,
       status,
+      completed: lines.some((line) => THINKING_FLYOUT_DONE_RE.test(line)),
+      active: lines.some((line) => THINKING_FLYOUT_ACTIVE_RE.test(line)),
       duration: extractThinkingDuration(status || getElementText(panel)),
-      signature: hashString(markdown || getElementText(panel))
+      signature: hashString([
+        markdown,
+        ...sources.map((source) => `${source.label}\n${source.url}`)
+      ].join("\n"))
     };
   }
 
@@ -4417,7 +5400,7 @@
     const result = [];
 
     for (const line of lines) {
-      if (THINKING_FLYOUT_STOP_RE.test(line)) {
+      if (THINKING_FLYOUT_STOP_RE.test(line) || THINKING_FLYOUT_SOURCES_RE.test(line)) {
         break;
       }
 
@@ -4429,6 +5412,280 @@
     }
 
     return result;
+  }
+
+  function extractThinkingFlyoutStructuredMarkdown(panel, lines = [], sources = []) {
+    const entries = extractThinkingFlyoutStepEntries(panel);
+
+    if (!entries.length) {
+      return "";
+    }
+
+    const items = [];
+
+    for (const entry of entries) {
+      const blocks = extractThinkingFlyoutStepBlocks(entry.contentRoot);
+
+      if (!blocks.length) {
+        continue;
+      }
+
+      const renderedBlocks = blocks.map(renderThinkingFlyoutStructuredBlock).filter(Boolean);
+
+      if (!renderedBlocks.length) {
+        continue;
+      }
+
+      items.push([
+        `#### ${entry.heading}`,
+        renderedBlocks.join("\n\n")
+      ].join("\n\n"));
+    }
+
+    if (!items.length) {
+      return "";
+    }
+
+    const statusLines = lines
+      .filter((line) => THINKING_STATUS_RE.test(line) || THINKING_FLYOUT_DONE_RE.test(line))
+      .map((line) => `✓ ${line}`);
+    const sourceLines = sources.map((source) => {
+      const label = escapeMarkdownLinkLabel(source.label || compactUrlLabel(source.url));
+      return `- [Source: ${label}](${source.url})`;
+    });
+
+    return cleanMarkdown([
+      items.join("\n\n"),
+      statusLines.join("\n"),
+      sourceLines.length ? `### Sources\n\n${sourceLines.join("\n")}` : ""
+    ].filter(Boolean).join("\n\n"));
+  }
+
+  function extractThinkingFlyoutStepEntries(panel) {
+    if (!panel?.querySelectorAll) {
+      return [];
+    }
+
+    const entries = [];
+    const seenContainers = new Set();
+
+    for (const element of panel.querySelectorAll("div")) {
+      const className = String(element.className || "");
+      const heading = getElementText(element);
+
+      if (!isVisibleElement(element)
+        || !className.includes("text-token-text-primary")
+        || !className.includes("text-[14px]")
+        || !heading
+        || heading.length > 140
+        || element.querySelector("pre, p, ul, ol, blockquote")) {
+        continue;
+      }
+
+      if (THINKING_FLYOUT_TITLE_RE.test(heading)
+        || THINKING_STATUS_RE.test(heading)
+        || THINKING_FLYOUT_DONE_RE.test(heading)) {
+        continue;
+      }
+
+      const location = findThinkingFlyoutStepLocation(element, panel);
+
+      if (!location || seenContainers.has(location.container)) {
+        continue;
+      }
+
+      seenContainers.add(location.container);
+      entries.push({
+        heading: heading.replace(/\s+/g, " ").trim(),
+        contentRoot: location.contentRoot,
+        container: location.container
+      });
+    }
+
+    return entries;
+  }
+
+  function findThinkingFlyoutStepLocation(heading, panel) {
+    let current = heading.parentElement;
+
+    while (current && current !== panel) {
+      const contentRoot = Array.from(current.children || [])
+        .find((child) => !child.contains(heading) && hasThinkingFlyoutStructuredContent(child));
+
+      if (contentRoot) {
+        return { container: current, contentRoot };
+      }
+
+      current = current.parentElement;
+    }
+
+    return null;
+  }
+
+  function hasThinkingFlyoutStructuredContent(element) {
+    return Boolean(element?.querySelector?.("p, pre, ul, ol, blockquote, h1, h2, h3, h4, h5, h6"));
+  }
+
+  function extractThinkingFlyoutStepBlocks(contentRoot) {
+    if (!contentRoot?.querySelectorAll) {
+      return [];
+    }
+
+    const outerPreNodes = Array.from(contentRoot.querySelectorAll("pre"))
+      .filter((pre) => !pre.parentElement?.closest("pre"));
+    const outerPreSet = new Set(outerPreNodes);
+    const nodes = Array.from(contentRoot.querySelectorAll("p, pre, ul, ol, blockquote, h1, h2, h3, h4, h5, h6"))
+      .filter((node) => outerPreSet.has(node) || !node.closest("pre"));
+    const blocks = [];
+
+    for (const node of nodes) {
+      if (node.tagName === "PRE") {
+        if (!outerPreSet.has(node)) {
+          continue;
+        }
+
+        const codeBlock = extractThinkingFlyoutCodeCard(node);
+
+        if (codeBlock) {
+          blocks.push(codeBlock);
+        }
+        continue;
+      }
+
+      if (node.matches("UL, OL")) {
+        const lines = Array.from(node.querySelectorAll(":scope > li"))
+          .map((item) => getElementText(item))
+          .filter(Boolean)
+          .map((line) => `- ${line}`);
+
+        if (lines.length) {
+          blocks.push({ kind: "text", text: lines.join("\n") });
+        }
+        continue;
+      }
+
+      const text = getElementText(node);
+
+      if (text) {
+        blocks.push({
+          kind: node.tagName === "BLOCKQUOTE" ? "quote" : "text",
+          text
+        });
+      }
+    }
+
+    return blocks;
+  }
+
+  function extractThinkingFlyoutCodeCard(pre) {
+    const nestedPres = Array.from(pre.querySelectorAll("pre"));
+    const commandPre = nestedPres.find((candidate) => String(candidate.className || "").includes("cm-content"))
+      || nestedPres.find((candidate) => candidate.querySelector("code"))
+      || (pre.querySelector("code") ? pre.querySelector("code").closest("pre") : null);
+    const labelNode = Array.from(pre.querySelectorAll("div, span"))
+      .find((candidate) => {
+        const className = String(candidate.className || "");
+        const value = getElementText(candidate);
+        return className.includes("font-medium")
+          && value.length <= 32
+          && THINKING_FLYOUT_CODE_TITLE_RE.test(value);
+      });
+    const label = labelNode ? getElementText(labelNode) : "Code";
+    const rawCode = commandPre
+      ? getPreservedThinkingFlyoutText(commandPre)
+      : pre.querySelector("code")
+        ? getPreservedThinkingFlyoutText(pre.querySelector("code"))
+        : getPreservedThinkingFlyoutText(pre);
+    const codeLines = stripThinkingFlyoutCodeLabel(rawCode, label);
+    const resultLines = nestedPres
+      .filter((candidate) => candidate !== commandPre)
+      .map(getPreservedThinkingFlyoutText)
+      .flatMap((value) => value ? value.split("\n") : [])
+      .filter((line, index, all) => line || index === 0 || all[index - 1]);
+
+    if (!codeLines.length && !resultLines.length) {
+      return null;
+    }
+
+    return {
+      kind: "code",
+      label,
+      codeLines,
+      resultLines
+    };
+  }
+
+  function getPreservedThinkingFlyoutText(element) {
+    return String(element?.innerText || element?.textContent || "")
+      .replace(/\r\n?/g, "\n")
+      .trim();
+  }
+
+  function stripThinkingFlyoutCodeLabel(text, label) {
+    const lines = String(text || "").split("\n");
+
+    if (lines.length && label && lines[0].trim() === label) {
+      lines.shift();
+    }
+
+    return lines;
+  }
+
+  function renderThinkingFlyoutStructuredBlock(block) {
+    if (block.kind === "code") {
+      const sections = [
+        `##### ${block.label || "Code"}`,
+        renderThinkingCodeFence(block.codeLines, "text")
+      ];
+
+      if (block.resultLines.length) {
+        sections.push(`##### Result\n\n${renderThinkingCodeFence(block.resultLines, "text")}`);
+      }
+
+      return sections.join("\n\n");
+    }
+
+    if (block.kind === "quote") {
+      return block.text.split("\n").map((line) => `> ${line}`).join("\n");
+    }
+
+    return block.text;
+  }
+
+  function extractThinkingFlyoutSources(panel) {
+    if (!panel?.querySelectorAll) {
+      return [];
+    }
+
+    const sources = [];
+    const seen = new Set();
+
+    for (const anchor of panel.querySelectorAll("a[href]")) {
+      const href = String(anchor.href || anchor.getAttribute("href") || "").trim();
+
+      if (!/^https?:\/\//i.test(href)) {
+        continue;
+      }
+
+      const label = getElementText(anchor).replace(/\s+/g, " ").trim();
+      const key = `${label}\n${href}`;
+
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      sources.push({
+        label: label.slice(0, 180) || compactUrlLabel(href),
+        url: href
+      });
+
+      if (sources.length >= 60) {
+        break;
+      }
+    }
+
+    return sources;
   }
 
   function isThinkingFlyoutNoiseLine(line) {
@@ -4447,7 +5704,7 @@
       || /^\u5173\u95ed$/.test(line);
   }
 
-  function formatThinkingFlyoutLinesAsMarkdown(lines) {
+  function formatThinkingFlyoutLinesAsMarkdown(lines, sources = []) {
     const contentLines = [];
     const statusLines = [];
 
@@ -4465,18 +5722,124 @@
       const line = contentLines[index];
       const next = contentLines[index + 1] || "";
 
+      if (THINKING_FLYOUT_STEP_LABEL_RE.test(line)) {
+        const countMatch = next.match(/^[\u00b7:]\s*(\d+)$/);
+        const count = countMatch ? countMatch[1] : "";
+        items.push(`#### ${line}${count ? ` (${count})` : ""}`);
+        if (countMatch) {
+          index += 1;
+        }
+        continue;
+      }
+
+      if (THINKING_FLYOUT_CODE_TITLE_RE.test(line) && next) {
+        const block = collectThinkingCodeBlock(contentLines, index + 1);
+        items.push([
+          `##### ${line}`,
+          renderThinkingCodeFence(block.codeLines, "text"),
+          block.resultLines.length ? `##### Result\n\n${renderThinkingCodeFence(block.resultLines, "text")}` : ""
+        ].filter(Boolean).join("\n\n"));
+        index = block.endIndex;
+        continue;
+      }
+
+      if (isThinkingFlyoutStepHeadingSafe(line, next)) {
+        items.push(`#### ${line}`);
+        continue;
+      }
+
       if (next && isLikelyThinkingFlyoutHeadingSafe(line, next)) {
         items.push(`- **${line}**\n  ${next}`);
         index += 1;
       } else {
-        items.push(`- ${line}`);
+        items.push(formatThinkingFlyoutContentLine(line));
       }
     }
 
+    const sourceLines = sources.map((source) => {
+      const label = escapeMarkdownLinkLabel(source.label || compactUrlLabel(source.url));
+      return `- [Source: ${label}](${source.url})`;
+    });
+
     return cleanMarkdown([
       items.join("\n"),
-      statusLines.map((line) => `\u2713 ${line}`).join("\n")
+      statusLines.map((line) => `\u2713 ${line}`).join("\n"),
+      sourceLines.length ? `### Sources\n\n${sourceLines.join("\n")}` : ""
     ].filter(Boolean).join("\n\n"));
+  }
+
+  function isThinkingFlyoutStepHeadingSafe(line, nextLine) {
+    const value = String(line || "").trim();
+    const next = String(nextLine || "").trim();
+
+    return Boolean(
+      value
+      && next
+      && value.length <= 52
+      && (next.length >= 24 || THINKING_FLYOUT_CODE_TITLE_RE.test(next))
+      && !THINKING_FLYOUT_STEP_LABEL_RE.test(value)
+      && !THINKING_FLYOUT_CODE_TITLE_RE.test(value)
+      && !THINKING_STATUS_RE.test(value)
+      && !THINKING_FLYOUT_DONE_RE.test(value)
+      && !THINKING_FLYOUT_RESULT_RE.test(value)
+      && !/^[-*+\u2022\u00b7]\s/.test(value)
+      && !/^https?:\/\//i.test(value)
+      && !/^(?:[\w.-]+\.)+[a-z]{2,}(?:\/|$)/i.test(value)
+      && !/[:=]$/.test(value)
+      && !/^\d{1,4}[\/-]\d{1,2}[\/-]\d{1,4}/.test(value)
+    );
+  }
+
+  function collectThinkingCodeBlock(lines, startIndex) {
+    const codeLines = [];
+    const resultLines = [];
+    let resultMode = false;
+    let index = startIndex;
+
+    for (; index < lines.length; index += 1) {
+      const line = String(lines[index] || "");
+      const next = lines[index + 1] || "";
+
+      if (
+        THINKING_FLYOUT_STEP_LABEL_RE.test(line)
+        || THINKING_FLYOUT_SOURCES_RE.test(line)
+        || THINKING_STATUS_RE.test(line)
+        || THINKING_FLYOUT_DONE_RE.test(line)
+        || isThinkingFlyoutStepHeadingSafe(line, next)
+      ) {
+        break;
+      }
+
+      if (!resultMode && THINKING_FLYOUT_RESULT_RE.test(line) && codeLines.length) {
+        resultMode = true;
+      }
+
+      (resultMode ? resultLines : codeLines).push(line);
+    }
+
+    return {
+      codeLines,
+      resultLines,
+      endIndex: Math.max(startIndex - 1, index - 1)
+    };
+  }
+
+  function renderThinkingCodeFence(lines, language = "text") {
+    const body = lines
+      .map((line) => String(line || "").replace(/```/g, "`` `"))
+      .join("\n")
+      .trim();
+    return `\`\`\`${language}\n${body}\n\`\`\``;
+  }
+
+  function formatThinkingFlyoutContentLine(line) {
+    const value = String(line || "").trim();
+
+    if (/^[-*+]\s+/.test(value) || /^\u2022\s+/.test(value) || /^-{3,}$/.test(value)) {
+      return value;
+    }
+
+    return `- ${value}`;
   }
 
   function isLikelyThinkingFlyoutHeading(line, nextLine) {
@@ -4525,7 +5888,9 @@
     }
 
     return assistantMessages.find((message) => isNodeInViewport(message.sourceNode) && isThinThinkingMarkdown(message.thinkingMarkdown))
+      || assistantMessages.find((message) => isNodeInViewport(message.sourceNode))
       || assistantMessages.find((message) => isThinThinkingMarkdown(message.thinkingMarkdown))
+      || assistantMessages[assistantMessages.length - 1]
       || assistantMessages[0];
   }
 
@@ -4546,7 +5911,10 @@
 
   function isThinThinkingMarkdown(markdown) {
     const value = cleanMarkdown(markdown);
-    return !value || value.length < 90 || (THINKING_STATUS_RE.test(value) && value.length < 160);
+    return !value
+      || /^fast\|/i.test(value)
+      || value.length < 90
+      || (THINKING_STATUS_RE.test(value) && value.length < 160);
   }
 
   function isVisibleElement(element) {
@@ -4698,6 +6066,10 @@
       state.skipElements = previousSkipElements;
     }
 
+    markdown = dedupeMarkdownImageReferences(markdown);
+    thinkingMarkdown = dedupeMarkdownImageReferences(thinkingMarkdown);
+    const serializedImageCount = countMarkdownImages(`${markdown}\n${thinkingMarkdown}`);
+
     return {
       role,
       sourceNode: node,
@@ -4713,9 +6085,10 @@
       serializationAttempts,
       codeBlockCount: state.codeBlockCount,
       fileCount: state.fileCount,
-      imageCount: state.imageCount,
-      imagesEmbedded: state.imagesEmbedded,
-      imagesFailed: state.imagesFailed,
+      imageCount: serializedImageCount,
+      imagesEmbedded: Math.min(serializedImageCount, state.imagesEmbedded),
+      imagesDeferred: Math.min(serializedImageCount, state.imagesDeferred),
+      imagesFailed: Math.max(0, state.imagesFailed),
       imageEvents: state.imageEvents
     };
   }
@@ -4726,6 +6099,7 @@
       fileCount: 0,
       imageCount: 0,
       imagesEmbedded: 0,
+      imagesDeferred: 0,
       imagesFailed: 0,
       imageEvents: [],
       includeHidden,
@@ -5479,18 +6853,25 @@
 
     if (!src) {
       state.imagesFailed += 1;
+      state.imageEvents?.push({
+        type: "img",
+        src: "",
+        ok: false,
+        reason: "image source is missing"
+      });
       return "";
     }
 
-    state.imagesFailed += 1;
+    state.imagesDeferred += 1;
     state.imageEvents?.push({
       type: "img",
       src,
-      ok: false,
+      ok: true,
       skipped: true,
-      reason: "base64 embedding disabled during message scan"
+      deferred: true,
+      reason: "base64 embedding deferred until export"
     });
-    return `![${escapeMarkdownLinkLabel(alt)}](${src})\n\n<!-- Image base64 embedding is temporarily disabled during scanning to avoid page side effects. -->`;
+    return `![${escapeMarkdownLinkLabel(alt)}](${src})\n\n<!-- Image base64 embedding is deferred until export to avoid page side effects. -->`;
   }
 
   async function backgroundImageElementToMarkdown(element, state) {

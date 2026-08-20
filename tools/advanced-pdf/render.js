@@ -9,6 +9,7 @@ const { spawnSync } = require("child_process");
 const MarkdownIt = require("markdown-it");
 const hljs = require("highlight.js");
 const { chromium } = require("playwright-core");
+const { normalizeEmbeddedImageSource } = require("./assets.js");
 
 const DEFAULT_OUTPUT_DIR = path.resolve(process.cwd(), "output", "pdf");
 const DEFAULT_HTML_DIR = path.resolve(process.cwd(), "tmp", "advanced-pdf");
@@ -245,7 +246,7 @@ function createMarkdownRenderer() {
     html: false,
     linkify: true,
     typographer: false,
-    breaks: false,
+    breaks: true,
     highlight(code, language) {
       const lang = normalizeLanguage(language);
       const highlighted = lang && hljs.getLanguage(lang)
@@ -295,10 +296,12 @@ function createMarkdownRenderer() {
 
   md.renderer.rules.image = (tokens, index, options, env) => {
     const token = tokens[index];
-    const src = token.attrGet("src") || "";
+    const source = token.attrGet("src") || "";
+    const embeddedSrc = normalizeEmbeddedImageSource(source);
+    const src = embeddedSrc || source;
     const alt = token.content || token.attrGet("alt") || "image";
     const registry = env?.imageRegistry;
-    const asset = registry?.bySrc?.get(src);
+    const asset = registry?.bySrc?.get(source) || registry?.bySrc?.get(src);
 
     if (!src.startsWith("data:image/") && !src.startsWith("file:")) {
       return renderRemoteMediaCard(src, alt);
@@ -1656,14 +1659,16 @@ function renderMessage(md, message, index, imageRegistry) {
         ${renderAssistantAvatar()}
       </div>
       <div class="assistant-main">
-        <div class="assistant-header">
-          <div class="assistant-title">
-            ${turnHeading}
-            ${time ? `<div class="message-time assistant-time">${time}</div>` : ""}
+        <div class="assistant-intro">
+          <div class="assistant-header">
+            <div class="assistant-title">
+              ${turnHeading}
+              ${time ? `<div class="message-time assistant-time">${time}</div>` : ""}
+            </div>
           </div>
+          ${thinking}
         </div>
         <div class="assistant-body">
-          ${thinking}
           <div class="assistant-content">${content}</div>
         </div>
       </div>
@@ -1773,9 +1778,12 @@ function renderAttachmentLead(markdown, imageRegistry) {
 
   return `<div class="user-attachments">${attachments.map((item) => {
     const typeClass = item.type === "file" ? "file" : "image";
-    const asset = item.type === "image" ? imageRegistry?.bySrc?.get(item.url) : null;
+    const imageSrc = item.type === "image" ? (normalizeEmbeddedImageSource(item.url) || item.url) : "";
+    const asset = item.type === "image"
+      ? imageRegistry?.bySrc?.get(item.url) || imageRegistry?.bySrc?.get(imageSrc)
+      : null;
     const content = asset
-      ? `<span class="attachment-thumb"><img src="${escapeAttr(item.url)}" alt="${escapeAttr(item.label)}"></span>`
+      ? `<span class="attachment-thumb"><img src="${escapeAttr(imageSrc)}" alt="${escapeAttr(item.label)}"></span>`
       : `<span class="attachment-icon">${item.type === "file" ? getFileExtensionLabel(item.label) : "IMG"}</span>`;
     const card = `<span class="attachment-card ${typeClass} ${asset ? "with-thumb image-preview-card" : ""}">
       ${content}
@@ -1798,15 +1806,13 @@ function extractLeadingAttachments(markdown) {
       continue;
     }
 
-    const image = trimmed.match(/^!\[([^\]]*)\]\(([^)]+)\)/);
-    const file = trimmed.match(/^\[File:\s*([^\]]+)\]/i);
+    const image = trimmed.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+    const file = trimmed.match(/^\[File:\s*([^\]]+)\](?:\(([^)]+)\))?$/i);
 
     if (image) {
       result.push({ type: "image", label: image[1] || "Image", url: image[2] || "" });
     } else if (file) {
       result.push({ type: "file", label: file[1] || "Attachment" });
-    } else {
-      break;
     }
 
     if (result.length >= 4) {
@@ -1840,17 +1846,19 @@ function buildImageRegistry(messages) {
 
   messages.forEach((message, messageIndex) => {
     for (const image of extractMarkdownImages(`${message.markdown || ""}\n${message.thinkingMarkdown || ""}`)) {
-      if (!image.src.startsWith("data:image/") || bySrc.has(image.src)) {
+      const src = normalizeEmbeddedImageSource(image.src);
+      if (!src || bySrc.has(src)) {
         continue;
       }
 
       const item = {
         id: `asset-image-${items.length + 1}`,
-        src: image.src,
+        src,
         alt: image.alt || `Image ${items.length + 1}`,
         messageNumber: messageIndex + 1
       };
       bySrc.set(image.src, item);
+      bySrc.set(src, item);
       items.push(item);
     }
   });
@@ -2661,6 +2669,12 @@ a {
   min-width: 0;
 }
 
+.assistant-intro {
+  min-width: 0;
+  break-inside: auto;
+  page-break-inside: auto;
+}
+
 .assistant-header {
   margin: 0 0 6px;
   display: flex;
@@ -2697,6 +2711,9 @@ a {
   border-radius: 9px;
   background: #faf8ff;
   break-inside: auto;
+  page-break-inside: auto;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
 .thinking h3 {
@@ -2705,6 +2722,8 @@ a {
   line-height: 1.25;
   color: #4c1d95;
   font-weight: 800;
+  break-after: avoid;
+  page-break-after: avoid;
 }
 
 .thinking .markdown-body {
@@ -2714,6 +2733,54 @@ a {
 
 .thinking ul {
   position: relative;
+}
+
+.thinking .markdown-body h4 {
+  display: table;
+  max-width: 100%;
+  margin: 12px 0 7px;
+  padding: 3px 9px;
+  border: 1px solid #ddd1fe;
+  border-radius: 999px;
+  background: #f0ebff;
+  color: #5b21b6;
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.thinking .markdown-body h4:first-child {
+  margin-top: 0;
+}
+
+.thinking .markdown-body h5 {
+  display: table;
+  max-width: 100%;
+  margin: 10px 0 6px;
+  padding: 2px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 10.5px;
+  line-height: 1.35;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+  break-after: avoid;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.thinking .markdown-body h5 + pre {
+  margin-top: 6px;
+}
+
+.thinking .markdown-body li {
+  break-inside: avoid;
+  page-break-inside: avoid;
 }
 
 .markdown-body {

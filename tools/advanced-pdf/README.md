@@ -2,7 +2,7 @@
 
 Local high-quality PDF renderer for Convo Vault.
 
-This is the v0.7.15 local backend rendering direction: the extension keeps the
+This is the v0.7.24 local backend rendering direction: the extension keeps the
 page permission and selection UI, captures the currently open ChatGPT page, and
 sends structured data to the local backend for a Markdown/PDF/data zip bundle.
 
@@ -23,7 +23,7 @@ data sidecar. The UI remains English, but exported conversation text should
 stay in the original language and preserve explicit language metadata when it
 is available.
 
-As of v0.7.15, bundle exports also include an output-object contract for
+As of v0.7.21, bundle exports also include an output-object contract for
 non-plain-text content such as formulas, Mermaid diagrams, remote images, GIFs,
 document/spreadsheet/presentation references, audio/video links, citations, and
 interactive cards. The PDF renderer keeps static, readable output where
@@ -115,7 +115,7 @@ headless printing or Playwright-compatible launch behavior.
 
 ## Backend Edge Capture
 
-The current `0.7.15` codebase can use Microsoft Edge as an independent backend
+The current `0.7.24` codebase can use Microsoft Edge as an independent backend
 capture browser, but this remains experimental. It avoids moving the ChatGPT
 page the user is actively reading, at the cost of a separate browser profile.
 

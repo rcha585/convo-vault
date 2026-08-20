@@ -6,7 +6,12 @@ const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
 const { captureConversationWithEdge, findEdgeExecutable, getCacheRoot } = require("./capture");
-const { buildAssetManifest, buildOutputObjectIndex } = require("./assets");
+const {
+  buildAssetManifest,
+  buildOutputObjectIndex,
+  dedupeEmbeddedImageAssets,
+  externalizeEmbeddedImageAssets
+} = require("./assets");
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.CGCE_ADVANCED_PDF_PORT || 38474);
@@ -291,22 +296,29 @@ async function handleRenderBundle(request, response) {
   fs.mkdirSync(requestDir, { recursive: true });
 
   const jsonPath = path.join(requestDir, `${baseName}.payload.json`);
+  const renderJsonPath = path.join(requestDir, `${baseName}.render.payload.json`);
   const htmlPath = path.join(requestDir, `${baseName}.html`);
   const pdfPath = path.join(requestDir, `${baseName}.pdf`);
   const markdownPath = path.join(requestDir, `${baseName}.md`);
   const assetManifestPath = path.join(requestDir, `${baseName}.assets.manifest.json`);
 
-  fs.writeFileSync(jsonPath, JSON.stringify(payload, null, 2), "utf8");
-  fs.writeFileSync(markdownPath, buildMarkdownDocument(payload), "utf8");
+  const cacheRoot = getCacheRoot();
+  const assetManifest = buildAssetManifest(payload, { cacheRoot });
+  const renderPayload = dedupeEmbeddedImageAssets(payload, assetManifest);
+  const bundlePayload = externalizeEmbeddedImageAssets(renderPayload, assetManifest);
+  timings.mark("assetsPrepared");
+
+  fs.writeFileSync(renderJsonPath, JSON.stringify(renderPayload), "utf8");
+  fs.writeFileSync(jsonPath, JSON.stringify(bundlePayload, null, 2), "utf8");
+  fs.writeFileSync(markdownPath, buildMarkdownDocument(bundlePayload), "utf8");
   timings.mark("documentsWritten");
-  const assetManifest = buildAssetManifest(payload, { cacheRoot: getCacheRoot() });
   fs.writeFileSync(assetManifestPath, JSON.stringify(assetManifest, null, 2), "utf8");
   timings.mark("assetManifestWritten");
-  const dataFiles = writeDataSidecars(requestDir, baseName, payload);
+  const dataFiles = writeDataSidecars(requestDir, baseName, bundlePayload);
   timings.mark("dataSidecarsWritten");
 
   const result = await runRenderer({
-    jsonPath,
+    jsonPath: renderJsonPath,
     htmlPath,
     pdfPath,
     baseName
@@ -343,7 +355,8 @@ async function handleRenderBundle(request, response) {
     ...dataFiles.map((filePath) => ({
       name: path.basename(filePath),
       data: fs.readFileSync(filePath)
-    }))
+    })),
+    ...buildBundleAssetEntries(assetManifest, cacheRoot)
   ];
   const zipBytes = createZipArchive(bundleEntries);
   timings.mark("zipCreated");
@@ -361,6 +374,34 @@ async function handleRenderBundle(request, response) {
     "X-Bundle-Timings": encodeHeaderValue(JSON.stringify(timings.toJSON()))
   });
   response.end(zipBytes);
+}
+
+function buildBundleAssetEntries(assetManifest, cacheRoot) {
+  const root = path.resolve(cacheRoot || ".");
+  const prefix = `${root}${path.sep}`;
+  const seen = new Set();
+  const entries = [];
+
+  for (const asset of assetManifest?.assets || []) {
+    const entryName = String(asset?.cachePath || "").replace(/\\/g, "/");
+
+    if (asset?.storage !== "local-cache" || !entryName || seen.has(entryName)) {
+      continue;
+    }
+
+    const absolutePath = path.resolve(root, entryName);
+    if (!absolutePath.startsWith(prefix) || !fs.existsSync(absolutePath)) {
+      continue;
+    }
+
+    seen.add(entryName);
+    entries.push({
+      name: entryName,
+      data: fs.readFileSync(absolutePath)
+    });
+  }
+
+  return entries;
 }
 
 async function renderMarkdownPayload(payload, body, response, captureWarning = "") {

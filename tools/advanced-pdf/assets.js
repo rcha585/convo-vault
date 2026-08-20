@@ -3,6 +3,12 @@ const fs = require("fs");
 const path = require("path");
 
 const DATA_URI_RE = /^data:([^;,]+)?(?:;charset=[^;,]+)?;base64,([a-z0-9+/=\r\n]+)$/i;
+const GENERIC_BINARY_MIME_TYPES = new Set([
+  "",
+  "application/octet-stream",
+  "application/x-binary",
+  "binary/octet-stream"
+]);
 const MARKDOWN_IMAGE_RE = /!\[([^\]]*)]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
 const MARKDOWN_LINK_RE = /\[([^\]]+)]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
 const FILE_LINK_RE = /\[File:\s*([^\]]+)](?:\(([^)\s]+)\))?/gi;
@@ -17,16 +23,18 @@ function buildAssetManifest(payload, options = {}) {
   const cacheRoot = options.cacheRoot || process.env.CGCE_CACHE_DIR || "";
   const assetRoot = cacheRoot ? path.join(cacheRoot, "assets") : "";
   const assetsById = new Map();
+  const embeddedAssetCache = new Map();
+  const dataUriCache = new Map();
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
-  const outputObjectIndex = buildOutputObjectIndex(payload);
+  const outputObjectIndex = buildOutputObjectIndex(payload, { dataUriCache });
 
   if (assetRoot) {
     fs.mkdirSync(assetRoot, { recursive: true });
   }
 
   for (const message of messages) {
-    collectMessageImageAssets(message, "markdown", assetRoot, assetsById);
-    collectMessageImageAssets(message, "thinkingMarkdown", assetRoot, assetsById);
+    collectMessageImageAssets(message, "markdown", assetRoot, assetsById, embeddedAssetCache, dataUriCache);
+    collectMessageImageAssets(message, "thinkingMarkdown", assetRoot, assetsById, embeddedAssetCache, dataUriCache);
     collectMessageFileAssets(message, "markdown", assetsById);
     collectMessageFileAssets(message, "thinkingMarkdown", assetsById);
   }
@@ -72,13 +80,87 @@ function buildAssetManifest(payload, options = {}) {
   };
 }
 
-function buildOutputObjectIndex(payload) {
+function externalizeEmbeddedImageAssets(payload, assetManifest) {
+  return rewriteEmbeddedImageAssets(payload, assetManifest, { externalize: true });
+}
+
+function dedupeEmbeddedImageAssets(payload, assetManifest) {
+  return rewriteEmbeddedImageAssets(payload, assetManifest, { externalize: false });
+}
+
+function rewriteEmbeddedImageAssets(payload, assetManifest, options = {}) {
+  const assetsBySha = new Map((assetManifest?.assets || [])
+    .filter((asset) => asset?.sha256 && asset?.cachePath)
+    .map((asset) => [asset.sha256, asset]));
+  const replacementCache = new Map();
+  const messages = (Array.isArray(payload?.messages) ? payload.messages : []).map((message) => {
+    return {
+      ...message,
+      markdown: rewriteMarkdownImages(message?.markdown, assetsBySha, replacementCache, options),
+      thinkingMarkdown: rewriteMarkdownImages(message?.thinkingMarkdown, assetsBySha, replacementCache, options)
+    };
+  });
+
+  return {
+    ...payload,
+    messages
+  };
+}
+
+function rewriteMarkdownImages(markdown, assetsBySha, replacementCache, options = {}) {
+  const imagePattern = new RegExp(MARKDOWN_IMAGE_RE.source, MARKDOWN_IMAGE_RE.flags);
+  const source = String(markdown || "");
+  const seenAssets = new Set();
+  let previousMatchEnd = 0;
+  const replaced = source.replace(imagePattern, (match, alt, src, offset) => {
+    if (hasSubstantiveImageGap(source.slice(previousMatchEnd, offset))) {
+      seenAssets.clear();
+    }
+    previousMatchEnd = offset + match.length;
+    let asset = replacementCache.get(src);
+
+    if (asset === undefined) {
+      const dataUri = parseDataUri(src);
+      asset = dataUri?.mimeType.startsWith("image/")
+        ? assetsBySha.get(hashBuffer(dataUri.bytes)) || null
+        : null;
+      replacementCache.set(src, asset);
+    }
+
+    if (!asset?.cachePath) {
+      return match;
+    }
+
+    if (seenAssets.has(asset.assetId)) {
+      return "";
+    }
+
+    seenAssets.add(asset.assetId);
+    return options.externalize
+      ? `![${alt || "Image"}](${asset.cachePath})`
+      : match;
+  });
+
+  return replaced
+    .replace(/\s*<!-- Image base64 embedding is temporarily disabled during scanning to avoid page side effects\. -->\s*/g, "\n\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function hasSubstantiveImageGap(value) {
+  return Boolean(String(value || "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .trim());
+}
+
+function buildOutputObjectIndex(payload, options = {}) {
   const objectsById = new Map();
+  const dataUriCache = options.dataUriCache || new Map();
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
 
   for (const message of messages) {
-    collectOutputObjects(message, "markdown", objectsById);
-    collectOutputObjects(message, "thinkingMarkdown", objectsById);
+    collectOutputObjects(message, "markdown", objectsById, dataUriCache);
+    collectOutputObjects(message, "thinkingMarkdown", objectsById, dataUriCache);
   }
 
   const objects = [...objectsById.values()].sort((a, b) => a.objectId.localeCompare(b.objectId));
@@ -107,7 +189,7 @@ function buildOutputObjectIndex(payload) {
   };
 }
 
-function collectMessageImageAssets(message, field, assetRoot, assetsById) {
+function collectMessageImageAssets(message, field, assetRoot, assetsById, embeddedAssetCache = new Map(), dataUriCache = new Map()) {
   const source = String(message?.[field] || "");
   let match;
 
@@ -115,30 +197,12 @@ function collectMessageImageAssets(message, field, assetRoot, assetsById) {
     const alt = cleanText(match[1] || "Image", 160);
     const src = match[2] || "";
     const reference = buildReference(message, field, { label: alt });
-    const dataUri = parseDataUri(src);
+    const embeddedAsset = resolveEmbeddedImageAsset(src, assetRoot, embeddedAssetCache, dataUriCache);
 
-    if (dataUri) {
-      const sha256 = hashBuffer(dataUri.bytes);
-      const extension = extensionFromMime(dataUri.mimeType);
-      const cachePath = path.join("sha256", sha256.slice(0, 2), sha256.slice(2, 4), `${sha256}.${extension}`);
-
-      if (assetRoot) {
-        const absolutePath = path.join(assetRoot, cachePath);
-        fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
-        if (!fs.existsSync(absolutePath)) {
-          fs.writeFileSync(absolutePath, dataUri.bytes);
-        }
-      }
-
+    if (embeddedAsset) {
       upsertAsset(assetsById, {
-        assetId: `sha256:${sha256}`,
-        sha256,
-        kind: kindFromMime(dataUri.mimeType),
+        ...embeddedAsset,
         origin: originFromMessageRole(message?.role),
-        storage: "local-cache",
-        mimeType: dataUri.mimeType,
-        sizeBytes: dataUri.bytes.length,
-        cachePath: slashPath(path.join("assets", cachePath)),
         label: alt,
         references: [reference]
       });
@@ -157,8 +221,44 @@ function collectMessageImageAssets(message, field, assetRoot, assetsById) {
   }
 }
 
+function resolveEmbeddedImageAsset(src, assetRoot, cache, dataUriCache) {
+  if (cache.has(src)) {
+    return cache.get(src);
+  }
+
+  const dataUri = getCachedDataUri(src, dataUriCache);
+  if (!dataUri) {
+    cache.set(src, null);
+    return null;
+  }
+
+  const sha256 = hashBuffer(dataUri.bytes);
+  const extension = extensionFromMime(dataUri.mimeType);
+  const cachePath = path.join("sha256", sha256.slice(0, 2), sha256.slice(2, 4), `${sha256}.${extension}`);
+
+  if (assetRoot) {
+    const absolutePath = path.join(assetRoot, cachePath);
+    fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+    if (!fs.existsSync(absolutePath)) {
+      fs.writeFileSync(absolutePath, dataUri.bytes);
+    }
+  }
+
+  const asset = {
+    assetId: `sha256:${sha256}`,
+    sha256,
+    kind: kindFromMime(dataUri.mimeType),
+    storage: "local-cache",
+    mimeType: dataUri.mimeType,
+    sizeBytes: dataUri.bytes.length,
+    cachePath: slashPath(path.join("assets", cachePath))
+  };
+  cache.set(src, asset);
+  return asset;
+}
+
 function collectMessageFileAssets(message, field, assetsById) {
-  const source = String(message?.[field] || "");
+  const source = maskEmbeddedDataUris(message?.[field]);
   const sourceWithoutFileLinks = source.replace(FILE_LINK_RE, " ");
   let match;
 
@@ -193,14 +293,15 @@ function collectMessageFileAssets(message, field, assetsById) {
   }
 }
 
-function collectOutputObjects(message, field, objectsById) {
+function collectOutputObjects(message, field, objectsById, dataUriCache) {
   const source = String(message?.[field] || "");
+  const textSource = maskEmbeddedDataUris(source);
 
-  collectMathOutputObjects(message, field, source, objectsById);
-  collectMermaidOutputObjects(message, field, source, objectsById);
-  collectChartOutputObjects(message, field, source, objectsById);
-  collectImageOutputObjects(message, field, source, objectsById);
-  collectLinkOutputObjects(message, field, source, objectsById);
+  collectMathOutputObjects(message, field, textSource, objectsById);
+  collectMermaidOutputObjects(message, field, textSource, objectsById);
+  collectChartOutputObjects(message, field, textSource, objectsById);
+  collectImageOutputObjects(message, field, source, objectsById, dataUriCache);
+  collectLinkOutputObjects(message, field, textSource, objectsById);
 }
 
 function collectMathOutputObjects(message, field, source, objectsById) {
@@ -259,11 +360,11 @@ function collectChartOutputObjects(message, field, source, objectsById) {
   });
 }
 
-function collectImageOutputObjects(message, field, source, objectsById) {
+function collectImageOutputObjects(message, field, source, objectsById, dataUriCache) {
   collectPatternObjects(source, MARKDOWN_IMAGE_RE, (match) => {
     const alt = cleanText(match[1] || "Image", 160);
     const src = match[2] || "";
-    const dataUri = parseDataUri(src);
+    const dataUri = getCachedDataUri(src, dataUriCache);
     const mimeType = dataUri?.mimeType || mimeTypeFromUrl(src);
     const animated = isAnimatedImageMimeOrUrl(mimeType, src);
     const remote = !dataUri;
@@ -440,10 +541,78 @@ function parseDataUri(value) {
     return null;
   }
 
+  const declaredMimeType = (match[1] || "application/octet-stream").toLowerCase();
+  const bytes = Buffer.from(match[2].replace(/\s+/g, ""), "base64");
+  const mimeType = sniffMimeType(bytes, declaredMimeType);
+
   return {
-    mimeType: (match[1] || "application/octet-stream").toLowerCase(),
-    bytes: Buffer.from(match[2].replace(/\s+/g, ""), "base64")
+    mimeType,
+    declaredMimeType,
+    bytes,
+    source: `data:${mimeType};base64,${bytes.toString("base64")}`
   };
+}
+
+function getCachedDataUri(value, cache = new Map()) {
+  const key = String(value || "");
+  if (cache.has(key)) {
+    return cache.get(key);
+  }
+
+  const parsed = parseDataUri(key);
+  cache.set(key, parsed);
+  return parsed;
+}
+
+function maskEmbeddedDataUris(value) {
+  return String(value || "").replace(
+    /data:[^;,)\s]+(?:;charset=[^;,)\s]+)?;base64,[a-z0-9+/=]+/gi,
+    "embedded-image"
+  );
+}
+
+function normalizeEmbeddedImageSource(value) {
+  const parsed = parseDataUri(value);
+  return parsed?.mimeType.startsWith("image/") ? parsed.source : "";
+}
+
+function sniffMimeType(bytes, declaredMimeType) {
+  const declared = String(declaredMimeType || "").toLowerCase();
+
+  if (!GENERIC_BINARY_MIME_TYPES.has(declared)) {
+    return declared;
+  }
+
+  if (!Buffer.isBuffer(bytes)) {
+    return declared || "application/octet-stream";
+  }
+
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
+  }
+
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+
+  if (bytes.length >= 6 && (bytes.subarray(0, 6).toString("ascii") === "GIF87a" || bytes.subarray(0, 6).toString("ascii") === "GIF89a")) {
+    return "image/gif";
+  }
+
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
+    return "image/webp";
+  }
+
+  if (bytes.length >= 2 && bytes.subarray(0, 2).toString("ascii") === "BM") {
+    return "image/bmp";
+  }
+
+  const text = bytes.subarray(0, 512).toString("utf8").replace(/^\uFEFF/, "").trimStart();
+  if (/^(?:<\?xml[^>]*>\s*)?<svg(?:\s|>)/i.test(text)) {
+    return "image/svg+xml";
+  }
+
+  return declared || "application/octet-stream";
 }
 
 function originFromMessageRole(role) {
@@ -634,5 +803,9 @@ function slashPath(value) {
 
 module.exports = {
   buildAssetManifest,
-  buildOutputObjectIndex
+  buildOutputObjectIndex,
+  dedupeEmbeddedImageAssets,
+  externalizeEmbeddedImageAssets,
+  normalizeEmbeddedImageSource,
+  parseDataUri
 };
