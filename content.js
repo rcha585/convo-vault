@@ -1,5 +1,6 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.25";
+  const EXPORTER_VERSION = "0.7.26";
+  const IS_EXTENSION_ENV = typeof chrome !== "undefined" && Boolean(chrome?.runtime?.id);
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
