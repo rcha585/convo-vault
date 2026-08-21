@@ -30,96 +30,96 @@
     const pathNodes = getConversationApiCurrentPath(data);
     const messages = [];
     const filterStats = {};
-    let pendingAssistantThinking = [];
-    let pendingThinkingApplied = 0;
+    let pendingAssistantNodes = [];
     let directThinkingMessageCount = 0;
-    let skippedThinkingCandidateCount = 0;
 
-    for (const node of pathNodes) {
-      const message = node?.message;
-      const role = normalizeApiRole(message?.author?.role);
-
-      const structuralSkipReason = getApiMessageStructuralSkipReason(message, role);
-      if (structuralSkipReason) {
-        const skippedThinking = extractSkippedApiThinkingMarkdown(message, role, structuralSkipReason);
-        if (skippedThinking) {
-          pendingAssistantThinking.push(skippedThinking);
-          skippedThinkingCandidateCount += 1;
-        }
-        incrementReasonCount(filterStats, structuralSkipReason);
-        continue;
+    function flushAssistantTurn() {
+      if (!pendingAssistantNodes.length) {
+        return;
       }
 
-      const directThinkingMarkdown = role === "assistant" ? extractApiThinkingMarkdown(message) : "";
-      if (directThinkingMarkdown) {
+      const synthesized = synthesizeAssistantTurn(pendingAssistantNodes, messages.length + 1);
+      pendingAssistantNodes = [];
+
+      if (!synthesized) {
+        return;
+      }
+
+      if (synthesized.thinkingMarkdown) {
         directThinkingMessageCount += 1;
       }
 
-      let markdown = cleanApiMarkdown([
-        extractApiContentMarkdown(message.content),
-        extractApiAttachmentMarkdown(message),
-        extractApiGeneratedFilesMarkdown(message)
-      ].filter(Boolean).join("\n\n"));
-
-      const thinkingMarkdown = cleanApiMarkdown([
-        role === "assistant" ? pendingAssistantThinking.join("\n\n") : "",
-        directThinkingMarkdown
-      ].filter(Boolean).join("\n\n"));
-
-      if (role === "assistant") {
-        markdown = enrichApiMarkdownWithCitations(markdown, message);
-        markdown = enrichApiMarkdownWithMemories(markdown, message);
-      }
-
-      if (!markdown && !thinkingMarkdown) {
-        continue;
-      }
-
-      if (role === "user" && pendingAssistantThinking.length) {
-        pendingAssistantThinking = [];
-      }
-
-      const contentSkipReason = getApiMessageContentSkipReason(message, role, markdown);
-      if (contentSkipReason) {
-        incrementReasonCount(filterStats, contentSkipReason);
-        continue;
-      }
-
-      const turnNumber = messages.length + 1;
-      const id = message.id || node.id || `api-message-${turnNumber}`;
-
-      if (role === "assistant" && pendingAssistantThinking.length) {
-        pendingThinkingApplied += 1;
-        pendingAssistantThinking = [];
-      }
-
-      messages.push({
-        id,
-        role,
-        order: turnNumber,
-        turnNumber,
-        conversationOrder: turnNumber,
-        timestamp: formatConversationTimestamp(
-          message.create_time ??
-          message.update_time ??
-          message.metadata?.create_time ??
-          message.metadata?.timestamp
-        ),
-        markdown,
-        thinkingMarkdown,
-        preview: truncatePreview(cleanMarkdown(`${markdown}\n${thinkingMarkdown}`), 180),
-        sourceMessageId: message.id || "",
-        sourceTurnId: node.id || "",
-        sourceNode: null,
-        codeBlockCount: getCodeBlockDiagnostics(markdown, thinkingMarkdown).length,
-        fileCount: countApiFileAttachments(message),
-        imageCount: countMarkdownImages(markdown),
-        imagesEmbedded: 0,
-        imagesDeferred: countMarkdownImages(markdown),
-        imagesFailed: 0,
-        captureMode: "fast"
-      });
+      messages.push(synthesized);
     }
+
+    for (const node of pathNodes) {
+      const message = node?.message;
+      if (!message) {
+        incrementReasonCount(filterStats, "missing-message");
+        continue;
+      }
+
+      const rawRole = String(message.author?.role || "").toLowerCase();
+      const metadata = message.metadata || {};
+      const authorMetadata = message.author?.metadata || {};
+
+      if (
+        isTruthyApiFlag(metadata.is_visually_hidden_from_conversation)
+        || isTruthyApiFlag(metadata.is_hidden)
+        || isTruthyApiFlag(metadata.hidden)
+        || isTruthyApiFlag(authorMetadata.is_visually_hidden_from_conversation)
+        || isTruthyApiFlag(authorMetadata.is_hidden)
+        || isTruthyApiFlag(authorMetadata.hidden)
+      ) {
+        incrementReasonCount(filterStats, "hidden");
+        continue;
+      }
+
+      if (rawRole === "user") {
+        flushAssistantTurn();
+
+        const turnNumber = messages.length + 1;
+        const id = message.id || node.id || `api-message-${turnNumber}`;
+        const markdown = cleanApiMarkdown([
+          extractApiContentMarkdown(message.content),
+          extractApiAttachmentMarkdown(message)
+        ].filter(Boolean).join("\n\n"));
+
+        messages.push({
+          id,
+          role: "user",
+          order: turnNumber,
+          turnNumber,
+          conversationOrder: turnNumber,
+          timestamp: formatConversationTimestamp(
+            message.create_time ??
+            message.update_time ??
+            message.metadata?.create_time ??
+            message.metadata?.timestamp
+          ),
+          markdown,
+          thinkingMarkdown: "",
+          preview: truncatePreview(markdown, 180),
+          sourceMessageId: message.id || "",
+          sourceTurnId: node.id || "",
+          sourceNode: null,
+          codeBlockCount: getCodeBlockDiagnostics(markdown, "").length,
+          fileCount: countApiFileAttachments(message),
+          imageCount: countMarkdownImages(markdown),
+          imagesEmbedded: 0,
+          imagesDeferred: countMarkdownImages(markdown),
+          imagesFailed: 0,
+          captureMode: "fast"
+        });
+      } else if (rawRole === "assistant" || rawRole === "tool") {
+        if (message.end_turn === false) {
+          incrementReasonCount(filterStats, "assistant-not-final");
+        }
+        pendingAssistantNodes.push(node);
+      }
+    }
+
+    flushAssistantTurn();
 
     debugLog?.event("fastCapture.path", {
       pathNodeCount: pathNodes.length,
@@ -132,21 +132,208 @@
       });
     }
 
-    if (pendingThinkingApplied) {
+    if (directThinkingMessageCount) {
       debugLog?.event("fastCapture.thinkingMerged", {
-        applied: pendingThinkingApplied
-      });
-    }
-
-    if (directThinkingMessageCount || skippedThinkingCandidateCount || pendingThinkingApplied) {
-      debugLog?.event("fastCapture.thinkingSummary", {
-        directMetadataMessages: directThinkingMessageCount,
-        skippedThinkingCandidates: skippedThinkingCandidateCount,
-        mergedIntoFinalAssistant: pendingThinkingApplied
+        applied: directThinkingMessageCount
       });
     }
 
     return messages;
+  }
+
+  function synthesizeAssistantTurn(nodes, turnNumber) {
+    if (!nodes.length) {
+      return null;
+    }
+
+    let primaryMessage = null;
+    const textParts = [];
+    const thinkingParts = [];
+    const imagePointers = [];
+    const fileEntries = [];
+    const citations = [];
+    const memories = [];
+    let maxDurationSec = 0;
+    let turnId = "";
+    let timestamp = null;
+
+    // First pass: locate the primary final assistant message if present
+    for (const node of nodes) {
+      const msg = node?.message;
+      if (!msg) continue;
+      const role = String(msg.author?.role || "").toLowerCase();
+      if (role === "assistant") {
+        if (!turnId) turnId = msg.id || node.id;
+        if (!timestamp) {
+          timestamp = msg.create_time ?? msg.update_time ?? msg.metadata?.create_time ?? msg.metadata?.timestamp;
+        }
+        if (msg.channel === "final" || msg.end_turn === true || !primaryMessage) {
+          primaryMessage = msg;
+        }
+      }
+    }
+
+    // Second pass: aggregate all thinking, content, citations, memories, files, and images across nodes
+    for (const node of nodes) {
+      const msg = node?.message;
+      if (!msg) continue;
+
+      const metadata = msg.metadata || {};
+      const duration = Number(metadata.finished_duration_sec || metadata.thinking_duration_seconds || 0);
+      if (duration > maxDurationSec) {
+        maxDurationSec = duration;
+      }
+
+      if (Array.isArray(metadata.citations)) {
+        citations.push(...metadata.citations);
+      }
+      if (Array.isArray(metadata.conversation_context_citation_metadata)) {
+        memories.push(...metadata.conversation_context_citation_metadata);
+      }
+
+      // Collect thinking parts
+      const thinkingCandidate = extractApiThinkingMarkdown(msg);
+      if (thinkingCandidate) {
+        thinkingParts.push(thinkingCandidate);
+      }
+
+      // Collect generated files
+      const fileCandidate = extractApiGeneratedFilesMarkdown(msg);
+      if (fileCandidate) {
+        fileEntries.push(fileCandidate);
+      }
+
+      // Collect attachments
+      const attachmentCandidate = extractApiAttachmentMarkdown(msg);
+      if (attachmentCandidate) {
+        fileEntries.push(attachmentCandidate);
+      }
+
+      const isThinking = isApiThinkingNode(msg);
+      const isInternalTool = isApiInternalToolCallNode(msg);
+
+      // Collect text and image parts
+      const content = msg.content;
+      if (content && typeof content === "object") {
+        const parts = Array.isArray(content.parts) ? content.parts : [];
+        for (const part of parts) {
+          if (typeof part === "string" && part.trim()) {
+            if (isThinking) {
+              thinkingParts.push(part.trim());
+            } else if (!isInternalTool && !looksLikeInternalApiToolCall(part) && !looksLikeApiJsonPayload(part)) {
+              textParts.push(part.trim());
+            }
+          } else if (part && typeof part === "object") {
+            const ptr = part.asset_pointer || part.assetPointer || part.url || "";
+            if (ptr && isApiImageHaystack(`${part.content_type || ""} ${part.mime_type || ""} ${ptr}`)) {
+              const label = sanitizeApiMarkdownLabel(part.name || part.filename || part.title || "Image");
+              const imgMd = `![${label}](${ptr})`;
+              if (!imagePointers.includes(imgMd)) {
+                imagePointers.push(imgMd);
+              }
+            }
+          }
+        }
+
+        if (!parts.length && typeof content.text === "string" && content.text.trim()) {
+          if (isThinking) {
+            thinkingParts.push(content.text.trim());
+          } else if (!isInternalTool && !looksLikeInternalApiToolCall(content.text) && !looksLikeApiJsonPayload(content.text)) {
+            textParts.push(content.text.trim());
+          }
+        }
+      }
+    }
+
+    // Build synthesized markdown
+    const combinedProse = uniqueStrings(textParts).join("\n\n");
+    const combinedImages = imagePointers.join("\n\n");
+    const combinedFiles = uniqueStrings(fileEntries).join("\n\n");
+
+    let markdown = cleanApiMarkdown([
+      combinedProse,
+      combinedImages,
+      combinedFiles
+    ].filter(Boolean).join("\n\n"));
+
+    let thinkingMarkdown = cleanApiMarkdown(uniqueStrings(thinkingParts).join("\n\n"));
+
+    if (primaryMessage) {
+      markdown = enrichApiMarkdownWithCitations(markdown, primaryMessage);
+      markdown = enrichApiMarkdownWithMemories(markdown, primaryMessage);
+    } else if (citations.length || memories.length) {
+      markdown = enrichApiMarkdownWithCitations(markdown, { metadata: { citations } });
+      markdown = enrichApiMarkdownWithMemories(markdown, { metadata: { conversation_context_citation_metadata: memories } });
+    }
+
+    if (!markdown && !thinkingMarkdown) {
+      return null;
+    }
+
+    const id = turnId || `api-assistant-${turnNumber}`;
+
+    return {
+      id,
+      role: "assistant",
+      order: turnNumber,
+      turnNumber,
+      conversationOrder: turnNumber,
+      timestamp: formatConversationTimestamp(timestamp),
+      markdown,
+      thinkingMarkdown,
+      preview: truncatePreview(cleanMarkdown(`${markdown}\n${thinkingMarkdown}`), 180),
+      sourceMessageId: primaryMessage?.id || id,
+      sourceTurnId: id,
+      sourceNode: null,
+      codeBlockCount: getCodeBlockDiagnostics(markdown, thinkingMarkdown).length,
+      fileCount: (primaryMessage ? countApiFileAttachments(primaryMessage) : 0) + fileEntries.length,
+      imageCount: countMarkdownImages(markdown),
+      imagesEmbedded: 0,
+      imagesDeferred: countMarkdownImages(markdown),
+      imagesFailed: 0,
+      captureMode: "fast"
+    };
+  }
+
+  function isApiThinkingNode(msg) {
+    if (!msg) return false;
+    const channel = String(msg.channel || msg.metadata?.channel || msg.author?.metadata?.channel || "").toLowerCase();
+    const contentType = String(msg.content?.content_type || msg.content?.contentType || "").toLowerCase();
+    return (
+      channel === "analysis"
+      || channel === "reasoning"
+      || channel === "commentary"
+      || contentType === "thoughts"
+      || contentType === "reasoning"
+      || contentType === "reasoning_recap"
+      || msg.metadata?.is_thinking_preamble_message === true
+    );
+  }
+
+  function isApiInternalToolCallNode(msg) {
+    if (!msg) return false;
+    const recipient = String(msg.recipient || msg.metadata?.recipient || msg.author?.metadata?.recipient || "").toLowerCase();
+    const contentType = String(msg.content?.content_type || msg.content?.contentType || "").toLowerCase();
+    const messageType = String(msg.metadata?.message_type || msg.metadata?.messageType || "").toLowerCase();
+    const role = String(msg.author?.role || "").toLowerCase();
+
+    if (role === "tool" && messageType !== "image" && contentType !== "multimodal_text") {
+      return true;
+    }
+
+    if (["python", "web.run", "browser", "search", "api_tool.search_plugins", "api_tool.suggest_installs", "api_tool.list_resources"].includes(recipient)) {
+      return true;
+    }
+
+    if (["code", "execution", "tool", "tool_call", "search_query", "search_result"].includes(messageType)) {
+      return true;
+    }
+
+    if (contentType === "code" && recipient && recipient !== "all") {
+      return true;
+    }
+
+    return false;
   }
 
   function getApiMessageStructuralSkipReason(message, role) {
