@@ -22,8 +22,8 @@
     installedAt: Date.now()
   };
   window.__chatGptConversationExporterVersion = EXPORTER_VERSION;
-  const TOP_LOAD_ATTEMPTS = 14;
-  const WALK_ATTEMPTS = 56;
+  const TOP_LOAD_ATTEMPTS = 32;
+  const WALK_ATTEMPTS = 240;
   const SCROLL_SETTLE_MS = 110;
   const DOM_IDLE_MS = 45;
   const MAX_DOM_IDLE_MS = 220;

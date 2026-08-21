@@ -419,13 +419,13 @@
   }
 
   function getWalkScrollStep(scrollTarget) {
-    return Math.max(Math.floor(getClientHeight(scrollTarget) * 3.6), 3000);
+    return Math.max(Math.floor(getClientHeight(scrollTarget) * 0.85), 650);
   }
 
   function getWalkAttemptLimit(scrollTarget) {
     const step = getWalkScrollStep(scrollTarget);
-    const estimated = Math.ceil(getMaxScrollTop(scrollTarget) / Math.max(1, step)) + 6;
-    return Math.min(WALK_ATTEMPTS, Math.max(10, estimated));
+    const estimated = Math.ceil(getMaxScrollTop(scrollTarget) / Math.max(1, step)) + 16;
+    return Math.min(WALK_ATTEMPTS, Math.max(20, estimated));
   }
 
   async function hydrateVirtualizedTurns(collector, debugLog = null, deadline = Infinity, budget = null, signal = null) {
@@ -545,7 +545,24 @@
 
         if (!turn) {
           await scrollNearTurnOrder(scrollTarget, order, options?.maxKnownOrder || 0);
+          await collector.captureFromDom({ settleMs: 0, signal });
           turn = findBestTurnNodeByOrder(order);
+        }
+
+        if (!turn) {
+          const currentTop = getScrollTop(scrollTarget);
+          const offset = Math.floor(getClientHeight(scrollTarget) * 0.75);
+          setScrollTop(scrollTarget, Math.max(0, currentTop - offset));
+          await waitForScrollAndDomIdle(160);
+          await collector.captureFromDom({ settleMs: 0, signal });
+          turn = findBestTurnNodeByOrder(order);
+
+          if (!turn) {
+            setScrollTop(scrollTarget, Math.min(getMaxScrollTop(scrollTarget), currentTop + offset));
+            await waitForScrollAndDomIdle(160);
+            await collector.captureFromDom({ settleMs: 0, signal });
+            turn = findBestTurnNodeByOrder(order);
+          }
         }
 
         if (!turn?.isConnected) {
