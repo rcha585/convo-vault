@@ -238,6 +238,88 @@ test("Fast API parser merges non-final assistant thinking into final answers", a
   });
 });
 
+test("Fast API parser enriches citations as footnotes and replaces citation tokens", async () => {
+  const fast = await loadFastCaptureModule();
+  const data = {
+    current_node: "answer",
+    mapping: {
+      root: { id: "root", parent: "", message: null },
+      prompt: {
+        id: "prompt",
+        parent: "root",
+        message: makeMessage("user", "What is the competitor analysis?")
+      },
+      answer: {
+        id: "answer",
+        parent: "prompt",
+        message: makeMessage("assistant", "This document focuses on ToB pet care fileciteturn0file0L2-L2.", {
+          channel: "final",
+          end_turn: true,
+          recipient: "all",
+          metadata: {
+            citations: [
+              {
+                metadata: {
+                  title: "Direct Competitor Research",
+                  url: "https://docs.google.com/document/d/123"
+                }
+              }
+            ]
+          }
+        })
+      }
+    }
+  };
+
+  const messages = fast.buildMessagesFromConversationApi(data);
+  assert.equal(messages.length, 2);
+  assert.match(messages[1].markdown, /ToB pet care \[\^1\]/);
+  assert.match(messages[1].markdown, /\[\^1\]: \[Direct Competitor Research\]\(https:\/\/docs\.google\.com\/document\/d\/123\)/);
+});
+
+test("Fast API parser enriches memory context and thinking duration", async () => {
+  const fast = await loadFastCaptureModule();
+  const data = {
+    current_node: "answer",
+    mapping: {
+      root: { id: "root", parent: "", message: null },
+      prompt: {
+        id: "prompt",
+        parent: "root",
+        message: makeMessage("user", "Summarize previous notes.")
+      },
+      answer: {
+        id: "answer",
+        parent: "prompt",
+        message: makeMessage("assistant", "Here is the summary memcite.", {
+          channel: "final",
+          end_turn: true,
+          recipient: "all",
+          metadata: {
+            finished_duration_sec: 11,
+            thoughts: "Analyzed past discussions.",
+            conversation_context_citation_metadata: [
+              {
+                citation: {
+                  title: "Desktop pet interaction changed to simulation first",
+                  attribution: "Memory"
+                }
+              }
+            ]
+          }
+        })
+      }
+    }
+  };
+
+  const messages = fast.buildMessagesFromConversationApi(data);
+  assert.equal(messages.length, 2);
+  assert.match(messages[1].thinkingMarkdown, /> 💭 \*\*Thinking \(Worked for 11s\)\*\*/);
+  assert.match(messages[1].thinkingMarkdown, /> Analyzed past discussions\./);
+  assert.match(messages[1].markdown, /> 🧠 \*\*Memory & Context\*\*:/);
+  assert.match(messages[1].markdown, /> - \*\*Memory\*\*: Desktop pet interaction changed to simulation first/);
+});
+
 async function loadFastCaptureModule() {
   const source = await readFile(path.join(repoRoot, "src", "content", "capture-fast.js"), "utf8");
   const context = vm.createContext({

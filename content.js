@@ -5853,14 +5853,21 @@
         directThinkingMessageCount += 1;
       }
 
-      const markdown = cleanApiMarkdown([
+      let markdown = cleanApiMarkdown([
         extractApiContentMarkdown(message.content),
-        extractApiAttachmentMarkdown(message)
+        extractApiAttachmentMarkdown(message),
+        extractApiGeneratedFilesMarkdown(message)
       ].filter(Boolean).join("\n\n"));
+
       const thinkingMarkdown = cleanApiMarkdown([
         role === "assistant" ? pendingAssistantThinking.join("\n\n") : "",
         directThinkingMarkdown
       ].filter(Boolean).join("\n\n"));
+
+      if (role === "assistant") {
+        markdown = enrichApiMarkdownWithCitations(markdown, message);
+        markdown = enrichApiMarkdownWithMemories(markdown, message);
+      }
 
       if (!markdown && !thinkingMarkdown) {
         continue;
@@ -6371,9 +6378,133 @@
       metadata.thoughts
     ];
 
-    return candidates
-      .filter((value) => typeof value === "string" && value.trim())
-      .join("\n\n");
+    const stringThoughts = candidates
+      .filter((value) => typeof value === "string" && value.trim());
+
+    const contentThoughts = Array.isArray(message?.content?.thoughts)
+      ? message.content.thoughts
+        .map((t) => t?.summary || t?.content || "")
+        .filter(Boolean)
+      : [];
+
+    const reasoningTitles = Array.isArray(metadata.reasoning_titles)
+      ? metadata.reasoning_titles.filter(Boolean)
+      : [];
+
+    const durationSec = Number(metadata.finished_duration_sec || metadata.thinking_duration_seconds || 0);
+    const durationPrefix = durationSec > 0
+      ? `Worked for ${durationSec >= 60 ? `${Math.floor(durationSec / 60)}m ${durationSec % 60}s` : `${durationSec}s`}`
+      : "";
+
+    const allThinkingParts = [...stringThoughts, ...contentThoughts];
+    if (reasoningTitles.length && !allThinkingParts.length) {
+      allThinkingParts.push(...reasoningTitles);
+    }
+
+    let thinkingText = allThinkingParts.join("\n\n").trim();
+    if (durationPrefix && thinkingText) {
+      thinkingText = `> 💭 **Thinking (${durationPrefix})**\n>\n` + thinkingText.split("\n").map((line) => `> ${line}`).join("\n");
+    } else if (durationPrefix && !thinkingText) {
+      thinkingText = `> 💭 **Thinking (${durationPrefix})**`;
+    }
+
+    return thinkingText;
+  }
+
+  function extractApiGeneratedFilesMarkdown(message) {
+    const metadata = message?.metadata || {};
+    const files = [];
+
+    // Check aggregate_result
+    const aggregate = metadata.aggregate_result;
+    if (aggregate?.status === "success" && typeof aggregate.final_expression_output === "string") {
+      const match = aggregate.final_expression_output.match(/name:\s*([^\n]+)/);
+      if (match && !files.some((f) => f.name === match[1].trim())) {
+        files.push({ name: match[1].trim(), url: "" });
+      }
+    }
+
+    // Check sandbox files in parts
+    const parts = Array.isArray(message?.content?.parts) ? message.content.parts : [];
+    for (const part of parts) {
+      if (typeof part === "string") {
+        const sandboxMatches = [...part.matchAll(/\[([^\]]+)\]\((sandbox:[^)]+)\)/g)];
+        for (const match of sandboxMatches) {
+          if (!files.some((f) => f.url === match[2])) {
+            files.push({ name: match[1], url: match[2] });
+          }
+        }
+      }
+    }
+
+    if (!files.length) {
+      return "";
+    }
+
+    return files.map((file) => file.url ? `📥 **Generated File**: [${file.name}](${file.url})` : `📥 **Generated Artifact**: ${file.name}`).join("\n");
+  }
+
+  function enrichApiMarkdownWithCitations(markdown, message) {
+    const citations = Array.isArray(message?.metadata?.citations) ? message.metadata.citations : [];
+    if (!citations.length) {
+      return markdown;
+    }
+
+    let enriched = markdown;
+    const footnotes = [];
+
+    citations.forEach((citation, index) => {
+      const footnoteIndex = index + 1;
+      const title = citation?.metadata?.title || citation?.title || citation?.metadata?.name || `Source ${footnoteIndex}`;
+      const url = citation?.metadata?.url || citation?.url || citation?.metadata?.cloud_doc_url || "";
+      footnotes.push(`[^${footnoteIndex}]: [${title}](${url})`);
+
+      // Replace matching citation tokens if present
+      const markerPattern = new RegExp(`fileciteturn\\d+file\\d+L\\d+-L\\d+|fileciteturn\\d+file\\d+`, "g");
+      enriched = enriched.replace(markerPattern, `[^${footnoteIndex}]`);
+    });
+
+    // Remove any remaining raw citation tokens and normalize footnote spacing
+    enriched = enriched
+      .replace(/fileciteturn\w+/gi, "")
+      .replace(/[ \t]+(\[\^\d+\])/g, " $1");
+
+    if (footnotes.length) {
+      enriched = enriched.trim() + "\n\n" + footnotes.join("\n");
+    }
+
+    return enriched;
+  }
+
+  function enrichApiMarkdownWithMemories(markdown, message) {
+    const memories = Array.isArray(message?.metadata?.conversation_context_citation_metadata)
+      ? message.metadata.conversation_context_citation_metadata
+      : [];
+
+    let enriched = markdown.replace(/memcite/gi, "");
+
+    if (!memories.length) {
+      return enriched;
+    }
+
+    const memoryLines = memories
+      .map((item) => {
+        const citation = item?.citation;
+        if (!citation) return "";
+        const title = citation.title || citation.snippet || "";
+        const attribution = citation.attribution || "Memory";
+        const url = citation.url || "";
+        return url
+          ? `> - **${attribution}**: [${title}](${url})`
+          : `> - **${attribution}**: ${title}`;
+      })
+      .filter(Boolean);
+
+    if (memoryLines.length) {
+      enriched = enriched.trim() + "\n\n> 🧠 **Memory & Context**:\n" + memoryLines.join("\n");
+    }
+
+    return enriched;
   }
 
   async function enrichMessageTimestamps(messages, debugLog = null, options = {}) {
