@@ -205,11 +205,18 @@
         const roleSequenceDiagnostics = getRoleSequenceDiagnostics(messages);
         const effectiveTurnCount = messages.length;
         const availableTurnOrders = getAvailableConversationTurnOrders();
-        const expectedTurnOrders = availableTurnOrders.length
-          ? availableTurnOrders
-          : pageTurnDiagnostics.dataTurnIdCount
-            ? Array.from({ length: pageTurnDiagnostics.dataTurnIdCount }, (_, index) => index + 1)
-            : capturedTurnOrders;
+        const allDiscoveredOrders = [...new Set([
+          ...capturedTurnOrders,
+          ...availableTurnOrders
+        ])].sort((a, b) => a - b);
+        const maxKnownOrder = allDiscoveredOrders.length ? allDiscoveredOrders[allDiscoveredOrders.length - 1] : 0;
+        const expectedTurnOrders = maxKnownOrder > 0
+          ? Array.from({ length: maxKnownOrder }, (_, index) => index + 1)
+          : (availableTurnOrders.length
+            ? availableTurnOrders
+            : (pageTurnDiagnostics.dataTurnIdCount
+              ? Array.from({ length: pageTurnDiagnostics.dataTurnIdCount }, (_, index) => index + 1)
+              : capturedTurnOrders));
         const expectedTurnCount = expectedTurnOrders.length || pageTurnDiagnostics.dataTurnIdCount || effectiveTurnCount;
         const missingTurnOrders = expectedTurnOrders.filter((order) => !capturedTurnOrderSet.has(order));
         finalSummary = {

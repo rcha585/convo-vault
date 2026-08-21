@@ -519,8 +519,9 @@
     };
   }
 
-  async function recoverMissingTurnMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budgetMs = MISSING_TURN_RECOVERY_MS, signal = null) {
-    let missingOrders = getMissingConversationTurnOrders(collector.getMessages());
+  async function recoverMissingTurnMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budgetMs = MISSING_TURN_RECOVERY_MS, signal = null, options = {}) {
+    const expectedOrders = options?.expectedOrders || null;
+    let missingOrders = getMissingConversationTurnOrders(collector.getMessages(), expectedOrders);
 
     debugLog?.progress("missingRecovery.start", {
       missingOrders,
@@ -543,7 +544,7 @@
         let turn = findBestTurnNodeByOrder(order);
 
         if (!turn) {
-          await scrollNearTurnOrder(scrollTarget, order);
+          await scrollNearTurnOrder(scrollTarget, order, options?.maxKnownOrder || 0);
           turn = findBestTurnNodeByOrder(order);
         }
 
@@ -557,7 +558,7 @@
         const beforeHasMountedText = hasMountedMessageText(turn);
         const hydrationResult = await hydrateSingleTurn(turn, collector, deadline, signal);
         await collector.captureFromDom({ settleMs: 0, nodes: [turn], signal });
-        const captured = !getMissingConversationTurnOrders(collector.getMessages()).includes(order);
+        const captured = !getMissingConversationTurnOrders(collector.getMessages(), expectedOrders).includes(order);
 
         debugLog?.progress("missingRecovery.turn", {
           pass,
@@ -575,7 +576,7 @@
         });
       }
 
-      missingOrders = getMissingConversationTurnOrders(collector.getMessages());
+      missingOrders = getMissingConversationTurnOrders(collector.getMessages(), expectedOrders);
     }
 
     debugLog?.progress("missingRecovery.finish", {
@@ -585,16 +586,30 @@
     });
   }
 
-  function getMissingConversationTurnOrders(messages) {
+  function getMissingConversationTurnOrders(messages, expectedOrders = null) {
     const availableOrders = getAvailableConversationTurnOrders();
-
-    if (!availableOrders.length) {
-      return [];
-    }
-
     const capturedOrders = new Set(messages
       .map((message) => Number(message.order))
       .filter((order) => Number.isFinite(order) && order > 0 && order < 1_000_000));
+
+    if (Array.isArray(expectedOrders) && expectedOrders.length) {
+      return expectedOrders.filter((order) => !capturedOrders.has(order));
+    }
+
+    const allDiscoveredOrders = [...new Set([
+      ...availableOrders,
+      ...capturedOrders
+    ])].sort((a, b) => a - b);
+
+    if (!allDiscoveredOrders.length) {
+      return [];
+    }
+
+    const maxOrder = allDiscoveredOrders[allDiscoveredOrders.length - 1];
+    if (maxOrder > 0 && maxOrder < 1_000_000) {
+      const canonicalOrders = Array.from({ length: maxOrder }, (_, index) => index + 1);
+      return canonicalOrders.filter((order) => !capturedOrders.has(order));
+    }
 
     return availableOrders.filter((order) => !capturedOrders.has(order));
   }
@@ -634,14 +649,14 @@
       + (getPotentialMessageNodeResult(turn).ok ? 500 : 0);
   }
 
-  async function scrollNearTurnOrder(scrollTarget, order) {
+  async function scrollNearTurnOrder(scrollTarget, order, maxKnownOrder = 0) {
     const orders = getAvailableConversationTurnOrders();
-    const first = orders[0] || 1;
-    const last = orders[orders.length - 1] || order;
+    const first = 1;
+    const last = Math.max(orders[orders.length - 1] || order, maxKnownOrder || order, 1);
     const span = Math.max(1, last - first);
     const ratio = Math.min(1, Math.max(0, (order - first) / span));
     setScrollTop(scrollTarget, Math.round(getMaxScrollTop(scrollTarget) * ratio));
-    await waitForScrollAndDomIdle(220);
+    await waitForScrollAndDomIdle(240);
   }
 
   function getTurnsNeedingHydration(turns, collector) {

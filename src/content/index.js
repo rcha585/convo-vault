@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.24";
+  const EXPORTER_VERSION = "0.7.25";
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -431,6 +431,8 @@
         fullMessages = await collectFullDomMessages(debugLog, onProgress, {
           finishDebug: false,
           progressPrefix: "Full enrichment: ",
+          expectedTurnCount: fastMessages.length,
+          expectedOrders: fastMessages.map((m) => Number(m.order)).filter((order) => Number.isFinite(order) && order > 0),
           signal
         });
       } catch (error) {
@@ -473,7 +475,9 @@
     const scrollTarget = getBestScrollTarget();
     const originalScrollTop = getScrollTop(scrollTarget);
     const collector = createMessageCollector(debugLog);
-    const scanBudget = getConversationScanBudget();
+    const expectedTurnCount = Number(options.expectedTurnCount || 0);
+    const expectedOrders = Array.isArray(options.expectedOrders) ? options.expectedOrders : null;
+    const scanBudget = getConversationScanBudget({ expectedTurnCount });
     const scanDeadline = Date.now() + scanBudget.maxScanMs;
     const walkDeadline = scanDeadline - scanBudget.hydrateReservedMs;
     debugLog.setScrollTarget(scrollTarget);
@@ -499,10 +503,13 @@
       await collector.captureFromDom({ signal });
       debugLog.mark("finalCapture");
       onProgress(`${progressPrefix}Recovering missed turns...`);
-      const missingBeforeRecovery = getMissingConversationTurnOrders(collector.getMessages());
+      const missingBeforeRecovery = getMissingConversationTurnOrders(collector.getMessages(), expectedOrders);
       const recoveryBudgetMs = getMissingRecoveryBudgetMs(missingBeforeRecovery.length, scanBudget.pageTurnCount);
       const recoveryDeadline = Date.now() + recoveryBudgetMs;
-      await recoverMissingTurnMessages(scrollTarget, collector, debugLog, recoveryDeadline, recoveryBudgetMs, signal);
+      await recoverMissingTurnMessages(scrollTarget, collector, debugLog, recoveryDeadline, recoveryBudgetMs, signal, {
+        expectedOrders,
+        maxKnownOrder: expectedTurnCount || Math.max(...(getAvailableConversationTurnOrders() || [0]))
+      });
       throwIfCaptureCancelled(signal);
       debugLog.mark("recoveredMissingTurns");
       await collector.captureFromDom({ settleMs: 0, signal });
@@ -761,19 +768,25 @@
     return isTimestampDividerText(text) || isLikelyNonMessageMarkdown(message);
   }
 
-  function getConversationScanBudget() {
+  function getConversationScanBudget(options = {}) {
+    const scrollTarget = getBestScrollTarget();
+    const maxScrollTop = getMaxScrollTop(scrollTarget);
     const pageTurnDiagnostics = getPageTurnDiagnostics();
     const availableTurnCount = getAvailableConversationTurnOrders().length;
+    const estimatedTurnsByHeight = Math.ceil(maxScrollTop / 1800);
+    const expectedTurnCount = Number(options?.expectedTurnCount || 0);
     const pageTurnCount = Math.max(
       pageTurnDiagnostics.dataTurnIdCount || 0,
-      availableTurnCount
+      availableTurnCount,
+      estimatedTurnsByHeight,
+      expectedTurnCount
     );
-    const isLargeConversation = pageTurnCount >= 120;
+    const isLargeConversation = pageTurnCount >= 36 || maxScrollTop >= 30_000;
     const maxScanMs = isLargeConversation
-      ? Math.min(MAX_ADAPTIVE_SCAN_MS, Math.max(MAX_SCAN_MS, pageTurnCount * 1200))
+      ? Math.min(MAX_ADAPTIVE_SCAN_MS, Math.max(MAX_SCAN_MS, pageTurnCount * 1400))
       : MAX_SCAN_MS;
     const hydrateReservedMs = isLargeConversation
-      ? Math.min(MAX_ADAPTIVE_HYDRATE_RESERVED_MS, Math.max(HYDRATE_RESERVED_MS, pageTurnCount * 300))
+      ? Math.min(MAX_ADAPTIVE_HYDRATE_RESERVED_MS, Math.max(HYDRATE_RESERVED_MS, pageTurnCount * 350))
       : HYDRATE_RESERVED_MS;
 
     return {
@@ -790,7 +803,7 @@
       return MISSING_TURN_RECOVERY_MS;
     }
 
-    const needsAdaptiveRecovery = pageTurnCount >= 120 || missingCount >= 20;
+    const needsAdaptiveRecovery = pageTurnCount >= 36 || missingCount >= 10;
 
     if (!needsAdaptiveRecovery) {
       return MISSING_TURN_RECOVERY_MS;
@@ -1017,17 +1030,26 @@
       .map(Math.floor);
     const expectedTurnCount = Number(summary?.expectedTurnCount || 0);
 
-    if (!summaryOrders.length && Number.isInteger(expectedTurnCount) && expectedTurnCount > 0 && expectedTurnCount < 1_000_000) {
-      summaryOrders = Array.from({ length: expectedTurnCount }, (_, index) => index + 1);
-    }
+    const allDiscoveredOrders = [...new Set([...domOrders, ...summaryOrders])].sort((a, b) => a - b);
+    const maxDiscoveredOrder = Math.max(
+      allDiscoveredOrders.length ? allDiscoveredOrders[allDiscoveredOrders.length - 1] : 0,
+      Number.isInteger(expectedTurnCount) ? expectedTurnCount : 0
+    );
 
-    const orders = [...new Set([...domOrders, ...summaryOrders])].sort((a, b) => a - b);
+    const orders = maxDiscoveredOrder > 0
+      ? Array.from({ length: maxDiscoveredOrder }, (_, index) => index + 1)
+      : allDiscoveredOrders;
     const canonicalEntries = orders.length
       ? orders.map((order) => {
         const candidates = entries.filter((entry) => Math.floor(entry.order) === order);
-        const role = candidates.find((entry) => entry.role === "user" || entry.role === "assistant")?.role
+        let role = candidates.find((entry) => entry.role === "user" || entry.role === "assistant")?.role
           || candidates[0]?.role
           || "";
+        if (!role && order % 2 === 1) {
+          role = "user";
+        } else if (!role && order % 2 === 0) {
+          role = "assistant";
+        }
         return { identity: `order:${order}`, order, role };
       })
       : entries;

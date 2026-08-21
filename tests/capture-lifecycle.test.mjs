@@ -195,6 +195,45 @@ test("Hybrid Full-only messages make the snapshot incomplete", () => {
   assert.ok(report.issues.some((issue) => issue.code === "hybrid-full-only-messages"));
 });
 
+test("completeness gate catches missing sequence gaps like 49-51 in 56-turn conversation", () => {
+  const context = loadCompletenessFunction();
+  const capturedOrders = [
+    ...Array.from({ length: 48 }, (_, index) => index + 1),
+    52, 53, 54, 55, 56
+  ];
+  const messages = capturedOrders.map((order) => ({
+    id: `m${order}`,
+    role: order % 2 === 1 ? "user" : "assistant",
+    order,
+    markdown: `Message ${order}`,
+    imagesFailed: 0
+  }));
+
+  // Mock DOM nodes only present at the end of the scan (e.g. bottom turns)
+  context.mockTurns.push(
+    ...messages.slice(48).map((message) => ({
+      identity: `order:${message.order}`,
+      order: message.order,
+      role: message.role
+    }))
+  );
+
+  const report = context.buildCaptureCompletenessReport(messages, {
+    captureMode: "full",
+    expectedSummary: {
+      expectedTurnCount: 53,
+      capturedTurnOrders: capturedOrders,
+      missingTurnOrders: []
+    }
+  });
+
+  assert.equal(report.complete, false);
+  assert.equal(report.requiresOverride, true);
+  assert.equal(report.expected.uniqueIdentities, 56);
+  assert.deepEqual(Array.from(report.missingConversationOrders), [49, 50, 51]);
+  assert.ok(report.issues.some((issue) => issue.code === "missing-orders"));
+});
+
 function makeExpectedStructure(count, userMessages, assistantMessages) {
   return {
     identities: Array.from({ length: count }, (_, index) => `order:${index + 1}`),
