@@ -157,10 +157,17 @@ function isMetadataAssetPath(path, encodedId) {
 
 function getInternalAssetPointer(value) {
   const text = String(value || "").trim();
-  const match = text.match(/^(file-service|sediment):\/\/([^/?#]+)/i);
+  const schemeMatch = text.match(/^(file-service|sediment):\/\//i);
+  const scheme = schemeMatch ? schemeMatch[1] : "asset";
+
+  // Look for standard file IDs (e.g. file_00000000968881fa85680179ee957d99 or file-...)
+  const fileMatch = text.match(/(file_[a-f0-9]{32}|file-[a-zA-Z0-9_-]+)/i);
+  const fallbackMatch = text.match(/^(?:file-service|sediment):\/\/([^/?#]+)/i);
+  const fileId = fileMatch ? fileMatch[1] : (fallbackMatch?.[1] || "");
+
   return {
-    scheme: match?.[1] || "",
-    fileId: match?.[2] || ""
+    scheme,
+    fileId
   };
 }
 

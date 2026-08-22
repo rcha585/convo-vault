@@ -1620,7 +1620,30 @@
       const node = resolveMountedMessageNodeForPortableMessage(message);
 
       if (!node) {
-        result.missingNode += refs.length;
+        const globalDomImages = Array.from(document.querySelectorAll("img"));
+        const replacements = new Map();
+        for (const ref of refs) {
+          const fileMatch = ref.url.match(/(file_[a-f0-9]{32}|file-[a-zA-Z0-9_-]+)/i);
+          const fileId = fileMatch ? fileMatch[1] : "";
+          if (!fileId) continue;
+          const match = globalDomImages.find((img) => {
+            const src = img.currentSrc || img.src || "";
+            return src && !isInternalAssetImageUrl(src) && (src.includes(fileId) || img.alt?.includes(fileId));
+          });
+          if (match) {
+            try {
+              const dataUri = await imageToDataUri(match, match.currentSrc || match.src);
+              replacements.set(ref.url, dataUri);
+              result.embedded += 1;
+              stats.imagesEmbedded += 1;
+            } catch (_) {}
+          }
+        }
+        if (replacements.size) {
+          message.markdown = replaceEmbeddedMarkdownImages(message.markdown, replacements);
+          message.thinkingMarkdown = replaceEmbeddedMarkdownImages(message.thinkingMarkdown, replacements);
+        }
+        result.missingNode += refs.length - replacements.size;
         continue;
       }
 

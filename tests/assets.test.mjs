@@ -178,3 +178,9 @@ test("output object index classifies static, reference, and degraded export obje
   assert.equal(index.counts.byDegradationReason["interactive-content-static-record"], 1);
   assert.ok(index.objects.every((object) => object.objectId && object.messageId === "assistant-output"));
 });
+
+test("sediment asset pointer with hash correctly extracts file ID", async () => {
+  const pointer = "sediment://5b41352fcf08b9f#file_00000000968881fa85680179ee957d99#p_0.4394d890bd.jpg";
+  const fileMatch = pointer.match(/(file_[a-f0-9]{32}|file-[a-zA-Z0-9_-]+)/i);
+  assert.equal(fileMatch?.[1], "file_00000000968881fa85680179ee957d99");
+});
