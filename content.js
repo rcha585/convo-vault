@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.26";
+  const EXPORTER_VERSION = "0.7.27";
   const IS_EXTENSION_ENV = typeof chrome !== "undefined" && Boolean(chrome?.runtime?.id);
   const installedState = window.__chatGptConversationExporterInstalled;
 
@@ -6088,6 +6088,7 @@
     }
 
     const id = turnId || `api-assistant-${turnNumber}`;
+    const agentTrace = extractTurnAgentTrace(nodes, citations, memories);
 
     return {
       id,
@@ -6098,6 +6099,7 @@
       timestamp: formatConversationTimestamp(timestamp),
       markdown,
       thinkingMarkdown,
+      agentTrace,
       preview: truncatePreview(cleanMarkdown(`${markdown}\n${thinkingMarkdown}`), 180),
       sourceMessageId: primaryMessage?.id || id,
       sourceTurnId: id,
@@ -6720,6 +6722,130 @@
     }
 
     return `${header}\n>\n` + steps.map((s) => `> ${s}`).join("\n");
+  }
+
+  function extractTurnAgentTrace(nodes, citations = [], memories = []) {
+    const activities = [];
+    const internalToolCalls = [];
+    const fileIngestions = [];
+    const thinkingNodes = [];
+    const searches = [];
+
+    for (const node of nodes) {
+      const msg = node?.message;
+      if (!msg) continue;
+      const role = String(msg.author?.role || "").toLowerCase();
+      const recipient = String(msg.recipient || msg.metadata?.recipient || "").toLowerCase();
+      const channel = String(msg.channel || msg.metadata?.channel || "").toLowerCase();
+      const contentType = String(msg.content?.content_type || "").toLowerCase();
+      const metadata = msg.metadata || {};
+
+      // 1. Thinking / Reasoning
+      if (channel === "commentary" || channel === "analysis" || channel === "reasoning" || contentType === "thoughts" || isApiThinkingNode(msg)) {
+        const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
+        const text = parts.filter((p) => typeof p === "string" && p.trim()).join("\n");
+        const duration = Number(metadata.finished_duration_sec || metadata.thinking_duration_seconds || 0);
+        thinkingNodes.push({
+          nodeId: node.id,
+          channel,
+          contentType,
+          durationSeconds: duration,
+          summary: msg.content?.thoughts?.[0]?.summary || "",
+          content: text
+        });
+        activities.push({
+          type: "reasoning",
+          channel,
+          durationSeconds: duration,
+          summary: msg.content?.thoughts?.[0]?.summary || "",
+          snippet: text.slice(0, 300)
+        });
+      }
+
+      // 2. Web Searches
+      if (recipient === "web.run" || recipient === "browser" || metadata.search_result_groups || metadata.search_results) {
+        const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
+        const searchEntry = {
+          nodeId: node.id,
+          recipient,
+          queries: [],
+          results: []
+        };
+        for (const p of parts) {
+          if (typeof p === "string") {
+            const match = p.match(/"q(?:uery)?"\s*:\s*"([^"]+)"/g);
+            if (match) {
+              searchEntry.queries.push(...match.map((m) => m.replace(/.*"([^"]+)"$/, "$1")));
+            }
+          }
+        }
+        if (Array.isArray(metadata.search_result_groups)) {
+          for (const grp of metadata.search_result_groups) {
+            if (grp?.search_query) searchEntry.queries.push(grp.search_query);
+          }
+        }
+        if (Array.isArray(metadata.search_results)) {
+          for (const r of metadata.search_results) {
+            if (r?.url || r?.title) {
+              searchEntry.results.push({ title: r.title || "", url: r.url || "", snippet: r.snippet || "" });
+            }
+          }
+        }
+        searchEntry.queries = uniqueStrings(searchEntry.queries);
+        searches.push(searchEntry);
+        activities.push({
+          type: "web_search",
+          queries: searchEntry.queries,
+          resultCount: searchEntry.results.length
+        });
+      }
+
+      // 3. Tool Calls & Ingestion Slices
+      if (role === "tool" || isApiInternalToolCallNode(msg)) {
+        const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
+        const rawText = parts.filter((p) => typeof p === "string").join("\n");
+        const isFileIngest = isApiInternalFileIngestionText(rawText);
+
+        if (isFileIngest) {
+          fileIngestions.push({
+            nodeId: node.id,
+            recipient,
+            sizeBytes: rawText.length,
+            rawText
+          });
+          activities.push({
+            type: "file_ingestion",
+            recipient,
+            sizeBytes: rawText.length,
+            preview: rawText.slice(0, 200)
+          });
+        } else {
+          internalToolCalls.push({
+            nodeId: node.id,
+            role,
+            recipient,
+            rawContent: rawText
+          });
+          activities.push({
+            type: "tool_execution",
+            role,
+            recipient,
+            preview: rawText.slice(0, 200)
+          });
+        }
+      }
+    }
+
+    return {
+      activityCount: activities.length,
+      activities,
+      thinkingNodes,
+      searches,
+      internalToolCalls,
+      fileIngestions,
+      citations,
+      memories
+    };
   }
 
   function extractApiThinkingMarkdown(message) {

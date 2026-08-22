@@ -367,6 +367,52 @@ test("Fast API parser synthesizes multi-step assistant turn with DALL-E generate
   assert.match(messages[1].markdown, /!\[transparent_icon\.png\]\(sediment:\/\/file_00000000436882308a7266db7496bbd1\)/);
 });
 
+test("Fast API parser extracts agentTrace with document slices and keeps answer clean", async () => {
+  const fast = await loadFastCaptureModule();
+  const data = {
+    current_node: "answer",
+    mapping: {
+      root: { id: "root", parent: "", message: null },
+      prompt: {
+        id: "prompt",
+        parent: "root",
+        message: makeMessage("user", "Summarize attached doc.")
+      },
+      fileIngest: {
+        id: "fileIngest",
+        parent: "prompt",
+        message: makeMessage("tool", "[L1] <PARSED TEXT FOR PAGE: 1 / 3>\n[L2] Scenario 11", {
+          recipient: "myfiles_browser"
+        })
+      },
+      reasoning: {
+        id: "reasoning",
+        parent: "fileIngest",
+        message: makeMessage("assistant", "Read doc and plan response.", {
+          channel: "commentary",
+          metadata: { finished_duration_sec: 5 }
+        })
+      },
+      answer: {
+        id: "answer",
+        parent: "reasoning",
+        message: makeMessage("assistant", "Here is the clear summary.", {
+          channel: "final",
+          end_turn: true
+        })
+      }
+    }
+  };
+
+  const messages = fast.buildMessagesFromConversationApi(data);
+  assert.equal(messages.length, 2);
+  assert.equal(messages[1].markdown, "Here is the clear summary.");
+  assert.ok(messages[1].agentTrace);
+  assert.equal(messages[1].agentTrace.fileIngestions.length, 1);
+  assert.match(messages[1].agentTrace.fileIngestions[0].rawText, /\[L1\] <PARSED TEXT FOR PAGE/);
+  assert.equal(messages[1].agentTrace.thinkingNodes.length, 1);
+});
+
 async function loadFastCaptureModule() {
   const source = await readFile(path.join(repoRoot, "src", "content", "capture-fast.js"), "utf8");
   const context = vm.createContext({

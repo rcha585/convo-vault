@@ -530,6 +530,8 @@ function writeDataSidecars(directory, baseName, payload) {
   const files = [
     [`${baseName}.data.json`, dataJson],
     [`${baseName}.conversation.json`, JSON.stringify(bundle.conversation, null, 2)],
+    [`${baseName}.agent-trace.json`, JSON.stringify(bundle.agentTraces, null, 2)],
+    [`${baseName}.agent-trace.md`, bundle.agentTraceMarkdown],
     [`${baseName}.messages.jsonl`, bundle.messagesJsonl],
     [`${baseName}.qa-pairs.json`, JSON.stringify(bundle.qaPairs, null, 2)],
     [`${baseName}.topics.json`, JSON.stringify(bundle.topics, null, 2)],
@@ -547,6 +549,15 @@ function writeDataSidecars(directory, baseName, payload) {
 function buildDataBundle(payload) {
   const messages = payload.messages.map((message, index) => buildDataMessage(message, index));
   const outputObjectIndex = buildOutputObjectIndex(payload);
+  const agentTraces = messages
+    .filter((message) => message.agentTrace && message.agentTrace.activityCount > 0)
+    .map((message) => ({
+      turnNumber: message.turnNumber,
+      role: message.role,
+      timestamp: message.timestamp,
+      preview: message.preview,
+      trace: message.agentTrace
+    }));
   const conversation = {
     schemaVersion: 1,
     exporterVersion: payload.exporterVersion || "",
@@ -573,6 +584,8 @@ function buildDataBundle(payload) {
     conversation,
     messages,
     qaPairs,
+    agentTraces,
+    agentTraceMarkdown: buildAgentTraceMarkdown(conversation, messages, agentTraces),
     outputObjects: outputObjectIndex.objects,
     outputObjectCounts: outputObjectIndex.counts,
     topics,
@@ -580,6 +593,102 @@ function buildDataBundle(payload) {
     messagesJsonl: messages.map((message) => JSON.stringify(message)).join("\n") + "\n",
     summaryMarkdown: buildSummaryMarkdown(conversation, qaPairs, topics, entities)
   };
+}
+
+function buildAgentTraceMarkdown(conversation, messages, agentTraces) {
+  const lines = [
+    `# Agent Execution & Cognitive Architecture Trace: ${conversation.title}`,
+    "",
+    `> **Exported at**: ${conversation.exportedAt}`,
+    `> **Exporter Version**: ${conversation.exporterVersion || "v0.7.27"}`,
+    `> **Total Messages**: ${conversation.messageCount}`,
+    `> **AI Assistant Turns with Deep Trace**: ${agentTraces.length}`,
+    "",
+    "---",
+    ""
+  ];
+
+  if (!agentTraces.length) {
+    lines.push("*No internal tool calls or thinking traces were recorded for this session.*");
+    return lines.join("\n");
+  }
+
+  for (const entry of agentTraces) {
+    lines.push(`## Turn ${entry.turnNumber} (Assistant)`);
+    if (entry.timestamp) {
+      lines.push(`*Timestamp: ${entry.timestamp}*`);
+      lines.push("");
+    }
+
+    const trace = entry.trace || {};
+    const thinking = trace.thinkingNodes || [];
+    const searches = trace.searches || [];
+    const tools = trace.internalToolCalls || [];
+    const fileIngests = trace.fileIngestions || [];
+    const citations = trace.citations || [];
+
+    if (thinking.length) {
+      lines.push("### 💭 Reasoning & Thought Steps");
+      for (const t of thinking) {
+        const dur = t.durationSeconds ? ` (${t.durationSeconds}s)` : "";
+        if (t.summary) {
+          lines.push(`- **Summary**: ${t.summary}${dur}`);
+        }
+        if (t.content && t.content !== t.summary) {
+          lines.push(`  - Details: ${t.content.replace(/\n/g, " ")}`);
+        }
+      }
+      lines.push("");
+    }
+
+    if (fileIngests.length) {
+      lines.push("### 📄 Document Ingestions & Context Slices");
+      for (const fi of fileIngests) {
+        lines.push(`- **Tool/Channel**: \`${fi.recipient || "myfiles_browser"}\` (${fi.sizeBytes} bytes)`);
+        lines.push("  ```text");
+        lines.push(`  ${(fi.rawText || "").slice(0, 1000)}${fi.rawText?.length > 1000 ? "\n  ... [truncated in trace summary]" : ""}`);
+        lines.push("  ```");
+      }
+      lines.push("");
+    }
+
+    if (searches.length) {
+      lines.push("### 🔍 Web Searches & Information Retrieval");
+      for (const s of searches) {
+        lines.push(`- **Queries**: \`${s.queries.join("`, `")}\``);
+        if (s.results?.length) {
+          lines.push(`  - Results (${s.results.length}): ${s.results.slice(0, 5).map((r) => `[${r.title || r.url}](${r.url})`).join(", ")}`);
+        }
+      }
+      lines.push("");
+    }
+
+    if (tools.length) {
+      lines.push("### ⚙️ Tool & Code Invocations");
+      for (const tc of tools) {
+        lines.push(`- **Recipient**: \`${tc.recipient}\` (Role: ${tc.role})`);
+        lines.push("  ```text");
+        lines.push(`  ${(tc.rawContent || "").slice(0, 500)}${tc.rawContent?.length > 500 ? "\n  ..." : ""}`);
+        lines.push("  ```");
+      }
+      lines.push("");
+    }
+
+    if (citations.length) {
+      lines.push("### 📚 Citations & External Sources");
+      for (const c of citations) {
+        const title = c.metadata?.title || c.title || "Source";
+        const url = c.metadata?.url || c.url || "";
+        lines.push(`- ${url ? `[${title}](${url})` : title}`);
+      }
+      lines.push("");
+    }
+
+    lines.push("---");
+    lines.push("");
+  }
+
+  return lines.join("\n");
 }
 
 function buildDataMessage(message, index) {
@@ -598,6 +707,7 @@ function buildDataMessage(message, index) {
     text: plainText,
     markdown,
     thinkingMarkdown,
+    agentTrace: message.agentTrace || null,
     counts: {
       codeBlocks: message.codeBlockCount || countCodeBlocks(markdown, thinkingMarkdown),
       files: message.fileCount || extractFiles(markdown).length,

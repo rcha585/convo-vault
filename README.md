@@ -222,6 +222,8 @@ Convo Vault 的默认导出流程是本地优先：
 - `*.qa-pairs.json`：问答配对
 - `*.topics.json`：话题索引
 - `*.entities.json`：链接、文件名、日期等实体线索
+- `*.agent-trace.json`：Agent 认知与工具调用执行链路（含内部文档切片、搜索记录、代码调用）
+- `*.agent-trace.md`：Agent 认知链路与工具执行可读分析报告
 - `*.summary.md`：摘要索引
 - `*.assets.manifest.json`：图片和附件资源清单
 
