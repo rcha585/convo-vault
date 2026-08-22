@@ -6529,6 +6529,11 @@
       .length;
   }
 
+  function isApiImageHaystack(haystack) {
+    const text = String(haystack || "");
+    return /\bimage\b|image\/|img|picture|\.(?:png|jpe?g|gif|webp|avif|bmp|svg)(?:$|[?#])|sediment:\/\/|file_000/i.test(text);
+  }
+
   function isApiImageAttachment(attachment) {
     const haystack = [
       attachment?.mime_type,
@@ -6544,7 +6549,7 @@
       attachment?.file_url
     ].join(" ");
 
-    return /\bimage\//i.test(haystack) || /\.(?:png|jpe?g|gif|webp|avif|bmp|svg)(?:$|[?#])/i.test(haystack);
+    return isApiImageHaystack(haystack);
   }
 
   function sanitizeApiMarkdownLabel(value) {

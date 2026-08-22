@@ -320,6 +320,53 @@ test("Fast API parser enriches memory context and thinking duration", async () =
   assert.match(messages[1].markdown, /> - \*\*Memory\*\*: Desktop pet interaction changed to simulation first/);
 });
 
+test("Fast API parser synthesizes multi-step assistant turn with DALL-E generated image parts", async () => {
+  const fast = await loadFastCaptureModule();
+  const data = {
+    current_node: "tool-result",
+    mapping: {
+      root: { id: "root", parent: "", message: null },
+      prompt: {
+        id: "prompt",
+        parent: "root",
+        message: makeMessage("user", "Make this icon without background.")
+      },
+      dalleCall: {
+        id: "dalleCall",
+        parent: "prompt",
+        message: makeMessage("assistant", "Generating transparent icon...", {
+          recipient: "dalle.text2im",
+          end_turn: false
+        })
+      },
+      "tool-result": {
+        id: "tool-result",
+        parent: "dalleCall",
+        message: {
+          id: "tool-msg-1",
+          author: { role: "tool", name: "dalle.text2im" },
+          content: {
+            content_type: "multimodal_text",
+            parts: [
+              {
+                content_type: "image_asset_pointer",
+                asset_pointer: "sediment://file_00000000436882308a7266db7496bbd1",
+                name: "transparent_icon.png"
+              }
+            ]
+          }
+        }
+      }
+    }
+  };
+
+  const messages = fast.buildMessagesFromConversationApi(data);
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0].role, "user");
+  assert.equal(messages[1].role, "assistant");
+  assert.match(messages[1].markdown, /!\[transparent_icon\.png\]\(sediment:\/\/file_00000000436882308a7266db7496bbd1\)/);
+});
+
 async function loadFastCaptureModule() {
   const source = await readFile(path.join(repoRoot, "src", "content", "capture-fast.js"), "utf8");
   const context = vm.createContext({
