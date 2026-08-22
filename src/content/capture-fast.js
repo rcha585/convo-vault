@@ -859,8 +859,38 @@
             }
           }
         }
+        if (Array.isArray(metadata.search_result_groups)) {
+          for (const grp of metadata.search_result_groups) {
+            if (grp?.search_query) queries.push(grp.search_query);
+          }
+        }
         queries = uniqueStrings(queries);
-        addStep("🔍", "网页搜索", queries.length ? `检索 \`${queries.slice(0, 5).join("`, `")}\`` : "联网检索相关行业素材与案例");
+
+        const foundLinks = [];
+        if (Array.isArray(metadata.search_results)) {
+          for (const r of metadata.search_results) {
+            if (r?.url) {
+              foundLinks.push(`[${r.title || r.url}](${r.url})`);
+            }
+          }
+        }
+        if (Array.isArray(metadata.search_result_groups)) {
+          for (const grp of metadata.search_result_groups) {
+            if (Array.isArray(grp?.entries)) {
+              for (const entry of grp.entries) {
+                if (entry?.url) {
+                  foundLinks.push(`[${entry.title || entry.url}](${entry.url})`);
+                }
+              }
+            }
+          }
+        }
+
+        const linkSuffix = foundLinks.length
+          ? ` · 查阅 ${foundLinks.slice(0, 4).join(" · ")}`
+          : "";
+
+        addStep("🔍", "网页搜索", queries.length ? `检索 \`${queries.slice(0, 3).join("`, `")}\`${linkSuffix}` : `联网检索相关素材${linkSuffix}`);
       } else if (recipient === "container.exec" || recipient === "python") {
         const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
         const codeText = parts.filter((p) => typeof p === "string").join(" ");
@@ -898,6 +928,19 @@
           addStep("🧠", "推理思考", thought);
         }
       }
+    }
+
+    // 4. Clickable Source References
+    const activeCitations = citations
+      .map((c, i) => {
+        const title = c?.metadata?.title || c?.title || c?.metadata?.name || `来源 [${i + 1}]`;
+        const url = c?.metadata?.url || c?.url || c?.metadata?.extra?.url || c?.metadata?.cloud_doc_url || "";
+        return url ? `[${title}](${url})` : `📄 ${title}`;
+      })
+      .filter(Boolean);
+
+    if (activeCitations.length) {
+      addStep("🌐", "引用来源", activeCitations.slice(0, 6).join(" · "));
     }
 
     if (!steps.length && maxDurationSec === 0) {
@@ -1149,13 +1192,15 @@
       }
 
       // Replace matching citation tokens if present
-      const markerPattern = new RegExp(`fileciteturn\\d+file\\d+L\\d+-L\\d+|fileciteturn\\d+file\\d+`, "g");
+      const markerPattern = new RegExp(`fileciteturn\\d+file\\d+L\\d+-L\\d+|fileciteturn\\d+file\\d+|【\\d+:\\d+†source】|【\\d+†source】|【turn\\d+search\\d+】`, "g");
       enriched = enriched.replace(markerPattern, `[^${footnoteIndex}]`);
     });
 
     // Remove any remaining raw citation tokens and normalize footnote spacing
     enriched = enriched
       .replace(/fileciteturn\w+/gi, "")
+      .replace(/【\d+(?::\d+)?†source】/gi, "")
+      .replace(/【turn\d+search\d+】/gi, "")
       .replace(/[ \t]+(\[\^\d+\])/g, " $1");
 
     if (footnotes.length) {
