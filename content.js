@@ -6027,7 +6027,12 @@
           if (typeof part === "string" && part.trim()) {
             if (isThinking) {
               thinkingParts.push(part.trim());
-            } else if (!isInternalTool && !looksLikeInternalApiToolCall(part) && !looksLikeApiJsonPayload(part)) {
+            } else if (
+              !isInternalTool
+              && !isApiInternalFileIngestionText(part)
+              && !looksLikeInternalApiToolCall(part)
+              && !looksLikeApiJsonPayload(part)
+            ) {
               textParts.push(part.trim());
             }
           } else if (part && typeof part === "object") {
@@ -6045,7 +6050,12 @@
         if (!parts.length && typeof content.text === "string" && content.text.trim()) {
           if (isThinking) {
             thinkingParts.push(content.text.trim());
-          } else if (!isInternalTool && !looksLikeInternalApiToolCall(content.text) && !looksLikeApiJsonPayload(content.text)) {
+          } else if (
+            !isInternalTool
+            && !isApiInternalFileIngestionText(content.text)
+            && !looksLikeInternalApiToolCall(content.text)
+            && !looksLikeApiJsonPayload(content.text)
+          ) {
             textParts.push(content.text.trim());
           }
         }
@@ -6117,18 +6127,36 @@
     );
   }
 
+  function isApiInternalFileIngestionText(text) {
+    const str = String(text || "").trim();
+    if (!str) return false;
+    return (
+      /Make sure to include fileL\d+-L\d+ in your response/i.test(str)
+      || /Use ref_id "turn\d+file\d+"/i.test(str)
+      || /\[L\d+\]\s*<PARSED TEXT FOR PAGE/i.test(str)
+      || (/^\[L\d+\]/m.test(str) && /PARSED TEXT/i.test(str))
+      || /scoped to this file\.\s*Use `?files\.(?:search|find|read)`?/i.test(str)
+      || /Full file size:\s*\d+\s*pages/i.test(str)
+    );
+  }
+
   function isApiInternalToolCallNode(msg) {
     if (!msg) return false;
     const recipient = String(msg.recipient || msg.metadata?.recipient || msg.author?.metadata?.recipient || "").toLowerCase();
     const contentType = String(msg.content?.content_type || msg.content?.contentType || "").toLowerCase();
     const messageType = String(msg.metadata?.message_type || msg.metadata?.messageType || "").toLowerCase();
     const role = String(msg.author?.role || "").toLowerCase();
+    const name = String(msg.author?.name || "").toLowerCase();
 
-    if (role === "tool" && messageType !== "image" && contentType !== "multimodal_text") {
+    if (role === "tool" || role === "system") {
       return true;
     }
 
-    if (["python", "web.run", "browser", "search", "api_tool.search_plugins", "api_tool.suggest_installs", "api_tool.list_resources"].includes(recipient)) {
+    if (name.includes("browser") || name.includes("myfiles") || name.includes("search") || name.includes("tool")) {
+      return true;
+    }
+
+    if (["python", "web.run", "browser", "search", "myfiles_browser", "file_search", "api_tool", "api_tool.search_plugins", "api_tool.call_tool", "api_tool.suggest_installs", "api_tool.list_resources"].some((r) => recipient.includes(r))) {
       return true;
     }
 
@@ -6138,6 +6166,13 @@
 
     if (contentType === "code" && recipient && recipient !== "all") {
       return true;
+    }
+
+    const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
+    for (const part of parts) {
+      if (typeof part === "string" && isApiInternalFileIngestionText(part)) {
+        return true;
+      }
     }
 
     return false;
@@ -6774,9 +6809,25 @@
 
     citations.forEach((citation, index) => {
       const footnoteIndex = index + 1;
-      const title = citation?.metadata?.title || citation?.title || citation?.metadata?.name || `Source ${footnoteIndex}`;
-      const url = citation?.metadata?.url || citation?.url || citation?.metadata?.cloud_doc_url || "";
-      footnotes.push(`[^${footnoteIndex}]: [${title}](${url})`);
+      const title = citation?.metadata?.title
+        || citation?.title
+        || citation?.metadata?.name
+        || citation?.name
+        || `Source ${footnoteIndex}`;
+      const url = citation?.metadata?.url
+        || citation?.url
+        || citation?.metadata?.cloud_doc_url
+        || citation?.metadata?.extra?.url
+        || citation?.metadata?.search_result?.url
+        || citation?.metadata?.search_result?.link
+        || citation?.link
+        || "";
+
+      if (url) {
+        footnotes.push(`[^${footnoteIndex}]: [${title}](${url})`);
+      } else {
+        footnotes.push(`[^${footnoteIndex}]: 📄 **Document**: ${title}`);
+      }
 
       // Replace matching citation tokens if present
       const markerPattern = new RegExp(`fileciteturn\\d+file\\d+L\\d+-L\\d+|fileciteturn\\d+file\\d+`, "g");
