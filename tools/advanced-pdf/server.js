@@ -1217,8 +1217,10 @@ function setCorsHeaders(request, response) {
   const origin = request.headers.origin || "*";
   response.setHeader("Access-Control-Allow-Origin", origin);
   response.setHeader("Vary", "Origin");
-  response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  response.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Convo-Vault-Token");
+  response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  response.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Convo-Vault-Token, x-convo-vault-token, Authorization, authorization, *");
+  response.setHeader("Access-Control-Allow-Private-Network", "true");
+  response.setHeader("Access-Control-Max-Age", "86400");
   response.setHeader("Access-Control-Expose-Headers", [
     "Content-Disposition",
     "X-PDF-Engine",
