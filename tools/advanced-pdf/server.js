@@ -48,14 +48,6 @@ async function handleRequest(request, response) {
     return;
   }
 
-  if (!isLocalApiAuthorized(request)) {
-    sendJson(response, 401, {
-      ok: false,
-      error: "Missing or invalid local API token."
-    });
-    return;
-  }
-
   const url = new URL(request.url || "/", `http://${HOST}:${PORT}`);
 
   if (request.method === "GET" && url.pathname === "/health") {
@@ -66,6 +58,14 @@ async function handleRequest(request, response) {
       authRequired: Boolean(LOCAL_API_TOKEN),
       cacheRoot: getCacheRoot(),
       edgePath: findEdgeExecutable() || null
+    });
+    return;
+  }
+
+  if (!isLocalApiAuthorized(request)) {
+    sendJson(response, 401, {
+      ok: false,
+      error: "Missing or invalid local API token."
     });
     return;
   }
@@ -1126,7 +1126,16 @@ function setCorsHeaders(request, response) {
 
 function isLocalApiAuthorized(request) {
   if (!LOCAL_API_TOKEN) {
-    return !request.headers.origin;
+    const origin = String(request.headers.origin || "").toLowerCase();
+    if (!origin) return true;
+    return (
+      origin === "https://chatgpt.com"
+      || origin === "https://gemini.google.com"
+      || origin.startsWith("chrome-extension://")
+      || origin.startsWith("moz-extension://")
+      || origin === "http://localhost:38474"
+      || origin === "http://127.0.0.1:38474"
+    );
   }
 
   const providedToken = String(request.headers[LOCAL_API_TOKEN_HEADER] || "").trim();
