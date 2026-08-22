@@ -232,7 +232,7 @@ test("Fast API parser merges non-final assistant thinking into final answers", a
 
   assert.equal(messages.length, 2);
   assert.equal(messages[1].markdown, "The file looks relevant.");
-  assert.equal(messages[1].thinkingMarkdown, "Checking the uploaded file and comparing the visible details.");
+  assert.match(messages[1].thinkingMarkdown, /Checking the uploaded file and comparing the visible details\./);
   assert.deepEqual(JSON.parse(JSON.stringify(events.find((event) => event.name === "fastCapture.thinkingMerged")?.payload)), {
     applied: 1
   });
@@ -314,8 +314,8 @@ test("Fast API parser enriches memory context and thinking duration", async () =
 
   const messages = fast.buildMessagesFromConversationApi(data);
   assert.equal(messages.length, 2);
-  assert.match(messages[1].thinkingMarkdown, /> 💭 \*\*Thinking \(Worked for 11s\)\*\*/);
-  assert.match(messages[1].thinkingMarkdown, /> Analyzed past discussions\./);
+  assert.match(messages[1].thinkingMarkdown, /> 💭 \*\*Thinking Process \(Worked for 11s\)\*\*/);
+  assert.match(messages[1].thinkingMarkdown, /Analyzed past discussions\./);
   assert.match(messages[1].markdown, /> 🧠 \*\*Memory & Context\*\*:/);
   assert.match(messages[1].markdown, /> - \*\*Memory\*\*: Desktop pet interaction changed to simulation first/);
 });

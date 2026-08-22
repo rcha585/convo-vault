@@ -256,7 +256,7 @@
       combinedFiles
     ].filter(Boolean).join("\n\n"));
 
-    let thinkingMarkdown = cleanApiMarkdown(uniqueStrings(thinkingParts).join("\n\n"));
+    const thinkingMarkdown = cleanApiMarkdown(buildTurnThinkingTimeline(nodes, citations));
 
     if (primaryMessage) {
       markdown = enrichApiMarkdownWithCitations(markdown, primaryMessage);
@@ -762,6 +762,124 @@
       || "Image";
   }
 
+  function buildTurnThinkingTimeline(nodes, citations = []) {
+    const steps = [];
+    let maxDurationSec = 0;
+    const seenSteps = new Set();
+
+    function addStep(icon, label, content) {
+      const cleanContent = String(content || "").trim();
+      if (!cleanContent) return;
+      const key = `${label}:${cleanContent}`;
+      if (seenSteps.has(key)) return;
+      seenSteps.add(key);
+      steps.push(`- ${icon} **${label}**: ${cleanContent}`);
+    }
+
+    for (const node of nodes) {
+      const msg = node?.message;
+      if (!msg) continue;
+
+      const metadata = msg.metadata || {};
+      const duration = Number(metadata.finished_duration_sec || metadata.thinking_duration_seconds || 0);
+      if (duration > maxDurationSec) {
+        maxDurationSec = duration;
+      }
+
+      const channel = String(msg.channel || metadata.channel || "").toLowerCase();
+      const isCommentary = channel === "commentary" || msg.metadata?.is_thinking_preamble_message === true;
+
+      // 1. Commentary / Preamble / Analysis
+      if (isCommentary) {
+        const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
+        const commentaryText = parts.filter((p) => typeof p === "string" && p.trim()).join(" ");
+        if (commentaryText && !looksLikeInternalApiToolCall(commentaryText) && !looksLikeApiJsonPayload(commentaryText)) {
+          addStep("💬", "分析计划", commentaryText);
+        }
+      } else if (channel === "analysis" || channel === "reasoning") {
+        const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
+        const analysisText = parts.filter((p) => typeof p === "string" && p.trim()).join(" ");
+        if (analysisText && !looksLikeInternalApiToolCall(analysisText) && !looksLikeApiJsonPayload(analysisText)) {
+          addStep("🧠", "推理思考", analysisText);
+        }
+      }
+
+      // 2. Tool & Skill Invocations
+      const recipient = String(msg.recipient || metadata.recipient || "").toLowerCase();
+
+      if (recipient.includes("google_drive") || recipient.includes("api_tool")) {
+        const docCitation = citations.find((c) => c?.metadata?.title || c?.title);
+        const docTitle = docCitation?.metadata?.title || docCitation?.title || "";
+        addStep("🔌", "调用工具", `**Google Drive** · ${docTitle ? `读取文档《${docTitle}》` : "查询相关文档"}`);
+      } else if (recipient === "web.run" || recipient === "browser") {
+        const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
+        let queries = [];
+        for (const p of parts) {
+          if (typeof p === "string") {
+            const match = p.match(/"q(?:uery)?"\s*:\s*"([^"]+)"/g);
+            if (match) {
+              queries.push(...match.map((m) => m.replace(/.*"([^"]+)"$/, "$1")));
+            }
+          }
+        }
+        queries = uniqueStrings(queries);
+        addStep("🔍", "网页搜索", queries.length ? `检索 \`${queries.slice(0, 5).join("`, `")}\`` : "联网检索相关行业素材与案例");
+      } else if (recipient === "container.exec" || recipient === "python") {
+        const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
+        const codeText = parts.filter((p) => typeof p === "string").join(" ");
+        if (/slides|pptx/i.test(codeText)) {
+          addStep("🎨", "调用技能", "**Slide Generator** · 生成 PPTX 幻灯片演示文稿");
+        } else {
+          addStep("⚙️", "执行代码", "**Python Sandbox** · 执行数据与资产处理");
+        }
+      } else if (recipient === "dalle.text2im" || recipient.includes("image")) {
+        addStep("🖼️", "生成图像", "**DALL-E** · 渲染多模态视觉设计与图标");
+      }
+
+      // 3. Thoughts & Reasoning Summaries
+      if (Array.isArray(msg.content?.thoughts)) {
+        for (const t of msg.content.thoughts) {
+          if (t?.summary) {
+            addStep("🧠", "推理思考", t.summary);
+          }
+        }
+      }
+
+      if (Array.isArray(metadata.reasoning_titles)) {
+        for (const title of metadata.reasoning_titles) {
+          if (title) {
+            addStep("🧠", "推理思考", title);
+          }
+        }
+      }
+
+      // Fallback simple string thoughts
+      const simpleThoughts = [metadata.reasoning, metadata.reasoning_content, metadata.thinking, metadata.thoughts]
+        .filter((v) => typeof v === "string" && v.trim());
+      for (const thought of simpleThoughts) {
+        if (!looksLikeInternalApiToolCall(thought) && !looksLikeApiJsonPayload(thought)) {
+          addStep("🧠", "推理思考", thought);
+        }
+      }
+    }
+
+    if (!steps.length && maxDurationSec === 0) {
+      return "";
+    }
+
+    const durationPrefix = maxDurationSec > 0
+      ? `Worked for ${maxDurationSec >= 60 ? `${Math.floor(maxDurationSec / 60)}m ${maxDurationSec % 60}s` : `${maxDurationSec}s`}`
+      : "";
+
+    const header = durationPrefix ? `> 💭 **Thinking Process (${durationPrefix})**` : "> 💭 **Thinking Process**";
+
+    if (!steps.length) {
+      return header;
+    }
+
+    return `${header}\n>\n` + steps.map((s) => `> ${s}`).join("\n");
+  }
+
   function extractApiThinkingMarkdown(message) {
     const metadata = message?.metadata || {};
     const candidates = [
@@ -797,9 +915,9 @@
 
     let thinkingText = allThinkingParts.join("\n\n").trim();
     if (durationPrefix && thinkingText) {
-      thinkingText = `> 💭 **Thinking (${durationPrefix})**\n>\n` + thinkingText.split("\n").map((line) => `> ${line}`).join("\n");
+      thinkingText = `> 💭 **Thinking Process (${durationPrefix})**\n>\n` + thinkingText.split("\n").map((line) => `> ${line}`).join("\n");
     } else if (durationPrefix && !thinkingText) {
-      thinkingText = `> 💭 **Thinking (${durationPrefix})**`;
+      thinkingText = `> 💭 **Thinking Process (${durationPrefix})**`;
     }
 
     return thinkingText;
