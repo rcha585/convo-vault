@@ -1393,13 +1393,21 @@
 
   async function getExporterSettings() {
     if (typeof chrome === "undefined" || !chrome.storage?.local) {
-      return { ...DEFAULT_EXPORTER_SETTINGS };
+      return Promise.resolve({ ...DEFAULT_EXPORTER_SETTINGS });
     }
 
     return new Promise((resolve) => {
-      chrome.storage.local.get([SETTINGS_STORAGE_KEY], (result) => {
-        resolve(normalizeExporterSettings(result?.[SETTINGS_STORAGE_KEY]));
-      });
+      try {
+        chrome.storage.local.get([SETTINGS_STORAGE_KEY], (result) => {
+          if (chrome.runtime?.lastError) {
+            resolve({ ...DEFAULT_EXPORTER_SETTINGS });
+            return;
+          }
+          resolve(normalizeExporterSettings(result?.[SETTINGS_STORAGE_KEY]));
+        });
+      } catch (_) {
+        resolve({ ...DEFAULT_EXPORTER_SETTINGS });
+      }
     });
   }
 
