@@ -1931,6 +1931,7 @@
       preview: message?.preview || "",
       markdown,
       thinkingMarkdown,
+      agentTrace: message?.agentTrace || null,
       codeBlockCount: message?.codeBlockCount || 0,
       fileCount: message?.fileCount || 0,
       imageCount,
