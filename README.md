@@ -114,6 +114,7 @@ npm run build:extension
 - 点击 **Open Selector**
 - 面板只打开，不会立即扫描
 - 默认使用 `Full (Recommended)`；确认模式后点击 **Start Scan**
+- `Fast` 使用 ChatGPT 当前的复数会话接口，并自动向前分页直到最早消息；旧单数接口仍作为兼容兜底
 - 等待完整性检查通过；若显示缺失消息，先重新扫描或检查列出的缺失顺序
 - 勾选要导出的消息
 - 导出 bundle

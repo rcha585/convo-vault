@@ -413,29 +413,161 @@ test("Fast API parser extracts agentTrace with document slices and keeps answer 
   assert.equal(messages[1].agentTrace.thinkingNodes.length, 1);
 });
 
-async function loadFastCaptureModule() {
+test("Fast API fetch loads every page from the plural conversations endpoint", async () => {
+  const conversationId = "conversation-pagination-test";
+  const accessToken = "bootstrap-access-token-12345678901234567890";
+  const requests = [];
+  const events = [];
+  const newestPage = {
+    current_node: "message-4",
+    messages: [
+      makeMessage("user", "Latest question", { id: "message-3" }),
+      makeMessage("assistant", "Latest answer", { id: "message-4", end_turn: true })
+    ],
+    page_info: {
+      start_cursor: "cursor-before-message-3",
+      end_cursor: "cursor-message-4",
+      has_previous_page: true,
+      has_next_page: false
+    }
+  };
+  const olderPage = {
+    current_node: "message-3",
+    messages: [
+      makeMessage("user", "First question", { id: "message-1" }),
+      makeMessage("assistant", "First answer", { id: "message-2", end_turn: true }),
+      makeMessage("user", "Stale boundary copy", { id: "message-3" })
+    ],
+    page_info: {
+      start_cursor: "cursor-message-1",
+      end_cursor: "cursor-before-message-3",
+      has_previous_page: false,
+      has_next_page: true
+    }
+  };
+  const fast = await loadFastCaptureModule({
+    document: {
+      querySelectorAll() {
+        return [{ textContent: JSON.stringify({ session: { accessToken } }) }];
+      }
+    },
+    location: {
+      origin: "https://chatgpt.com",
+      href: `https://chatgpt.com/c/${conversationId}`,
+      pathname: `/c/${conversationId}`,
+      search: ""
+    },
+    async fetch(url, options = {}) {
+      requests.push({ url: String(url), headers: options.headers || {} });
+
+      if (String(url).endsWith("/api/auth/session")) {
+        return makeJsonResponse(404, {});
+      }
+
+      if (String(url).includes(`/backend-api/conversations/${conversationId}`)) {
+        const parsed = new URL(url);
+        return makeJsonResponse(200, parsed.searchParams.has("before") ? olderPage : newestPage);
+      }
+
+      return makeJsonResponse(404, {});
+    }
+  });
+
+  const data = await fast.fetchConversationData(conversationId, {
+    timeoutMs: 1_000,
+    debugLog: {
+      event(name, payload) {
+        events.push({ name, payload });
+      }
+    }
+  });
+  const messages = fast.buildMessagesFromConversationApi(data);
+  const apiRequests = requests.filter((request) => request.url.includes("/backend-api/conversations/"));
+
+  assert.equal(apiRequests.length, 2);
+  assert.match(apiRequests[0].url, /\/backend-api\/conversations\/conversation-pagination-test\?/);
+  assert.match(apiRequests[0].url, /include_has_versions=true/);
+  assert.match(apiRequests[0].url, /num_turns=100/);
+  assert.match(apiRequests[1].url, /before=cursor-before-message-3/);
+  assert.ok(apiRequests.every((request) => request.headers.authorization === `Bearer ${accessToken}`));
+  assert.deepEqual(Array.from(data.messages, (message) => message.id), [
+    "message-1",
+    "message-2",
+    "message-3",
+    "message-4"
+  ]);
+  assert.equal(data.messages[2].content.parts[0], "Latest question");
+  assert.equal(data.page_info.has_previous_page, false);
+  assert.deepEqual(Array.from(messages, (message) => message.markdown), [
+    "First question",
+    "First answer",
+    "Latest question",
+    "Latest answer"
+  ]);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(events.find((event) => event.name === "conversationApi.pagination.complete")?.payload)),
+    {
+      label: "bearer:/backend-api/conversations/conversation-pagination-test?include_has_versions=true&num_turns=100",
+      pageCount: 2,
+      totalRawMessages: 4
+    }
+  );
+});
+
+async function loadFastCaptureModule(overrides = {}) {
   const source = await readFile(path.join(repoRoot, "src", "content", "capture-fast.js"), "utf8");
   const context = vm.createContext({
+    AbortController,
     CONVERSATION_API_FETCH_TIMEOUT_MS: 15_000,
     CONVERSATION_TIMESTAMP_FETCH_TIMEOUT_MS: 3_500,
     CONVERSATION_API_ATTEMPT_TIMEOUT_MS: 4_500,
+    URL,
+    URLSearchParams,
     cleanMarkdown,
     countMarkdownImages,
+    createCaptureCancelledError(reason) {
+      return new Error(String(reason || "Capture cancelled."));
+    },
+    document: {
+      querySelectorAll() {
+        return [];
+      }
+    },
     filenameFromUrl,
     formatConversationTimestamp,
+    isCaptureCancelledError() {
+      return false;
+    },
     getCodeBlockDiagnostics,
+    location: {
+      origin: "https://chatgpt.com",
+      href: "https://chatgpt.com/c/test-conversation",
+      pathname: "/c/test-conversation",
+      search: ""
+    },
     sanitizeFileAttachmentName,
+    throwIfCaptureCancelled() {},
     truncatePreview,
-    uniqueStrings
+    uniqueStrings,
+    window: {
+      clearTimeout,
+      setTimeout
+    },
+    ...overrides
   });
 
-  vm.runInContext(`${source}\nglobalThis.__fastCaptureTest = { buildMessagesFromConversationApi };`, context);
+  vm.runInContext(`${source}\nglobalThis.__fastCaptureTest = {
+    buildConversationApiAttempts,
+    buildMessagesFromConversationApi,
+    fetchConversationData,
+    mergeConversationApiPages
+  };`, context);
   return context.__fastCaptureTest;
 }
 
 function makeMessage(role, text, options = {}) {
   return {
-    id: `${role}-${hashText(text)}`,
+    id: options.id || `${role}-${hashText(text)}`,
     author: { role },
     content: {
       content_type: options.contentType || "text",
@@ -445,6 +577,25 @@ function makeMessage(role, text, options = {}) {
     end_turn: options.end_turn,
     metadata: options.metadata || {},
     recipient: options.recipient || ""
+  };
+}
+
+function makeJsonResponse(status, data) {
+  const body = JSON.stringify(data);
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: {
+      get(name) {
+        return String(name).toLowerCase() === "content-type" ? "application/json" : "";
+      }
+    },
+    async json() {
+      return JSON.parse(body);
+    },
+    async text() {
+      return body;
+    }
   };
 }
 

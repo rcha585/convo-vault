@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.8.1";
+  const EXPORTER_VERSION = "0.8.2";
   const IS_EXTENSION_ENV = typeof chrome !== "undefined" && Boolean(chrome?.runtime?.id);
   const installedState = window.__chatGptConversationExporterInstalled;
 
@@ -5829,6 +5829,9 @@
     return Boolean(time && time === text && TIMESTAMP_CUE_RE.test(text));
   }
 
+  const FAST_CONVERSATION_API_PAGE_SIZE = 100;
+  const FAST_CONVERSATION_API_MAX_PAGES = 200;
+
   async function collectFastConversationMessages(debugLog = null, options = {}) {
     const signal = options.signal || null;
     throwIfCaptureCancelled(signal);
@@ -6413,21 +6416,7 @@
   }
 
   function getConversationApiLinearMessages(data) {
-    const candidates = [
-      data?.messages,
-      data?.items,
-      data?.linear_conversation,
-      data?.linearConversation,
-      data?.conversation?.messages,
-      data?.conversation?.items,
-      data?.conversation?.linear_conversation,
-      data?.data?.messages,
-      data?.data?.items,
-      data?.data?.linear_conversation
-    ];
-
-    return candidates
-      .find(Array.isArray)
+    return getConversationApiRawMessages(data)
       ?.map((item) => item?.message || item)
       .filter((message) => message && typeof message === "object") || [];
   }
@@ -7161,7 +7150,12 @@
     for (const attempt of attempts) {
       throwIfCaptureCancelled(signal);
       try {
-        const data = await fetchConversationApiAttempt(attempt, attemptTimeoutMs, signal);
+        let data = await fetchConversationApiAttempt(attempt, attemptTimeoutMs, signal);
+        data = await fetchRemainingConversationApiPages(data, attempt, {
+          timeoutMs: attemptTimeoutMs,
+          signal,
+          debugLog
+        });
         throwIfCaptureCancelled(signal);
         const mapping = getConversationApiMapping(data);
         const linearMessages = getConversationApiLinearMessages(data);
@@ -7221,6 +7215,9 @@
   function buildConversationApiAttempts(conversationId, accessToken = "") {
     const encodedId = encodeURIComponent(conversationId);
     const paths = uniqueStrings([
+      `/backend-api/conversations/${encodedId}?include_has_versions=true&num_turns=${FAST_CONVERSATION_API_PAGE_SIZE}`,
+      `/backend-api/conversations/${encodedId}?include_has_versions=true&num_turns=10`,
+      `/backend-api/conversations/${encodedId}`,
       `/backend-api/conversation/${encodedId}?tree_format=true`,
       `/backend-api/conversation/${encodedId}`,
       `/backend-api/conversation/${encodedId}?tree_format=false`,
@@ -7240,12 +7237,184 @@
           url: url.href,
           authMode,
           accessToken,
+          pagination: /^\/backend-api\/conversations\//i.test(url.pathname) ? "before" : "",
           headers: isRouteData ? { "x-remix-request": "yes" } : {}
         });
       }
     }
 
     return attempts;
+  }
+
+  async function fetchRemainingConversationApiPages(initialData, attempt, options = {}) {
+    if (attempt?.pagination !== "before") {
+      return initialData;
+    }
+
+    const signal = options.signal || null;
+    const debugLog = options.debugLog || null;
+    const timeoutMs = Number(options.timeoutMs || CONVERSATION_API_ATTEMPT_TIMEOUT_MS);
+    let mergedData = initialData;
+    let pageData = initialData;
+    let pageCount = 1;
+    let totalRawMessages = getConversationApiRawMessages(initialData).length;
+    const seenCursors = new Set();
+
+    while (conversationApiHasPreviousPage(pageData)) {
+      throwIfCaptureCancelled(signal);
+      const pageInfo = getConversationApiPageInfo(pageData);
+      const cursor = String(pageInfo?.start_cursor || pageInfo?.startCursor || "").trim();
+
+      if (!cursor) {
+        throw new Error("pagination response is missing start_cursor");
+      }
+
+      if (seenCursors.has(cursor)) {
+        throw new Error("pagination cursor repeated");
+      }
+
+      if (pageCount >= FAST_CONVERSATION_API_MAX_PAGES) {
+        throw new Error(`pagination exceeded ${FAST_CONVERSATION_API_MAX_PAGES} pages`);
+      }
+
+      seenCursors.add(cursor);
+      const pageUrl = new URL(attempt.url);
+      pageUrl.searchParams.set("before", cursor);
+      const pageAttempt = {
+        ...attempt,
+        label: `${attempt.label}:older-page-${pageCount + 1}`,
+        url: pageUrl.href
+      };
+
+      pageData = await fetchConversationApiAttempt(pageAttempt, timeoutMs, signal);
+      throwIfCaptureCancelled(signal);
+      const pageMessages = getConversationApiRawMessages(pageData);
+
+      if (!pageMessages.length) {
+        throw new Error("pagination returned an empty older page");
+      }
+
+      mergedData = mergeConversationApiPages(pageData, mergedData);
+      pageCount += 1;
+      totalRawMessages = getConversationApiRawMessages(mergedData).length;
+      debugLog?.event("conversationApi.pagination.page", {
+        label: attempt.label,
+        pageCount,
+        pageMessageCount: pageMessages.length,
+        totalRawMessages,
+        hasPreviousPage: conversationApiHasPreviousPage(pageData)
+      });
+    }
+
+    if (pageCount > 1) {
+      debugLog?.event("conversationApi.pagination.complete", {
+        label: attempt.label,
+        pageCount,
+        totalRawMessages
+      });
+    }
+
+    return mergedData;
+  }
+
+  function mergeConversationApiPages(olderPage, newerPage) {
+    const olderMessages = getConversationApiRawMessages(olderPage);
+    const newerMessages = getConversationApiRawMessages(newerPage);
+    const combined = [...olderMessages, ...newerMessages];
+    const lastIndexById = new Map();
+
+    combined.forEach((item, index) => {
+      const id = getConversationApiRawMessageId(item);
+      if (id) {
+        lastIndexById.set(id, index);
+      }
+    });
+
+    const messages = combined.filter((item, index) => {
+      const id = getConversationApiRawMessageId(item);
+      return !id || lastIndexById.get(id) === index;
+    });
+    const olderPageInfo = getConversationApiPageInfo(olderPage);
+    const newerPageInfo = getConversationApiPageInfo(newerPage);
+    const pageInfo = {
+      ...(newerPageInfo || {}),
+      start_cursor: olderPageInfo?.start_cursor ?? olderPageInfo?.startCursor ?? newerPageInfo?.start_cursor,
+      has_previous_page: conversationApiHasPreviousPage(olderPage),
+      end_cursor: newerPageInfo?.end_cursor ?? newerPageInfo?.endCursor ?? olderPageInfo?.end_cursor,
+      has_next_page: newerPageInfo?.has_next_page ?? newerPageInfo?.hasNextPage ?? false
+    };
+
+    return setConversationApiMessagesAndPageInfo(newerPage, messages, pageInfo);
+  }
+
+  function getConversationApiRawMessages(data) {
+    const candidates = [
+      data?.messages,
+      data?.items,
+      data?.linear_conversation,
+      data?.linearConversation,
+      data?.conversation?.messages,
+      data?.conversation?.items,
+      data?.conversation?.linear_conversation,
+      data?.data?.messages,
+      data?.data?.items,
+      data?.data?.linear_conversation
+    ];
+
+    return candidates.find(Array.isArray) || [];
+  }
+
+  function getConversationApiRawMessageId(item) {
+    const message = item?.message || item;
+    return String(message?.id || message?.message_id || item?.id || "").trim();
+  }
+
+  function getConversationApiPageInfo(data) {
+    const candidates = [
+      data?.page_info,
+      data?.pageInfo,
+      data?.conversation?.page_info,
+      data?.conversation?.pageInfo,
+      data?.data?.page_info,
+      data?.data?.pageInfo
+    ];
+
+    return candidates.find((value) => value && typeof value === "object" && !Array.isArray(value)) || null;
+  }
+
+  function conversationApiHasPreviousPage(data) {
+    const pageInfo = getConversationApiPageInfo(data);
+    return pageInfo?.has_previous_page === true || pageInfo?.hasPreviousPage === true;
+  }
+
+  function setConversationApiMessagesAndPageInfo(data, messages, pageInfo) {
+    if (Array.isArray(data?.conversation?.messages)) {
+      return {
+        ...data,
+        conversation: {
+          ...data.conversation,
+          messages,
+          page_info: pageInfo
+        }
+      };
+    }
+
+    if (Array.isArray(data?.data?.messages)) {
+      return {
+        ...data,
+        data: {
+          ...data.data,
+          messages,
+          page_info: pageInfo
+        }
+      };
+    }
+
+    return {
+      ...data,
+      messages,
+      page_info: pageInfo
+    };
   }
 
   function buildConversationRouteDataPaths() {
@@ -7324,6 +7493,8 @@
 
     chatGptAccessTokenLoaded = true;
 
+    let tokenSource = "";
+
     try {
       const url = new URL("/api/auth/session", location.origin);
       const response = await fetchWithTimeout(url.href, {
@@ -7338,15 +7509,11 @@
 
       if (!response.ok) {
         debugLog?.event("conversationApi.token.failed", { status: response.status });
-        return "";
+      } else {
+        const session = await response.json();
+        cachedChatGptAccessToken = extractAccessTokenFromSession(session);
+        tokenSource = cachedChatGptAccessToken ? "session-api" : "";
       }
-
-      const session = await response.json();
-      cachedChatGptAccessToken = extractAccessTokenFromSession(session);
-      debugLog?.event("conversationApi.token.loaded", {
-        available: Boolean(cachedChatGptAccessToken)
-      });
-      return cachedChatGptAccessToken;
     } catch (error) {
       if (isCaptureCancelledError(error)) {
         chatGptAccessTokenLoaded = false;
@@ -7355,8 +7522,18 @@
       debugLog?.event("conversationApi.token.failed", {
         error: error?.message || String(error)
       });
-      return "";
     }
+
+    if (!cachedChatGptAccessToken) {
+      cachedChatGptAccessToken = getChatGptAccessTokenFromPageBootstrap();
+      tokenSource = cachedChatGptAccessToken ? "page-bootstrap" : "";
+    }
+
+    debugLog?.event("conversationApi.token.loaded", {
+      available: Boolean(cachedChatGptAccessToken),
+      source: tokenSource
+    });
+    return cachedChatGptAccessToken;
   }
 
   function extractAccessTokenFromSession(session) {
@@ -7364,11 +7541,37 @@
       session?.accessToken,
       session?.access_token,
       session?.token,
+      session?.session?.accessToken,
+      session?.session?.access_token,
+      session?.session?.token,
       session?.user?.accessToken,
       session?.user?.access_token
     ];
 
     return String(candidates.find((value) => typeof value === "string" && value.length > 20) || "");
+  }
+
+  function getChatGptAccessTokenFromPageBootstrap() {
+    const scripts = document.querySelectorAll("script:not([src])");
+
+    for (const script of scripts) {
+      const text = String(script?.textContent || "").trim();
+
+      if (!text.includes('"accessToken"') || text.length > 2_000_000) {
+        continue;
+      }
+
+      try {
+        const token = extractAccessTokenFromSession(JSON.parse(text));
+        if (token) {
+          return token;
+        }
+      } catch {
+        // Ignore non-JSON bootstrap scripts and continue probing.
+      }
+    }
+
+    return "";
   }
 
   async function fetchWithTimeout(url, options = {}) {
@@ -7408,7 +7611,7 @@
 
   function buildConversationTimestampMap(data) {
     const map = new Map();
-    const mapping = data?.mapping && typeof data.mapping === "object" ? data.mapping : {};
+    const mapping = getConversationApiMapping(data);
 
     for (const node of Object.values(mapping)) {
       const message = node?.message || {};
@@ -7418,6 +7621,20 @@
         message.update_time ??
         message.metadata?.create_time ??
         message.metadata?.timestamp
+      );
+
+      if (messageId && timestamp) {
+        map.set(messageId, timestamp);
+      }
+    }
+
+    for (const message of getConversationApiLinearMessages(data)) {
+      const messageId = String(message?.id || message?.message_id || "").trim();
+      const timestamp = formatConversationTimestamp(
+        message?.create_time ??
+        message?.update_time ??
+        message?.metadata?.create_time ??
+        message?.metadata?.timestamp
       );
 
       if (messageId && timestamp) {

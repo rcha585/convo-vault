@@ -23,6 +23,11 @@ test("content script is generated from modular Hybrid, Fast, and Full sources", 
   assert.match(generated, /async function collectFastConversationMessages/);
   assert.match(generated, /\/api\/auth\/session/);
   assert.match(generated, /Bearer \$\{attempt\.accessToken\}/);
+  assert.match(generated, /\/backend-api\/conversations\/\$\{encodedId\}/);
+  assert.match(generated, /include_has_versions=true&num_turns=\$\{FAST_CONVERSATION_API_PAGE_SIZE\}/);
+  assert.match(generated, /conversationApi\.pagination\.complete/);
+  assert.match(generated, /pageUrl\.searchParams\.set\("before", cursor\)/);
+  assert.match(generated, /getChatGptAccessTokenFromPageBootstrap/);
   assert.match(generated, /tree_format=true/);
   assert.match(generated, /routes\/_conversation\.g\.\$gizmoId\.c\.\$conversationId/);
   assert.match(generated, /function createMessageCollector/);
