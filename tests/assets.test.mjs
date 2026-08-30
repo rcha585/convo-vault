@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -82,6 +83,50 @@ test("asset manifest detects image bytes when the data URI MIME is generic", asy
   assert.equal((await stat(path.join(cacheRoot, image.cachePath))).isFile(), true);
 });
 
+test("staged local images render from files and remain portable bundle references", async () => {
+  const cacheRoot = await mkdtemp(path.join(os.tmpdir(), "convo-vault-assets-staged-"));
+  const source = "sediment://file_00000000aaaaaaaaaaaaaaaaaaaaaaaa";
+  const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=", "base64");
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const sourceKey = createHash("sha256").update(source).digest("hex");
+  const cachePath = `assets/sha256/${sha256.slice(0, 2)}/${sha256.slice(2, 4)}/${sha256}.png`;
+  const absolutePath = path.join(cacheRoot, ...cachePath.split("/"));
+  await mkdir(path.dirname(absolutePath), { recursive: true });
+  await writeFile(absolutePath, bytes);
+  const localImageAssets = [{
+    sourceKey,
+    sha256,
+    mimeType: "image/png",
+    sizeBytes: bytes.length,
+    cachePath,
+    renderUrl: `render-assets/${sha256}.png`
+  }];
+  const payload = {
+    title: "Staged image",
+    messages: [{
+      id: "user-staged-image",
+      role: "user",
+      turnNumber: 1,
+      markdown: `![Staged image](${source})`
+    }]
+  };
+
+  const manifest = buildAssetManifest(payload, { cacheRoot, localImageAssets });
+  const renderPayload = dedupeEmbeddedImageAssets(payload, manifest, {
+    localImageAssets,
+    renderLocalFiles: true
+  });
+  const bundlePayload = externalizeEmbeddedImageAssets(payload, manifest, { localImageAssets });
+  const image = manifest.assets.find((asset) => asset.kind === "image");
+
+  assert.equal(image.sha256, sha256);
+  assert.equal(image.storage, "local-cache");
+  assert.equal(manifest.outputObjectCounts.degraded, 0);
+  assert.equal(manifest.outputObjectCounts.total, 1);
+  assert.equal(renderPayload.messages[0].markdown, `![Staged image](render-assets/${sha256}.png)`);
+  assert.equal(bundlePayload.messages[0].markdown, `![Staged image](${cachePath})`);
+});
+
 test("bundle payload externalizes and deduplicates repeated embedded image layers", async () => {
   const cacheRoot = await mkdtemp(path.join(os.tmpdir(), "convo-vault-assets-externalized-"));
   const first = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
@@ -111,6 +156,7 @@ test("bundle payload externalizes and deduplicates repeated embedded image layer
   const renderMarkdown = renderPayload.messages[0].markdown;
 
   assert.equal(manifest.assets.filter((asset) => asset.storage === "local-cache").length, 2);
+  assert.equal(manifest.outputObjectCounts.total, 6);
   assert.equal((renderMarkdown.match(/data:image\//g) || []).length, 3);
   assert.match(renderMarkdown, /Intentional reuse[\s\S]*first reused/);
   assert.doesNotMatch(renderMarkdown, /first preview|first blur|second preview/);

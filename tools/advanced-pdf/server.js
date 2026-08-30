@@ -4,7 +4,11 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const crypto = require("crypto");
+const zlib = require("zlib");
 const { spawn } = require("child_process");
+const { Transform } = require("stream");
+const { pipeline } = require("stream/promises");
+const { pathToFileURL } = require("url");
 const { captureConversationWithEdge, findEdgeExecutable, getCacheRoot } = require("./capture");
 const {
   buildAssetManifest,
@@ -15,12 +19,17 @@ const {
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.CGCE_ADVANCED_PDF_PORT || 38474);
-const MAX_BODY_BYTES = Number(process.env.CGCE_ADVANCED_PDF_MAX_BODY_BYTES || 90 * 1024 * 1024);
+const MAX_BODY_BYTES = Number(process.env.CGCE_ADVANCED_PDF_MAX_BODY_BYTES || 256 * 1024 * 1024);
+const MAX_EXPORT_ASSET_BYTES = Number(process.env.CGCE_MAX_EXPORT_ASSET_BYTES || 128 * 1024 * 1024);
 const LOCAL_API_TOKEN_HEADER = "x-convo-vault-token";
 const LOCAL_API_TOKEN = String(process.env.CGCE_LOCAL_API_TOKEN || "").trim();
 const ROOT_DIR = path.resolve(__dirname, "..", "..");
 const WORK_DIR = path.join(ROOT_DIR, "tmp", "advanced-pdf-server");
 const RENDER_SCRIPT = path.join(__dirname, "render.js");
+const BUNDLE_DOWNLOAD_TTL_MS = 10 * 60 * 1000;
+const EXPORT_SESSION_TTL_MS = 30 * 60 * 1000;
+const preparedBundleDownloads = new Map();
+const exportSessions = new Map();
 
 fs.mkdirSync(WORK_DIR, { recursive: true });
 
@@ -36,7 +45,7 @@ const server = http.createServer((request, response) => {
 server.listen(PORT, HOST, () => {
   console.log(`[advanced-pdf-server] Listening on http://${HOST}:${PORT}`);
   console.log(`[advanced-pdf-server] Local API token: ${LOCAL_API_TOKEN ? "required" : "not configured; browser-origin requests will be rejected"}`);
-  console.log("[advanced-pdf-server] Endpoints: GET /health, POST /shutdown, POST /render-pdf, POST /render-markdown, POST /render-data, POST /render-bundle, POST /capture-render-pdf, POST /capture-render-markdown");
+  console.log("[advanced-pdf-server] Endpoints: GET /health, POST /shutdown, POST /export-sessions, PUT /export-sessions/:id/assets/:sourceKey, DELETE /export-sessions/:id, POST /render-pdf, POST /render-markdown, POST /render-data, POST /render-bundle, POST /prepare-render-bundle, GET /download-bundle/:id, POST /capture-render-pdf, POST /capture-render-markdown");
 });
 
 async function handleRequest(request, response) {
@@ -62,11 +71,35 @@ async function handleRequest(request, response) {
     return;
   }
 
+  if (request.method === "GET" && url.pathname.startsWith("/download-bundle/")) {
+    handlePreparedBundleDownload(url, response);
+    return;
+  }
+
   if (!isLocalApiAuthorized(request)) {
     sendJson(response, 401, {
       ok: false,
       error: "Missing or invalid local API token."
     });
+    return;
+  }
+
+  // Export sessions are intentionally below the token gate: only the authenticated
+  // extension background may stage local assets on this loopback-only service.
+  if (request.method === "POST" && url.pathname === "/export-sessions") {
+    handleCreateExportSession(response);
+    return;
+  }
+
+  const exportAssetMatch = url.pathname.match(/^\/export-sessions\/([a-f0-9]{48})\/assets\/([a-f0-9]{64})$/);
+  if (request.method === "PUT" && exportAssetMatch) {
+    await handleExportSessionAsset(request, response, exportAssetMatch[1], exportAssetMatch[2]);
+    return;
+  }
+
+  const exportSessionMatch = url.pathname.match(/^\/export-sessions\/([a-f0-9]{48})$/);
+  if (request.method === "DELETE" && exportSessionMatch) {
+    handleDeleteExportSession(response, exportSessionMatch[1]);
     return;
   }
 
@@ -92,6 +125,11 @@ async function handleRequest(request, response) {
 
   if (request.method === "POST" && url.pathname === "/render-bundle") {
     await handleRenderBundle(request, response);
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/prepare-render-bundle") {
+    await handlePrepareRenderBundle(request, response);
     return;
   }
 
@@ -128,6 +166,237 @@ function handleShutdown(response) {
       process.exit(0);
     });
   }, 150);
+}
+
+function handleCreateExportSession(response) {
+  const sessionId = crypto.randomBytes(24).toString("hex");
+  const session = {
+    id: sessionId,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + EXPORT_SESSION_TTL_MS,
+    totalBytes: 0,
+    assetsBySourceKey: new Map()
+  };
+  exportSessions.set(sessionId, session);
+  scheduleExportSessionExpiry(sessionId);
+
+  sendJson(response, 200, {
+    ok: true,
+    sessionId,
+    expiresAt: new Date(session.expiresAt).toISOString(),
+    maxAssetBytes: MAX_EXPORT_ASSET_BYTES
+  });
+}
+
+async function handleExportSessionAsset(request, response, sessionId, sourceKey) {
+  const session = getActiveExportSession(sessionId);
+
+  if (!session) {
+    sendJson(response, 410, {
+      ok: false,
+      error: "Export session is missing or expired."
+    });
+    return;
+  }
+
+  const declaredLength = Number(request.headers["content-length"] || 0);
+  if (declaredLength > MAX_EXPORT_ASSET_BYTES) {
+    sendJson(response, 413, {
+      ok: false,
+      error: `Export asset exceeds the ${MAX_EXPORT_ASSET_BYTES} byte per-file limit.`
+    });
+    return;
+  }
+
+  try {
+    const asset = await stageExportSessionAsset(request, session, sourceKey);
+    sendJson(response, 200, {
+      ok: true,
+      sourceKey: asset.sourceKey,
+      sha256: asset.sha256,
+      mimeType: asset.mimeType,
+      sizeBytes: asset.sizeBytes,
+      cachePath: asset.cachePath,
+      reused: asset.reused
+    });
+  } catch (error) {
+    sendJson(response, error?.statusCode || 500, {
+      ok: false,
+      error: error.message || String(error)
+    });
+  }
+}
+
+function handleDeleteExportSession(response, sessionId) {
+  const existed = exportSessions.delete(sessionId);
+  sendJson(response, 200, {
+    ok: true,
+    deleted: existed
+  });
+}
+
+async function stageExportSessionAsset(request, session, sourceKey) {
+  const cacheRoot = getCacheRoot();
+  const uploadRoot = path.join(cacheRoot, "tmp", "export-assets");
+  fs.mkdirSync(uploadRoot, { recursive: true });
+  assertExportAssetDiskSpace(cacheRoot, Number(request.headers["content-length"] || 0));
+
+  const tempPath = path.join(uploadRoot, `${session.id}-${sourceKey}-${crypto.randomBytes(8).toString("hex")}.part`);
+  const digest = crypto.createHash("sha256");
+  let totalBytes = 0;
+  let prefix = Buffer.alloc(0);
+  const meter = new Transform({
+    transform(chunk, _encoding, callback) {
+      totalBytes += chunk.length;
+
+      if (totalBytes > MAX_EXPORT_ASSET_BYTES) {
+        const error = new Error(`Export asset exceeds the ${MAX_EXPORT_ASSET_BYTES} byte per-file limit.`);
+        error.statusCode = 413;
+        callback(error);
+        return;
+      }
+
+      digest.update(chunk);
+      if (prefix.length < 512) {
+        prefix = Buffer.concat([prefix, chunk.subarray(0, 512 - prefix.length)]);
+      }
+      callback(null, chunk);
+    }
+  });
+
+  try {
+    await pipeline(request, meter, fs.createWriteStream(tempPath, { flags: "wx" }));
+  } catch (error) {
+    fs.rmSync(tempPath, { force: true });
+    throw error;
+  }
+
+  if (!totalBytes) {
+    fs.rmSync(tempPath, { force: true });
+    const error = new Error("Export asset upload was empty.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const mimeType = detectUploadedImageMime(prefix, request.headers["content-type"]);
+  if (!mimeType.startsWith("image/")) {
+    fs.rmSync(tempPath, { force: true });
+    const error = new Error(`Export asset is not a supported image (${mimeType || "unknown type"}).`);
+    error.statusCode = 415;
+    throw error;
+  }
+
+  const sha256 = digest.digest("hex");
+  const extension = extensionFromImageMime(mimeType);
+  const cachePath = path.posix.join(
+    "assets",
+    "sha256",
+    sha256.slice(0, 2),
+    sha256.slice(2, 4),
+    `${sha256}.${extension}`
+  );
+  const absolutePath = path.join(cacheRoot, ...cachePath.split("/"));
+  fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+  const reused = fs.existsSync(absolutePath);
+
+  if (reused) {
+    fs.rmSync(tempPath, { force: true });
+  } else {
+    fs.renameSync(tempPath, absolutePath);
+  }
+
+  const asset = {
+    sourceKey,
+    sha256,
+    mimeType,
+    sizeBytes: totalBytes,
+    cachePath,
+    absolutePath,
+    fileUrl: pathToFileURL(absolutePath).href,
+    reused
+  };
+  session.assetsBySourceKey.set(sourceKey, asset);
+  session.totalBytes += totalBytes;
+  session.expiresAt = Date.now() + EXPORT_SESSION_TTL_MS;
+  return asset;
+}
+
+function assertExportAssetDiskSpace(cacheRoot, declaredLength) {
+  if (!declaredLength || typeof fs.statfsSync !== "function") {
+    return;
+  }
+
+  const stats = fs.statfsSync(cacheRoot);
+  const available = Number(stats.bavail) * Number(stats.bsize);
+  const reserve = 256 * 1024 * 1024;
+
+  if (available < declaredLength + reserve) {
+    const error = new Error(`Not enough free disk space to stage this asset. Available: ${available} bytes.`);
+    error.statusCode = 507;
+    throw error;
+  }
+}
+
+function detectUploadedImageMime(prefix, declaredType) {
+  const claimed = String(declaredType || "").split(";", 1)[0].trim().toLowerCase();
+
+  if (prefix.length >= 8 && prefix.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
+  }
+  if (prefix.length >= 3 && prefix[0] === 0xff && prefix[1] === 0xd8 && prefix[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (prefix.subarray(0, 6).toString("ascii") === "GIF87a" || prefix.subarray(0, 6).toString("ascii") === "GIF89a") {
+    return "image/gif";
+  }
+  if (prefix.length >= 12 && prefix.subarray(0, 4).toString("ascii") === "RIFF" && prefix.subarray(8, 12).toString("ascii") === "WEBP") {
+    return "image/webp";
+  }
+  if (/^\s*<svg[\s>]/i.test(prefix.toString("utf8"))) {
+    return "image/svg+xml";
+  }
+
+  return claimed.startsWith("image/") ? claimed : "application/octet-stream";
+}
+
+function extensionFromImageMime(mimeType) {
+  const normalized = String(mimeType || "").toLowerCase();
+  if (normalized.includes("jpeg")) return "jpg";
+  if (normalized.includes("webp")) return "webp";
+  if (normalized.includes("gif")) return "gif";
+  if (normalized.includes("svg")) return "svg";
+  return "png";
+}
+
+function getActiveExportSession(sessionId) {
+  const session = exportSessions.get(String(sessionId || ""));
+  if (!session) {
+    return null;
+  }
+
+  if (session.expiresAt <= Date.now()) {
+    exportSessions.delete(session.id);
+    return null;
+  }
+
+  return session;
+}
+
+function scheduleExportSessionExpiry(sessionId) {
+  const timer = setTimeout(() => {
+    const session = exportSessions.get(sessionId);
+    if (!session) {
+      return;
+    }
+
+    if (session.expiresAt <= Date.now()) {
+      exportSessions.delete(sessionId);
+      return;
+    }
+
+    scheduleExportSessionExpiry(sessionId);
+  }, EXPORT_SESSION_TTL_MS);
+  timer.unref?.();
 }
 
 async function handleCapture(request, response) {
@@ -273,17 +542,93 @@ async function handleRenderData(request, response) {
 }
 
 async function handleRenderBundle(request, response) {
-  const timings = createTimings();
   const body = await readJsonBody(request);
+  const artifact = await buildRenderBundleArtifact(body);
+
+  if (!artifact.ok) {
+    sendRenderBundleError(response, artifact);
+    return;
+  }
+
+  response.writeHead(200, {
+    "Content-Type": "application/zip",
+    "Content-Length": artifact.bundleSize,
+    "Content-Disposition": makeContentDisposition(artifact.filename),
+    "X-Bundle-Engine": "advanced-local-bundle",
+    "X-Bundle-Files": encodeHeaderValue(artifact.bundleFiles),
+    "X-Asset-Count": String(artifact.assetCount),
+    "X-Renderer-HTML": encodeHeaderValue(artifact.htmlPath.replace(/\\/g, "/")),
+    "X-Data-Dir": encodeHeaderValue(artifact.requestDir.replace(/\\/g, "/")),
+    "X-Bundle-Timings": encodeHeaderValue(JSON.stringify(artifact.rendererTimings))
+  });
+  await pipeline(fs.createReadStream(artifact.zipPath), response);
+  if (artifact.exportSessionId) {
+    exportSessions.delete(artifact.exportSessionId);
+  }
+}
+
+async function handlePrepareRenderBundle(request, response) {
+  const body = await readJsonBody(request);
+  const artifact = await buildRenderBundleArtifact(body);
+
+  if (!artifact.ok) {
+    sendRenderBundleError(response, artifact);
+    return;
+  }
+
+  const downloadId = crypto.randomBytes(24).toString("hex");
+  const expiresAt = Date.now() + BUNDLE_DOWNLOAD_TTL_MS;
+  preparedBundleDownloads.set(downloadId, {
+    zipPath: artifact.zipPath,
+    filename: artifact.filename,
+    size: artifact.bundleSize,
+    expiresAt
+  });
+
+  const expirationTimer = setTimeout(() => {
+    expirePreparedBundleDownload(downloadId);
+  }, BUNDLE_DOWNLOAD_TTL_MS);
+  expirationTimer.unref?.();
+
+  sendJson(response, 200, {
+    ok: true,
+    filename: artifact.filename,
+    downloadPath: `/download-bundle/${downloadId}`,
+    expiresAt: new Date(expiresAt).toISOString(),
+    bundleFiles: artifact.bundleFiles,
+    bundleSize: artifact.bundleSize,
+    assetCount: artifact.assetCount,
+    assetStats: artifact.assetStats,
+    rendererTimings: artifact.rendererTimings
+  });
+
+  if (artifact.exportSessionId) {
+    exportSessions.delete(artifact.exportSessionId);
+  }
+}
+
+async function buildRenderBundleArtifact(body) {
+  const timings = createTimings();
   const payload = normalizePayload(body);
+  const exportSessionId = String(body?.exportSessionId || "").trim();
+  const exportSession = exportSessionId ? getActiveExportSession(exportSessionId) : null;
+  const localImageAssets = exportSession ? [...exportSession.assetsBySourceKey.values()] : [];
   timings.mark("payloadNormalized");
 
-  if (!payload.messages.length) {
-    sendJson(response, 400, {
+  if (exportSessionId && !exportSession) {
+    return {
       ok: false,
+      statusCode: 410,
+      error: "Export asset session is missing or expired."
+    };
+  }
+
+  if (!payload.messages.length) {
+    return {
+      ok: false,
+      statusCode: 400,
       error: "No messages were provided."
-    });
-    return;
+    };
   }
 
   const baseName = sanitizeFilename(
@@ -295,6 +640,8 @@ async function handleRenderBundle(request, response) {
   const requestDir = path.join(WORK_DIR, id);
   fs.mkdirSync(requestDir, { recursive: true });
 
+  const renderLocalImageAssets = materializeRenderImageAssets(localImageAssets, requestDir);
+
   const jsonPath = path.join(requestDir, `${baseName}.payload.json`);
   const renderJsonPath = path.join(requestDir, `${baseName}.render.payload.json`);
   const htmlPath = path.join(requestDir, `${baseName}.html`);
@@ -303,9 +650,14 @@ async function handleRenderBundle(request, response) {
   const assetManifestPath = path.join(requestDir, `${baseName}.assets.manifest.json`);
 
   const cacheRoot = getCacheRoot();
-  const assetManifest = buildAssetManifest(payload, { cacheRoot });
-  const renderPayload = dedupeEmbeddedImageAssets(payload, assetManifest);
-  const bundlePayload = externalizeEmbeddedImageAssets(renderPayload, assetManifest);
+  const assetManifest = buildAssetManifest(payload, { cacheRoot, localImageAssets: renderLocalImageAssets });
+  const renderPayload = dedupeEmbeddedImageAssets(payload, assetManifest, {
+    localImageAssets: renderLocalImageAssets,
+    renderLocalFiles: true
+  });
+  const bundlePayload = externalizeEmbeddedImageAssets(payload, assetManifest, {
+    localImageAssets
+  });
   timings.mark("assetsPrepared");
 
   fs.writeFileSync(renderJsonPath, JSON.stringify(renderPayload), "utf8");
@@ -314,7 +666,9 @@ async function handleRenderBundle(request, response) {
   timings.mark("documentsWritten");
   fs.writeFileSync(assetManifestPath, JSON.stringify(assetManifest, null, 2), "utf8");
   timings.mark("assetManifestWritten");
-  const dataFiles = writeDataSidecars(requestDir, baseName, bundlePayload);
+  const dataFiles = writeDataSidecars(requestDir, baseName, bundlePayload, {
+    localImageAssets: assetManifest.assets
+  });
   timings.mark("dataSidecarsWritten");
 
   const result = await runRenderer({
@@ -326,54 +680,166 @@ async function handleRenderBundle(request, response) {
   timings.mark("pdfRendered");
 
   if (!result.ok) {
-    sendJson(response, 500, {
+    return {
       ok: false,
+      statusCode: 500,
       error: "Renderer failed.",
       stdout: result.stdout.slice(-4000),
       stderr: result.stderr.slice(-4000)
-    });
-    return;
+    };
   }
 
   const bundleEntries = [
     {
       name: `${baseName}.md`,
-      data: fs.readFileSync(markdownPath)
+      path: markdownPath
     },
     {
       name: `${baseName}.pdf`,
-      data: fs.readFileSync(pdfPath)
+      path: pdfPath
     },
     {
       name: `${baseName}.payload.json`,
-      data: fs.readFileSync(jsonPath)
+      path: jsonPath
     },
     {
       name: `${baseName}.assets.manifest.json`,
-      data: fs.readFileSync(assetManifestPath)
+      path: assetManifestPath
     },
     ...dataFiles.map((filePath) => ({
       name: path.basename(filePath),
-      data: fs.readFileSync(filePath)
+      path: filePath
     })),
     ...buildBundleAssetEntries(assetManifest, cacheRoot)
   ];
-  const zipBytes = createZipArchive(bundleEntries);
+  const zipPath = path.join(requestDir, `${baseName}.bundle.zip`);
+  const bundleSize = await createZipArchiveFile(bundleEntries, zipPath);
   timings.mark("zipCreated");
   const filename = `${baseName}.zip`;
 
+  return {
+    ok: true,
+    zipPath,
+    bundleSize,
+    filename,
+    bundleFiles: bundleEntries.map((entry) => entry.name).join(","),
+    assetCount: assetManifest.counts.total,
+    assetStats: body?.exportPayload?.assetStats || body?.payload?.assetStats || body?.assetStats || null,
+    exportSessionId,
+    htmlPath,
+    requestDir,
+    rendererTimings: timings.toJSON()
+  };
+}
+
+function materializeRenderImageAssets(localImageAssets, requestDir) {
+  if (!localImageAssets.length) {
+    return [];
+  }
+
+  const renderAssetDir = path.join(requestDir, "render-assets");
+  fs.mkdirSync(renderAssetDir, { recursive: true });
+
+  return localImageAssets.map((asset) => {
+    const extension = extensionFromImageMime(asset.mimeType);
+    const filename = `${asset.sha256}.${extension}`;
+    const destination = path.join(renderAssetDir, filename);
+
+    if (!fs.existsSync(destination)) {
+      try {
+        fs.linkSync(asset.absolutePath, destination);
+      } catch (error) {
+        if (!["EXDEV", "EPERM", "EACCES", "ENOTSUP"].includes(error?.code)) {
+          throw error;
+        }
+        fs.copyFileSync(asset.absolutePath, destination, fs.constants.COPYFILE_EXCL);
+      }
+    }
+
+    return {
+      ...asset,
+      renderUrl: `render-assets/${filename}`
+    };
+  });
+}
+
+function sendRenderBundleError(response, artifact) {
+  sendJson(response, artifact.statusCode || 500, {
+    ok: false,
+    error: artifact.error || "Bundle renderer failed.",
+    ...(artifact.stdout ? { stdout: artifact.stdout } : {}),
+    ...(artifact.stderr ? { stderr: artifact.stderr } : {})
+  });
+}
+
+function handlePreparedBundleDownload(url, response) {
+  const encodedId = url.pathname.slice("/download-bundle/".length);
+  let downloadId = "";
+
+  try {
+    downloadId = decodeURIComponent(encodedId);
+  } catch (_) {
+    sendJson(response, 400, { ok: false, error: "Invalid bundle download address." });
+    return;
+  }
+
+  if (!/^[a-f0-9]{48}$/.test(downloadId)) {
+    sendJson(response, 404, { ok: false, error: "Prepared bundle was not found." });
+    return;
+  }
+
+  const prepared = preparedBundleDownloads.get(downloadId);
+
+  if (!prepared) {
+    sendJson(response, 404, { ok: false, error: "Prepared bundle was not found or has expired." });
+    return;
+  }
+
+  if (prepared.expiresAt <= Date.now()) {
+    expirePreparedBundleDownload(downloadId);
+    sendJson(response, 410, { ok: false, error: "Prepared bundle has expired." });
+    return;
+  }
+
+  if (!fs.existsSync(prepared.zipPath)) {
+    preparedBundleDownloads.delete(downloadId);
+    sendJson(response, 410, { ok: false, error: "Prepared bundle file is no longer available." });
+    return;
+  }
+
   response.writeHead(200, {
     "Content-Type": "application/zip",
-    "Content-Length": zipBytes.length,
-    "Content-Disposition": makeContentDisposition(filename),
-    "X-Bundle-Engine": "advanced-local-bundle",
-    "X-Bundle-Files": encodeHeaderValue(bundleEntries.map((entry) => entry.name).join(",")),
-    "X-Asset-Count": String(assetManifest.counts.total),
-    "X-Renderer-HTML": encodeHeaderValue(htmlPath.replace(/\\/g, "/")),
-    "X-Data-Dir": encodeHeaderValue(requestDir.replace(/\\/g, "/")),
-    "X-Bundle-Timings": encodeHeaderValue(JSON.stringify(timings.toJSON()))
+    "Content-Length": prepared.size,
+    "Content-Disposition": makeContentDisposition(prepared.filename),
+    "Cache-Control": "no-store, max-age=0",
+    "X-Content-Type-Options": "nosniff"
   });
-  response.end(zipBytes);
+
+  const stream = fs.createReadStream(prepared.zipPath);
+  stream.on("error", (error) => {
+    if (!response.headersSent) {
+      sendJson(response, 500, { ok: false, error: error.message || String(error) });
+      return;
+    }
+    response.destroy(error);
+  });
+  stream.pipe(response);
+}
+
+function expirePreparedBundleDownload(downloadId) {
+  const prepared = preparedBundleDownloads.get(downloadId);
+  if (!prepared) {
+    return;
+  }
+
+  preparedBundleDownloads.delete(downloadId);
+  try {
+    fs.unlinkSync(prepared.zipPath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      console.warn(`[advanced-pdf-server] Could not remove expired prepared bundle: ${error.message || error}`);
+    }
+  }
 }
 
 function buildBundleAssetEntries(assetManifest, cacheRoot) {
@@ -397,7 +863,7 @@ function buildBundleAssetEntries(assetManifest, cacheRoot) {
     seen.add(entryName);
     entries.push({
       name: entryName,
-      data: fs.readFileSync(absolutePath)
+      path: absolutePath
     });
   }
 
@@ -515,8 +981,8 @@ function normalizeTurnNumber(value, index) {
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : index + 1;
 }
 
-function writeDataSidecars(directory, baseName, payload) {
-  const bundle = buildDataBundle(payload);
+function writeDataSidecars(directory, baseName, payload, options = {}) {
+  const bundle = buildDataBundle(payload, options);
   const dataJson = JSON.stringify({
     ok: bundle.ok,
     conversation: bundle.conversation,
@@ -546,9 +1012,11 @@ function writeDataSidecars(directory, baseName, payload) {
   });
 }
 
-function buildDataBundle(payload) {
+function buildDataBundle(payload, options = {}) {
   const messages = payload.messages.map((message, index) => buildDataMessage(message, index));
-  const outputObjectIndex = buildOutputObjectIndex(payload);
+  const outputObjectIndex = buildOutputObjectIndex(payload, {
+    localImageAssets: options.localImageAssets
+  });
   const agentTraces = messages
     .filter((message) => message.agentTrace && message.agentTrace.activityCount > 0)
     .map((message) => ({
@@ -1027,71 +1495,188 @@ function isDisplayableTimestamp(value) {
     || /^[A-Z][a-z]{2,8}\s+\d{1,2},\s+\d{4},?\s+\d{1,2}:\d{2}/.test(text);
 }
 
-function createZipArchive(entries) {
-  const localParts = [];
-  const centralParts = [];
-  let offset = 0;
-
-  for (const entry of entries) {
-    const name = normalizeZipEntryName(entry.name);
-    const nameBytes = Buffer.from(name, "utf8");
-    const data = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(String(entry.data || ""), "utf8");
-    const checksum = crc32(data);
-    const { dosTime, dosDate } = getDosDateTime(new Date());
-    const localHeader = Buffer.alloc(30 + nameBytes.length);
-
-    localHeader.writeUInt32LE(0x04034b50, 0);
-    localHeader.writeUInt16LE(20, 4);
-    localHeader.writeUInt16LE(0x0800, 6);
-    localHeader.writeUInt16LE(0, 8);
-    localHeader.writeUInt16LE(dosTime, 10);
-    localHeader.writeUInt16LE(dosDate, 12);
-    localHeader.writeUInt32LE(checksum, 14);
-    localHeader.writeUInt32LE(data.length, 18);
-    localHeader.writeUInt32LE(data.length, 22);
-    localHeader.writeUInt16LE(nameBytes.length, 26);
-    localHeader.writeUInt16LE(0, 28);
-    nameBytes.copy(localHeader, 30);
-
-    const centralHeader = Buffer.alloc(46 + nameBytes.length);
-    centralHeader.writeUInt32LE(0x02014b50, 0);
-    centralHeader.writeUInt16LE(20, 4);
-    centralHeader.writeUInt16LE(20, 6);
-    centralHeader.writeUInt16LE(0x0800, 8);
-    centralHeader.writeUInt16LE(0, 10);
-    centralHeader.writeUInt16LE(dosTime, 12);
-    centralHeader.writeUInt16LE(dosDate, 14);
-    centralHeader.writeUInt32LE(checksum, 16);
-    centralHeader.writeUInt32LE(data.length, 20);
-    centralHeader.writeUInt32LE(data.length, 24);
-    centralHeader.writeUInt16LE(nameBytes.length, 28);
-    centralHeader.writeUInt16LE(0, 30);
-    centralHeader.writeUInt16LE(0, 32);
-    centralHeader.writeUInt16LE(0, 34);
-    centralHeader.writeUInt16LE(0, 36);
-    centralHeader.writeUInt32LE(0, 38);
-    centralHeader.writeUInt32LE(offset, 42);
-    nameBytes.copy(centralHeader, 46);
-
-    localParts.push(localHeader, data);
-    centralParts.push(centralHeader);
-    offset += localHeader.length + data.length;
+async function createZipArchiveFile(entries, outputPath) {
+  if (entries.length > 0xffff) {
+    throw new Error(`ZIP contains too many entries for the portable archive writer: ${entries.length}.`);
   }
 
-  const centralDirectory = Buffer.concat(centralParts);
-  const localFiles = Buffer.concat(localParts);
-  const endRecord = Buffer.alloc(22);
+  const centralParts = [];
+  const temporaryPaths = new Set();
+  let offset = 0;
+  const output = await fs.promises.open(outputPath, "wx");
 
-  endRecord.writeUInt32LE(0x06054b50, 0);
-  endRecord.writeUInt16LE(0, 4);
-  endRecord.writeUInt16LE(0, 6);
-  endRecord.writeUInt16LE(entries.length, 8);
-  endRecord.writeUInt16LE(entries.length, 10);
-  endRecord.writeUInt32LE(centralDirectory.length, 12);
-  endRecord.writeUInt32LE(localFiles.length, 16);
-  endRecord.writeUInt16LE(0, 20);
+  try {
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      const name = normalizeZipEntryName(entry.name);
+      const nameBytes = Buffer.from(name, "utf8");
+      const prepared = await prepareZipFileEntry(entry.path, name, outputPath, index);
 
-  return Buffer.concat([localFiles, centralDirectory, endRecord]);
+      if (prepared.temporaryPath) {
+        temporaryPaths.add(prepared.temporaryPath);
+      }
+
+      assertClassicZipRange(prepared.uncompressedSize, "ZIP entry uncompressed size");
+      assertClassicZipRange(prepared.compressedSize, "ZIP entry compressed size");
+      assertClassicZipRange(offset, "ZIP local header offset");
+      const { dosTime, dosDate } = getDosDateTime(prepared.modifiedAt);
+      const localHeader = Buffer.alloc(30 + nameBytes.length);
+
+      localHeader.writeUInt32LE(0x04034b50, 0);
+      localHeader.writeUInt16LE(20, 4);
+      localHeader.writeUInt16LE(0x0800, 6);
+      localHeader.writeUInt16LE(prepared.compressionMethod, 8);
+      localHeader.writeUInt16LE(dosTime, 10);
+      localHeader.writeUInt16LE(dosDate, 12);
+      localHeader.writeUInt32LE(prepared.checksum, 14);
+      localHeader.writeUInt32LE(prepared.compressedSize, 18);
+      localHeader.writeUInt32LE(prepared.uncompressedSize, 22);
+      localHeader.writeUInt16LE(nameBytes.length, 26);
+      localHeader.writeUInt16LE(0, 28);
+      nameBytes.copy(localHeader, 30);
+
+      const centralHeader = Buffer.alloc(46 + nameBytes.length);
+      centralHeader.writeUInt32LE(0x02014b50, 0);
+      centralHeader.writeUInt16LE(20, 4);
+      centralHeader.writeUInt16LE(20, 6);
+      centralHeader.writeUInt16LE(0x0800, 8);
+      centralHeader.writeUInt16LE(prepared.compressionMethod, 10);
+      centralHeader.writeUInt16LE(dosTime, 12);
+      centralHeader.writeUInt16LE(dosDate, 14);
+      centralHeader.writeUInt32LE(prepared.checksum, 16);
+      centralHeader.writeUInt32LE(prepared.compressedSize, 20);
+      centralHeader.writeUInt32LE(prepared.uncompressedSize, 24);
+      centralHeader.writeUInt16LE(nameBytes.length, 28);
+      centralHeader.writeUInt16LE(0, 30);
+      centralHeader.writeUInt16LE(0, 32);
+      centralHeader.writeUInt16LE(0, 34);
+      centralHeader.writeUInt16LE(0, 36);
+      centralHeader.writeUInt32LE(0, 38);
+      centralHeader.writeUInt32LE(offset, 42);
+      nameBytes.copy(centralHeader, 46);
+
+      await output.write(localHeader);
+      await appendFileToHandle(output, prepared.dataPath);
+      centralParts.push(centralHeader);
+      offset += localHeader.length + prepared.compressedSize;
+
+      if (prepared.temporaryPath) {
+        fs.rmSync(prepared.temporaryPath, { force: true });
+        temporaryPaths.delete(prepared.temporaryPath);
+      }
+    }
+
+    const centralDirectory = Buffer.concat(centralParts);
+    assertClassicZipRange(offset, "ZIP central directory offset");
+    assertClassicZipRange(centralDirectory.length, "ZIP central directory size");
+    const endRecord = Buffer.alloc(22);
+
+    endRecord.writeUInt32LE(0x06054b50, 0);
+    endRecord.writeUInt16LE(0, 4);
+    endRecord.writeUInt16LE(0, 6);
+    endRecord.writeUInt16LE(entries.length, 8);
+    endRecord.writeUInt16LE(entries.length, 10);
+    endRecord.writeUInt32LE(centralDirectory.length, 12);
+    endRecord.writeUInt32LE(offset, 16);
+    endRecord.writeUInt16LE(0, 20);
+
+    await output.write(centralDirectory);
+    await output.write(endRecord);
+  } catch (error) {
+    await output.close().catch(() => {});
+    fs.rmSync(outputPath, { force: true });
+    throw error;
+  } finally {
+    for (const temporaryPath of temporaryPaths) {
+      fs.rmSync(temporaryPath, { force: true });
+    }
+  }
+
+  await output.close();
+  return fs.statSync(outputPath).size;
+}
+
+async function prepareZipFileEntry(filePath, name, outputPath, index) {
+  const stats = fs.statSync(filePath);
+
+  if (!stats.isFile()) {
+    throw new Error(`ZIP source is not a file: ${filePath}`);
+  }
+
+  if (shouldDeflateZipEntry(name, stats.size)) {
+    const temporaryPath = `${outputPath}.${index}.deflate`;
+    let crc = 0xffffffff;
+    let uncompressedSize = 0;
+    const meter = new Transform({
+      transform(chunk, _encoding, callback) {
+        crc = updateCrc32(crc, chunk);
+        uncompressedSize += chunk.length;
+        callback(null, chunk);
+      }
+    });
+    await pipeline(
+      fs.createReadStream(filePath),
+      meter,
+      zlib.createDeflateRaw({ level: 6 }),
+      fs.createWriteStream(temporaryPath, { flags: "wx" })
+    );
+    const compressedSize = fs.statSync(temporaryPath).size;
+
+    if (compressedSize < uncompressedSize) {
+      return {
+        checksum: (crc ^ 0xffffffff) >>> 0,
+        compressedSize,
+        uncompressedSize,
+        compressionMethod: 8,
+        dataPath: temporaryPath,
+        temporaryPath,
+        modifiedAt: stats.mtime
+      };
+    }
+
+    fs.rmSync(temporaryPath, { force: true });
+  }
+
+  const inspected = await inspectZipFile(filePath);
+  return {
+    ...inspected,
+    compressedSize: inspected.uncompressedSize,
+    compressionMethod: 0,
+    dataPath: filePath,
+    temporaryPath: "",
+    modifiedAt: stats.mtime
+  };
+}
+
+async function inspectZipFile(filePath) {
+  let crc = 0xffffffff;
+  let uncompressedSize = 0;
+
+  for await (const chunk of fs.createReadStream(filePath)) {
+    crc = updateCrc32(crc, chunk);
+    uncompressedSize += chunk.length;
+  }
+
+  return {
+    checksum: (crc ^ 0xffffffff) >>> 0,
+    uncompressedSize
+  };
+}
+
+async function appendFileToHandle(output, filePath) {
+  for await (const chunk of fs.createReadStream(filePath)) {
+    await output.write(chunk);
+  }
+}
+
+function shouldDeflateZipEntry(name, size) {
+  return size >= 256 && /\.(?:json|jsonl|md|txt|csv|tsv|html|xml|svg)$/i.test(String(name || ""));
+}
+
+function assertClassicZipRange(value, label) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffffffff) {
+    throw new Error(`${label} exceeds the 4 GiB portable ZIP limit. ZIP64 support is required for this archive.`);
+  }
 }
 
 function normalizeZipEntryName(name) {
@@ -1116,14 +1701,11 @@ function getDosDateTime(date) {
   };
 }
 
-function crc32(buffer) {
-  let crc = 0xffffffff;
-
+function updateCrc32(crc, buffer) {
   for (let index = 0; index < buffer.length; index += 1) {
     crc = CRC32_TABLE[(crc ^ buffer[index]) & 0xff] ^ (crc >>> 8);
   }
-
-  return (crc ^ 0xffffffff) >>> 0;
+  return crc;
 }
 
 function createCrc32Table() {
@@ -1217,7 +1799,7 @@ function setCorsHeaders(request, response) {
   const origin = request.headers.origin || "*";
   response.setHeader("Access-Control-Allow-Origin", origin);
   response.setHeader("Vary", "Origin");
-  response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   response.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Convo-Vault-Token, x-convo-vault-token, Authorization, authorization, *");
   response.setHeader("Access-Control-Allow-Private-Network", "true");
   response.setHeader("Access-Control-Max-Age", "86400");

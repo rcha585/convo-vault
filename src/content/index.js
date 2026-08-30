@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.8.2";
+  const EXPORTER_VERSION = "0.8.3";
   const IS_EXTENSION_ENV = typeof chrome !== "undefined" && Boolean(chrome?.runtime?.id);
   const installedState = window.__chatGptConversationExporterInstalled;
 
@@ -58,6 +58,9 @@
     backendToken: ""
   };
   const DEFAULT_ADVANCED_PDF_RENDERER_URL = "http://127.0.0.1:38474";
+  const LOCAL_RENDERER_BUNDLE_PORT = "CONVO_VAULT_LOCAL_RENDERER_BUNDLE";
+  const LOCAL_RENDERER_REQUEST_CHUNK_CHARACTERS = 512 * 1024;
+  const MAX_LOCAL_RENDERER_REQUEST_BYTES = 256 * 1024 * 1024;
   const MESSAGE_NODE_SELECTORS = [
     '[data-turn-id]',
     '[data-turn-container]',
@@ -1433,48 +1436,117 @@
   async function downloadExportBundle(metadata, messages, exportedAt = new Date(), options = {}) {
     const defaultFileName = markdownBuilder.filename(metadata.title, exportedAt, "zip");
     const payload = await createStructuredExportPayload(messages, exportedAt, {
-      embedImages: true,
+      embedImages: false,
       captureMode: options.captureMode,
       debugLog: options.debugLog
     });
 
-    const rendererSettings = await getExporterSettings();
-    const rendererUrl = getAdvancedPdfRendererUrl(rendererSettings);
-    let response;
+    const result = await requestBackgroundBundleExport({
+      exportPayload: payload,
+      fileName: defaultFileName
+    });
 
-    try {
-      response = await fetch(`${rendererUrl}/render-bundle`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...getLocalApiHeaders(rendererSettings)
-        },
-        body: JSON.stringify({
-          exportPayload: payload,
-          fileName: defaultFileName
-        })
-      });
-    } catch (error) {
-      throw new Error(`Local renderer is not running at ${rendererUrl}. Details: ${error.message || error}`);
+    if (!result?.ok) {
+      throw new Error(result?.error || "The local renderer could not export this conversation bundle.");
     }
-
-    if (!response.ok) {
-      await throwRendererResponseError(response, "Bundle renderer");
-    }
-
-    const blob = await response.blob();
-    const filename = getFilenameFromContentDisposition(response.headers.get("content-disposition")) || defaultFileName;
-    downloadBlob(filename, blob);
 
     return {
-      filename,
-      rendererUrl,
-      bundleFiles: decodeHeaderValue(response.headers.get("x-bundle-files")),
-      rendererTimings: parseEncodedJsonHeader(response.headers.get("x-bundle-timings")),
-      assetCount: Number(response.headers.get("x-asset-count")) || 0,
-      imagesEmbedded: payload.assetStats?.imagesEmbedded || 0,
-      imagesFailed: payload.assetStats?.imagesFailed || 0
+      filename: result.filename || defaultFileName,
+      rendererUrl: result.rendererUrl || DEFAULT_ADVANCED_PDF_RENDERER_URL,
+      bundleFiles: result.bundleFiles || "",
+      rendererTimings: result.rendererTimings || null,
+      assetCount: Number(result.assetCount) || 0,
+      imagesEmbedded: result.assetStats?.imagesEmbedded ?? payload.assetStats?.imagesEmbedded ?? 0,
+      imagesFailed: result.assetStats?.imagesFailed ?? payload.assetStats?.imagesFailed ?? 0
     };
+  }
+
+  async function requestBackgroundBundleExport(body) {
+    if (typeof chrome === "undefined" || !chrome.runtime?.connect) {
+      throw new Error("The Convo Vault extension background service is unavailable.");
+    }
+
+    const serializedBody = JSON.stringify(body);
+    const totalBytes = new TextEncoder().encode(serializedBody).byteLength;
+
+    if (totalBytes > MAX_LOCAL_RENDERER_REQUEST_BYTES) {
+      throw new Error(`This export request is ${totalBytes} bytes and exceeds the ${MAX_LOCAL_RENDERER_REQUEST_BYTES} byte local renderer limit.`);
+    }
+
+    const port = chrome.runtime.connect({ name: LOCAL_RENDERER_BUNDLE_PORT });
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+
+      const settle = (handler, value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        port.onMessage.removeListener(onMessage);
+        port.onDisconnect.removeListener(onDisconnect);
+        handler(value);
+      };
+
+      const onMessage = (message) => {
+        if (message?.type === "KEEPALIVE") {
+          return;
+        }
+
+        if (message?.type === "RESULT") {
+          settle(resolve, message.result || { ok: false, error: "The local renderer returned an empty result." });
+          try {
+            port.disconnect();
+          } catch (_) {
+            // The background service may already have closed the completed stream.
+          }
+        }
+      };
+
+      const onDisconnect = () => {
+        if (settled) {
+          return;
+        }
+        const detail = chrome.runtime.lastError?.message || "The extension background service disconnected before the export completed.";
+        settle(reject, new Error(detail));
+      };
+
+      port.onMessage.addListener(onMessage);
+      port.onDisconnect.addListener(onDisconnect);
+
+      port.postMessage({
+        type: "START",
+        totalCharacters: serializedBody.length,
+        totalBytes
+      });
+
+      void sendChunks();
+
+      async function sendChunks() {
+        try {
+          let chunkIndex = 0;
+          for (let offset = 0; offset < serializedBody.length; offset += LOCAL_RENDERER_REQUEST_CHUNK_CHARACTERS) {
+            port.postMessage({
+              type: "CHUNK",
+              data: serializedBody.slice(offset, offset + LOCAL_RENDERER_REQUEST_CHUNK_CHARACTERS)
+            });
+            chunkIndex += 1;
+
+            if (chunkIndex % 8 === 0) {
+              await new Promise((resume) => setTimeout(resume, 0));
+            }
+          }
+          port.postMessage({ type: "END" });
+        } catch (error) {
+          settle(reject, error);
+          try {
+            port.disconnect();
+          } catch (_) {
+            // The port may already be closed by the background service.
+          }
+        }
+      }
+    });
   }
 
   async function downloadAdvancedMarkdown(metadata, messages, exportedAt = new Date()) {

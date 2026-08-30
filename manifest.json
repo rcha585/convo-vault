@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Convo Vault",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Export ChatGPT conversations into searchable Markdown, JSON, and PDF bundles.",
   "permissions": [
     "activeTab",
+    "downloads",
     "scripting",
     "storage"
   ],

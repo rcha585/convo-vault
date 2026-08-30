@@ -171,7 +171,6 @@ function buildDocumentHtml(payload) {
   </main>
 
   <script>${buildPaginationScript()}</script>
-  ${renderImageGallery(imageRegistry.items)}
 </body>
 </html>`;
 }
@@ -300,17 +299,11 @@ function createMarkdownRenderer() {
     const embeddedSrc = normalizeEmbeddedImageSource(source);
     const src = embeddedSrc || source;
     const alt = token.content || token.attrGet("alt") || "image";
-    const registry = env?.imageRegistry;
-    const asset = registry?.bySrc?.get(source) || registry?.bySrc?.get(src);
-
-    if (!src.startsWith("data:image/") && !src.startsWith("file:")) {
+    if (!isRenderableImageSource(src)) {
       return renderRemoteMediaCard(src, alt);
     }
 
-    const figure = `<figure class="inline-image"><img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}"><figcaption>${escapeHtml(alt)}</figcaption></figure>`;
-    return asset
-      ? `<a class="inline-image-link" href="#${escapeAttr(asset.id)}">${figure}</a>`
-      : figure;
+    return `<figure class="inline-image"><img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}"><figcaption>${escapeHtml(alt)}</figcaption></figure>`;
   };
 
   return md;
@@ -1634,7 +1627,8 @@ function renderMessage(md, message, index, imageRegistry) {
   const anchorId = getMessageAnchorId(message, index);
   const time = message.timestamp ? `<time>${escapeHtml(message.timestamp)}</time>` : "";
   const turnHeading = renderTurnHeading(message, index);
-  const content = renderMessageMarkdown(md, isUser ? stripAttachmentOnlyLines(message.markdown) : message.markdown, imageRegistry);
+  const messageMarkdown = isUser ? stripAttachmentOnlyLines(message.markdown) : message.markdown;
+  const content = messageMarkdown.trim() ? renderMessageMarkdown(md, messageMarkdown, imageRegistry) : "";
   const thinking = isAssistant && message.thinkingMarkdown
     ? renderThinking(md, message.thinkingMarkdown, imageRegistry)
     : "";
@@ -1647,7 +1641,7 @@ function renderMessage(md, message, index, imageRegistry) {
           ${renderUserAvatar()}
         </div>
         ${renderAttachmentLead(message.markdown, imageRegistry)}
-        <div class="bubble user-bubble">${content}</div>
+        ${content ? `<div class="bubble user-bubble">${content}</div>` : ""}
         ${time ? `<div class="message-time user-time">${time}</div>` : ""}
       </div>
     </article>`;
@@ -1776,7 +1770,10 @@ function renderAttachmentLead(markdown, imageRegistry) {
     return "";
   }
 
-  return `<div class="user-attachments">${attachments.map((item) => {
+  const imageCount = attachments.filter((item) => item.type === "image").length;
+  const layoutClass = imageCount === 1 ? "single-image" : imageCount > 1 ? "image-grid" : "files-only";
+
+  return `<div class="user-attachments ${layoutClass}" data-image-count="${imageCount}">${attachments.map((item, index) => {
     const typeClass = item.type === "file" ? "file" : "image";
     const imageSrc = item.type === "image" ? (normalizeEmbeddedImageSource(item.url) || item.url) : "";
     const asset = item.type === "image"
@@ -1787,11 +1784,9 @@ function renderAttachmentLead(markdown, imageRegistry) {
       : `<span class="attachment-icon">${item.type === "file" ? getFileExtensionLabel(item.label) : "IMG"}</span>`;
     const card = `<span class="attachment-card ${typeClass} ${asset ? "with-thumb image-preview-card" : ""}">
       ${content}
-      <span class="attachment-name">${escapeHtml(item.label)}</span>
+      <span class="attachment-name">${escapeHtml(item.label || `${item.type === "image" ? "Image" : "Attachment"} ${index + 1}`)}</span>
     </span>`;
-    return asset
-      ? `<a class="attachment-card-link" href="#${escapeAttr(asset.id)}">${card}</a>`
-      : card;
+    return card;
   }).join("")}</div>`;
 }
 
@@ -1815,9 +1810,6 @@ function extractLeadingAttachments(markdown) {
       result.push({ type: "file", label: file[1] || "Attachment" });
     }
 
-    if (result.length >= 4) {
-      break;
-    }
   }
 
   return result;
@@ -1846,7 +1838,8 @@ function buildImageRegistry(messages) {
 
   messages.forEach((message, messageIndex) => {
     for (const image of extractMarkdownImages(`${message.markdown || ""}\n${message.thinkingMarkdown || ""}`)) {
-      const src = normalizeEmbeddedImageSource(image.src);
+      const src = normalizeEmbeddedImageSource(image.src)
+        || (isSafeRenderAssetSource(image.src) ? image.src : "");
       if (!src || bySrc.has(src)) {
         continue;
       }
@@ -1864,6 +1857,15 @@ function buildImageRegistry(messages) {
   });
 
   return { bySrc, items };
+}
+
+function isRenderableImageSource(value) {
+  const source = String(value || "");
+  return source.startsWith("data:image/") || isSafeRenderAssetSource(source);
+}
+
+function isSafeRenderAssetSource(value) {
+  return /^render-assets\/[a-f0-9]{64}\.(?:png|jpe?g|gif|webp|svg)$/i.test(String(value || ""));
 }
 
 function extractMarkdownImages(markdown) {
@@ -1893,21 +1895,6 @@ function renderRemoteMediaCard(src, alt) {
       <span class="remote-media-note">${escapeHtml(note)}</span>
     </span>
   </a>`;
-}
-
-function renderImageGallery(items) {
-  if (!items.length) {
-    return "";
-  }
-
-  return `<section class="image-gallery page-break-before">
-    <h2>Image Attachments</h2>
-    ${items.map((item, index) => `
-      <figure id="${escapeAttr(item.id)}" class="image-detail ${index < items.length - 1 ? "page-break-after" : ""}">
-        <img src="${escapeAttr(item.src)}" alt="${escapeAttr(item.alt)}">
-        <figcaption>${escapeHtml(item.alt)} - message ${item.messageNumber}</figcaption>
-      </figure>`).join("")}
-  </section>`;
 }
 
 function getFileExtensionLabel(filename) {
@@ -1941,9 +1928,25 @@ function getMessageAnchorId(message, index) {
 
 function getMessageLabel(message, index) {
   const markdownSource = stripAttachmentOnlyLines(cleanMarkdownForHtml(message.markdown || ""));
+  const attachmentDescription = describeAttachmentOnlyMessage(message);
+  if (!markdownSource && attachmentDescription) {
+    return `${formatTurnNumber(message, index)}. ${attachmentDescription}`;
+  }
   const source = markdownSource || cleanMarkdownForHtml(message.preview || message.thinkingMarkdown || "");
   const text = stripMarkdown(source).replace(/\s+/g, " ").trim();
-  return `${formatTurnNumber(message, index)}. ${text.slice(0, 82) || formatRole(message.role)}`;
+  return `${formatTurnNumber(message, index)}. ${text.slice(0, 82) || attachmentDescription || formatRole(message.role)}`;
+}
+
+function describeAttachmentOnlyMessage(message) {
+  const attachments = extractLeadingAttachments(message.markdown);
+  const imageCount = attachments.filter((item) => item.type === "image").length;
+  const fileCount = attachments.filter((item) => item.type === "file").length;
+  const owner = message.role === "assistant" ? "Assistant" : "User";
+
+  if (imageCount && fileCount) return `${owner} attachments: ${imageCount} image${imageCount === 1 ? "" : "s"}, ${fileCount} file${fileCount === 1 ? "" : "s"}`;
+  if (imageCount) return `${owner} ${imageCount === 1 ? "image" : `${imageCount} images`}`;
+  if (fileCount) return `${owner} ${fileCount === 1 ? "file attachment" : `${fileCount} file attachments`}`;
+  return "";
 }
 
 function getThinkingLabel(markdown) {
@@ -2123,10 +2126,14 @@ function buildPdfOutlineItems(messages) {
 
 function getMessageOutlineTitle(message, index) {
   const markdownSource = stripAttachmentOnlyLines(cleanMarkdownForHtml(message.markdown || ""));
+  const attachmentDescription = describeAttachmentOnlyMessage(message);
+  const heading = formatTurnHeading(message, index);
+  if (!markdownSource && attachmentDescription) {
+    return `${heading}: ${attachmentDescription}`;
+  }
   const source = markdownSource || cleanMarkdownForHtml(message.preview || message.thinkingMarkdown || "");
   const preview = stripMarkdown(source).trim().slice(0, 76);
-  const heading = formatTurnHeading(message, index);
-  return preview ? `${heading}: ${preview}` : heading;
+  return preview ? `${heading}: ${preview}` : attachmentDescription ? `${heading}: ${attachmentDescription}` : heading;
 }
 
 function addPdfOutlines(pdfPath, outlineItems) {
@@ -3282,9 +3289,17 @@ a {
 }
 
 .user-attachments {
-  display: block;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
   break-inside: auto;
   text-align: right;
+  width: min(470px, 100%);
+  margin-left: auto;
+}
+
+.user-attachments.image-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .attachment-card {
@@ -3337,7 +3352,7 @@ a {
 .user-attachments .attachment-card-link + .attachment-card,
 .user-attachments .attachment-card + .attachment-card-link,
 .user-attachments .attachment-card + .attachment-card {
-  margin-top: 8px;
+  margin-top: 0;
 }
 
 .attachment-thumb {
@@ -3357,6 +3372,16 @@ a {
   max-height: 430px;
   object-fit: contain;
   display: block;
+}
+
+.user-attachments.image-grid .attachment-thumb,
+.user-attachments.image-grid .attachment-thumb img {
+  height: 210px;
+  max-height: 210px;
+}
+
+.user-attachments.image-grid .attachment-thumb img {
+  object-fit: cover;
 }
 
 .attachment-icon {
@@ -3495,44 +3520,6 @@ a {
 .object-source-link::before {
   background: #e0f2fe;
   color: #075985;
-}
-
-.image-gallery {
-  padding-top: 6px;
-}
-
-.image-gallery h2 {
-  margin: 0 0 18px;
-  font-size: 19px;
-  line-height: 1.25;
-  color: #0f172a;
-}
-
-.image-detail {
-  margin: 0;
-  min-height: 690px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  break-inside: avoid;
-}
-
-.image-detail img {
-  display: block;
-  max-width: 100%;
-  max-height: 650px;
-  margin: 0 auto;
-  object-fit: contain;
-  border: 1px solid #dbeafe;
-  border-radius: 12px;
-  background: #f8fafc;
-}
-
-.image-detail figcaption {
-  margin-top: 8px;
-  text-align: center;
-  color: #64748b;
-  font-size: 10.5px;
 }
 
 .hljs {
