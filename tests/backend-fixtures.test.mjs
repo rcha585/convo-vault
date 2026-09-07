@@ -150,7 +150,7 @@ test("backend Markdown and data endpoints preserve export fixture text", async (
 
   const stagedPayload = {
     schemaVersion: 1,
-    exporterVersion: "0.8.3",
+    exporterVersion: "0.8.5",
     title: "Staged local asset fixture",
     source: "https://chatgpt.com/c/staged-local-asset",
     exportedAt: "2026-08-30T00:00:00.000Z",

@@ -413,6 +413,243 @@ test("Fast API parser extracts agentTrace with document slices and keeps answer 
   assert.equal(messages[1].agentTrace.thinkingNodes.length, 1);
 });
 
+test("Fast API parser extracts multi-step thoughts with both summary and full content without dropping snippet", async () => {
+  const fast = await loadFastCaptureModule();
+  const data = {
+    current_node: "answer",
+    mapping: {
+      root: { id: "root", parent: "", message: null },
+      prompt: {
+        id: "prompt",
+        parent: "root",
+        message: makeMessage("user", "Design two UI schemes.")
+      },
+      thoughtNode: {
+        id: "thoughtNode",
+        parent: "prompt",
+        message: {
+          id: "msg-thought-1",
+          author: { role: "assistant" },
+          content: {
+            content_type: "thoughts",
+            thoughts: [
+              {
+                summary: "设计两套界面",
+                content: "我会基于现有截图保留信息结构，制作两张独立的手机端抽卡界面：一张走高级清透的植物疗愈风，另一张采用更活泼、有趣的卡牌游戏风。"
+              },
+              {
+                summary: "Designed two interface concepts",
+                content: "Prepared two distinct high-fidelity UI wireframes."
+              }
+            ]
+          },
+          metadata: {
+            finished_duration_sec: 81
+          }
+        }
+      },
+      answer: {
+        id: "answer",
+        parent: "thoughtNode",
+        message: makeMessage("assistant", "Here are the two UI schemes.", {
+          channel: "final",
+          end_turn: true
+        })
+      }
+    }
+  };
+
+  const messages = fast.buildMessagesFromConversationApi(data);
+  assert.equal(messages.length, 2);
+  const assistantMsg = messages[1];
+  assert.equal(assistantMsg.markdown, "Here are the two UI schemes.");
+
+  // 1. Verify thinkingMarkdown contains BOTH summary title and detailed prose
+  assert.match(assistantMsg.thinkingMarkdown, /💭 \*\*Thinking Process \(Worked for 1m 21s\)\*\*/);
+  assert.match(assistantMsg.thinkingMarkdown, /🧠 \*\*推理思考\*\*: \*\*设计两套界面\*\*/);
+  assert.match(assistantMsg.thinkingMarkdown, /我会基于现有截图保留信息结构，制作两张独立的手机端抽卡界面/);
+  assert.match(assistantMsg.thinkingMarkdown, /🧠 \*\*推理思考\*\*: \*\*Designed two interface concepts\*\*/);
+  assert.match(assistantMsg.thinkingMarkdown, /Prepared two distinct high-fidelity UI wireframes\./);
+
+  // 2. Verify agentTrace contains discrete thinkingNodes with non-empty content
+  assert.ok(assistantMsg.agentTrace);
+  assert.equal(assistantMsg.agentTrace.thinkingNodes.length, 2);
+  assert.equal(assistantMsg.agentTrace.thinkingNodes[0].summary, "设计两套界面");
+  assert.match(assistantMsg.agentTrace.thinkingNodes[0].content, /我会基于现有截图保留信息结构/);
+  assert.equal(assistantMsg.agentTrace.thinkingNodes[0].durationSeconds, 81);
+  assert.equal(assistantMsg.agentTrace.thinkingNodes[1].summary, "Designed two interface concepts");
+  assert.equal(assistantMsg.agentTrace.thinkingNodes[1].content, "Prepared two distinct high-fidelity UI wireframes.");
+
+  // 3. Verify activities have non-empty snippet
+  const reasoningActs = assistantMsg.agentTrace.activities.filter((a) => a.type === "reasoning");
+  assert.equal(reasoningActs.length, 2);
+  assert.equal(reasoningActs[0].summary, "设计两套界面");
+  assert.match(reasoningActs[0].snippet, /我会基于现有截图保留信息结构/);
+  assert.equal(reasoningActs[1].summary, "Designed two interface concepts");
+  assert.match(reasoningActs[1].snippet, /Prepared two distinct high-fidelity UI wireframes\./);
+});
+
+test("Fast API parser extracts reasoning search operations and reasoning recap into timeline and agentTrace", async () => {
+  const fast = await loadFastCaptureModule();
+  const data = {
+    current_node: "answer",
+    mapping: {
+      root: { id: "root", parent: "", message: null },
+      prompt: {
+        id: "prompt",
+        parent: "root",
+        message: makeMessage("user", "Find low poly island assets.")
+      },
+      searchCall: {
+        id: "searchCall",
+        parent: "prompt",
+        message: {
+          id: "msg-search-call",
+          author: { role: "assistant" },
+          content: {
+            content_type: "code",
+            parts: ["site:quaternius.com floating island"]
+          },
+          metadata: {
+            reasoning_status: "is_reasoning",
+            reasoning_title: "查找岛屿素材库",
+            search_queries: ["quaternius.com floating island low poly pack"]
+          }
+        }
+      },
+      searchResult: {
+        id: "searchResult",
+        parent: "searchCall",
+        message: {
+          id: "msg-search-result",
+          author: { role: "tool" },
+          content: {
+            content_type: "text",
+            parts: ["done"]
+          },
+          metadata: {
+            search_result_groups: [
+              {
+                domain: "quaternius.com",
+                search_query: "quaternius.com floating island low poly pack",
+                entries: [
+                  {
+                    title: "Quaternius • Free Game Assets",
+                    url: "https://quaternius.com/packs/platformergamekit.html"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      recapNode: {
+        id: "recapNode",
+        parent: "searchResult",
+        message: {
+          id: "msg-recap",
+          author: { role: "assistant" },
+          content: {
+            content_type: "reasoning_recap",
+            content: "思考了 35 秒并完成了素材检索"
+          },
+          metadata: {
+            finished_duration_sec: 35
+          }
+        }
+      },
+      answer: {
+        id: "answer",
+        parent: "recapNode",
+        message: makeMessage("assistant", "Found the Quaternius platformer pack.", {
+          channel: "final",
+          end_turn: true
+        })
+      }
+    }
+  };
+
+  const messages = fast.buildMessagesFromConversationApi(data);
+  assert.equal(messages.length, 2);
+  const assistantMsg = messages[1];
+
+  // Verify search step in thinking timeline
+  assert.match(assistantMsg.thinkingMarkdown, /🔍 \*\*网页搜索\*\*: 查找岛屿素材库/);
+  assert.match(assistantMsg.thinkingMarkdown, /quaternius\.com floating island low poly pack/);
+  assert.match(assistantMsg.thinkingMarkdown, /\[Quaternius • Free Game Assets\]\(https:\/\/quaternius\.com\/packs\/platformergamekit\.html\)/);
+  assert.match(assistantMsg.thinkingMarkdown, /⏱️ \*\*思考总结\*\*: 思考了 35 秒并完成了素材检索/);
+
+  // Verify agentTrace captures search
+  assert.ok(assistantMsg.agentTrace);
+  assert.equal(assistantMsg.agentTrace.searches.length, 1);
+  assert.equal(assistantMsg.agentTrace.searches[0].queries[0], "quaternius.com floating island low poly pack");
+  assert.equal(assistantMsg.agentTrace.searches[0].results[0].title, "Quaternius • Free Game Assets");
+});
+
+test("Fast API parser triggers fidelity warnings on empty thought bodies when debugLog is active", async () => {
+  const fast = await loadFastCaptureModule();
+  const warnings = [];
+  const diagnostics = [];
+  const mockDebugLog = {
+    fidelityWarning(warning) {
+      warnings.push(warning);
+    },
+    recordThinkingDiagnostic(diag) {
+      diagnostics.push(diag);
+    },
+    event() {}
+  };
+
+  const data = {
+    current_node: "answer",
+    mapping: {
+      root: { id: "root", parent: "", message: null },
+      prompt: {
+        id: "prompt",
+        parent: "root",
+        message: makeMessage("user", "Analyze")
+      },
+      thoughtNode: {
+        id: "thoughtNode",
+        parent: "prompt",
+        message: {
+          id: "msg-thought-empty",
+          author: { role: "assistant" },
+          content: {
+            content_type: "thoughts",
+            thoughts: [
+              {
+                summary: "Only summary title",
+                content: ""
+              }
+            ]
+          },
+          metadata: { finished_duration_sec: 10 }
+        }
+      },
+      answer: {
+        id: "answer",
+        parent: "thoughtNode",
+        message: makeMessage("assistant", "Answer", { end_turn: true })
+      }
+    }
+  };
+
+  const messages = fast.buildMessagesFromConversationApi(data, mockDebugLog);
+  assert.equal(messages.length, 2);
+
+  // Warning was properly triggered for empty thought body
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].code, "EMPTY_THOUGHT_CONTENT");
+  assert.equal(warnings[0].details.summary, "Only summary title");
+
+  // Diagnostic was recorded
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].totalSteps, 1);
+  assert.equal(diagnostics[0].stepsWithSummaryOnly, 1);
+  assert.equal(diagnostics[0].stepsWithFullContent, 0);
+});
+
 test("Fast API fetch loads every page from the plural conversations endpoint", async () => {
   const conversationId = "conversation-pagination-test";
   const accessToken = "bootstrap-access-token-12345678901234567890";

@@ -1,0 +1,35 @@
+# AGENTS.md - Convo Vault Agent Execution Guidelines
+
+## 1. 核心执行准则：全自动自主执行 (Autonomous Direct Execution)
+
+- **直接执行，禁止中途请示**：
+  - 遇到任务时，默认直接执行所需的文件读取、代码编辑、环境检查与终端命令。
+  - 严禁中途停顿输出“我准备进行以下操作，是否允许？”等询问。
+  - 遇到需要跑多步的开发或排查任务，一步到位执行到底并验证，直接向用户呈现最终结果。
+
+- **禁用阻塞性交互弹窗 (No Blocking Modals)**：
+  - 严禁调用 `ask_question` 等弹出选择框阻塞工作流。
+  - 若遇未明确指定的技术细节或实现方案，以通用最佳实践、当前项目已有架构风格为准，自主决策并继续推进。
+
+- **自动调试与闭环验证 (Self-Healing Loop)**：
+  - 运行命令或测试（如 `npm test`、`npm run check`、`python` 脚本）如果遇到报错，自主读取错误日志、修改代码并重新运行，直到通过验证。
+
+---
+
+## 2. 项目架构与规范 (Convo Vault Conventions)
+
+- **项目类型**：Chrome 扩展程序 (Manifest V3)，基于原生 JavaScript / Node.js 测试套件构建。
+- **进度与历史规范**：参考根目录下的 [CURRENT_PROGRESS.md](file:///d:/AI/convo-vault/CURRENT_PROGRESS.md) 与 [docs/knowledge-system/](file:///d:/AI/convo-vault/docs/knowledge-system/)。
+- **数据完整性门禁 (Integrity Gate)**：
+  - 支持 `Full`、`Fast`、`Hybrid` 捕获模式。
+  - 严格保持消息序列完整性，杜绝序号跳跃与角色异常。
+
+---
+
+## 3. 常用开发与验证命令
+
+在 Windows PowerShell 环境下运行：
+- **测试套件**：`npm test`
+- **代码与 JSON 校验**：`npm run check`
+- **Fixture 完整测试**：`npm run test:fixtures`
+- **构建扩展**：`npm run build:extension`

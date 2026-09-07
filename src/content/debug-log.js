@@ -4,7 +4,10 @@
     const isDetailed = options.detailed ?? DETAILED_DEBUG_LOG;
     const maxEvents = options.maxEvents || DEBUG_EVENT_LIMIT;
     let captureMode = normalizeCaptureMode(options.captureMode);
+    const debugMode = options.debugMode || (isDetailed ? "fidelity-audit" : "standard");
     let droppedEvents = 0;
+    const fidelityWarnings = [];
+    const turnThinkingDiagnostics = [];
     const stats = {
       selectorHits: {},
       normalizedCandidates: 0,
@@ -17,6 +20,15 @@
       emptyMessages: 0,
       emptyReasons: {},
       filterReasons: {},
+      fidelity: {
+        warningsCount: 0,
+        emptyThoughtContentCount: 0,
+        stepsWithFullContent: 0,
+        stepsWithSummaryOnly: 0,
+        totalThinkingSteps: 0,
+        reasoningSearchesCount: 0,
+        unassociatedSearchesCount: 0
+      },
       roles: {
         user: 0,
         assistant: 0,
@@ -34,8 +46,55 @@
 
     return {
       stats,
+      debugMode,
       setCaptureMode(value) {
         captureMode = normalizeCaptureMode(value);
+      },
+      fidelityWarning(warning = {}) {
+        stats.fidelity.warningsCount += 1;
+        const code = warning.code || "FIDELITY_ANOMALY";
+        if (code === "EMPTY_THOUGHT_CONTENT") {
+          stats.fidelity.emptyThoughtContentCount += 1;
+        } else if (code === "UNASSOCIATED_REASONING_SEARCH") {
+          stats.fidelity.unassociatedSearchesCount += 1;
+        }
+        fidelityWarnings.push({
+          atMs: Date.now() - startedAt.getTime(),
+          severity: warning.severity || "warning",
+          code,
+          turnNumber: warning.turnNumber || null,
+          message: warning.message || "",
+          details: warning.details || {}
+        });
+        this.event("fidelity.warning", {
+          code,
+          turnNumber: warning.turnNumber,
+          message: warning.message,
+          details: warning.details
+        });
+      },
+      recordThinkingDiagnostic(diag = {}) {
+        const turnNumber = diag.turnNumber || null;
+        const totalSteps = Number(diag.totalSteps || 0);
+        const stepsWithFull = Number(diag.stepsWithFullContent || 0);
+        const stepsSummaryOnly = Number(diag.stepsWithSummaryOnly || 0);
+        const searches = Number(diag.searchQueriesCount || 0);
+
+        stats.fidelity.totalThinkingSteps += totalSteps;
+        stats.fidelity.stepsWithFullContent += stepsWithFull;
+        stats.fidelity.stepsWithSummaryOnly += stepsSummaryOnly;
+        stats.fidelity.reasoningSearchesCount += searches;
+
+        turnThinkingDiagnostics.push({
+          turnNumber,
+          totalSteps,
+          stepsWithFullContent: stepsWithFull,
+          stepsWithSummaryOnly: stepsSummaryOnly,
+          durationSec: diag.durationSec || 0,
+          searchQueriesCount: searches,
+          toolCallsCount: diag.toolCallsCount || 0,
+          hasRecap: Boolean(diag.hasRecap)
+        });
       },
       event(type, data = {}) {
         if (events.length >= maxEvents) {
@@ -219,8 +278,27 @@
               : capturedTurnOrders));
         const expectedTurnCount = expectedTurnOrders.length || pageTurnDiagnostics.dataTurnIdCount || effectiveTurnCount;
         const missingTurnOrders = expectedTurnOrders.filter((order) => !capturedTurnOrderSet.has(order));
+        const hasCriticalFidelityIssue = fidelityWarnings.some((w) => w.severity === "high" || w.code === "EMPTY_THOUGHT_CONTENT");
+        const fidelityAudit = {
+          status: fidelityWarnings.length === 0
+            ? "clean"
+            : (hasCriticalFidelityIssue ? "degraded" : "warning"),
+          debugMode,
+          totalAssistantTurns: assistantMessages,
+          turnsWithThinking: assistantThinkingMessages,
+          totalThinkingSteps: stats.fidelity.totalThinkingSteps,
+          stepsWithFullContent: stats.fidelity.stepsWithFullContent,
+          stepsWithSummaryOnly: stats.fidelity.stepsWithSummaryOnly,
+          contentCompletenessRate: stats.fidelity.totalThinkingSteps > 0
+            ? Number((stats.fidelity.stepsWithFullContent / stats.fidelity.totalThinkingSteps).toFixed(3))
+            : 1.0,
+          warningsCount: fidelityWarnings.length,
+          warnings: fidelityWarnings,
+          turnDiagnostics: turnThinkingDiagnostics
+        };
         finalSummary = {
           captureMode,
+          debugMode,
           totalMessages: messages.length,
           userMessages,
           assistantMessages,
@@ -243,7 +321,8 @@
             : null,
           roleSequenceDiagnostics,
           capturedTurnOrders,
-          missingTurnOrders
+          missingTurnOrders,
+          fidelityAudit
         };
       },
       getFinalSummary() {
@@ -253,12 +332,20 @@
         return {
           exporterVersion: EXPORTER_VERSION,
           captureMode,
+          debugMode,
           features: {
             conversationTimestampApi: true,
             visibleThinkingFlyoutCapture: true,
             autoOpenThinkingFlyouts: true,
             thinkingFlyoutAutoOpenLimit: THINKING_FLYOUT_AUTO_OPEN_LIMIT,
+            cognitiveFidelityTracking: true,
             pdfEngine: "advanced-local-chrome"
+          },
+          fidelityAudit: finalSummary?.fidelityAudit || {
+            status: fidelityWarnings.length === 0 ? "clean" : "warning",
+            debugMode,
+            warningsCount: fidelityWarnings.length,
+            warnings: fidelityWarnings
           },
           pageUrl: location.href,
           title: getConversationTitle(),

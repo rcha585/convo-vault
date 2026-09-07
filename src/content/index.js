@@ -1,5 +1,5 @@
 (() => {
-  const EXPORTER_VERSION = "0.8.3";
+  const EXPORTER_VERSION = "0.8.5";
   const IS_EXTENSION_ENV = typeof chrome !== "undefined" && Boolean(chrome?.runtime?.id);
   const installedState = window.__chatGptConversationExporterInstalled;
 
@@ -3378,7 +3378,7 @@
         <aside class="cgce-panel" aria-label="ChatGPT export message selector">
           <header class="cgce-header">
             <div>
-              <h2 class="cgce-title">Select messages</h2>
+              <h2 class="cgce-title">Select messages <span style="font-size: 11px; font-weight: 500; color: #64748b; margin-left: 6px;">v${EXPORTER_VERSION}</span></h2>
               <p class="cgce-subtitle">Choose a capture mode, review loaded turns, then export the bundle.</p>
             </div>
             <div class="cgce-icon-buttons">
