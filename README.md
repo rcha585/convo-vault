@@ -12,17 +12,6 @@ Convo Vault 是一个本地优先的 Chrome 扩展，用来把 ChatGPT 对话导
 
 当前版本：`0.8.5`
 
-## 效果展示 (Showcase)
-
-> 💡 截图存放在 `docs/images/` 目录下。
-
-| 核心特性 | 界面效果与知识资产展示 |
-| :--- | :--- |
-| **选择器与完整性门禁**<br>· 结构完整性校验 (0 漏抓)<br>· Fast / Full / Hybrid 双引擎<br>· 动态序列缺口自愈 | <img src="docs/images/04-open-selector-modal.png" width="450" alt="选择器与完整性门禁" /><br>*图 1: 对话选择器、实时完整性校验与导出面板* |
-| **灵活的抓取模式选择**<br>· Fast (API 极速直连)<br>· Full (DOM 深度遍历)<br>· Hybrid (靶向精准补水) | <img src="docs/images/05-choose-capture-mode.png" width="300" alt="选择抓取模式" /><br>*图 2: 依据对话复杂度和素材类型灵活选定抓取策略* |
-| **对话轮次检视与一键导出**<br>· 严格 User-Assistant 对称序列<br>· 思考过程、代码与多媒体素材检视<br>· 完整性拦截与一键打包下载 | <img src="docs/images/06-inspect-and-export.png" width="350" alt="展开对话检视与导出" /><br>*图 3: 对话多轮详情展开、素材状态与一键 ZIP 打包* |
-| **本地安全守护与服务管理**<br>· 独占 Token 授权隔离<br>· 本地优先 (127.0.0.1 闭环)<br>· 随用随起、一键安全停止 | <img src="docs/images/02-configure-backend-path.png" width="450" alt="服务配置与安全管理" /><br>*图 4: 本地渲染服务配置、安全令牌与端口释放* |
-
 ## 最近更新
 
 `0.8.5` 深度强化思考链（Thinking Trace）与文献引用可点击性：
