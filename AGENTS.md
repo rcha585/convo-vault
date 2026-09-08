@@ -19,7 +19,7 @@
 ## 2. 项目架构与规范 (Convo Vault Conventions)
 
 - **项目类型**：Chrome 扩展程序 (Manifest V3)，基于原生 JavaScript / Node.js 测试套件构建。
-- **进度与历史规范**：参考根目录下的 [CURRENT_PROGRESS.md](file:///d:/AI/convo-vault/CURRENT_PROGRESS.md) 与 [docs/knowledge-system/](file:///d:/AI/convo-vault/docs/knowledge-system/)。
+- **进度与历史规范**：参考根目录下的 [CURRENT_PROGRESS.md](file:///d:/AI/convo-vault/CURRENT_PROGRESS.md)。导出规范以 Agent-Ready 通用知识包为准。
 - **数据完整性门禁 (Integrity Gate)**：
   - 支持 `Full`、`Fast`、`Hybrid` 捕获模式。
   - 严格保持消息序列完整性，杜绝序号跳跃与角色异常。

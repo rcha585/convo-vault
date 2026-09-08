@@ -1,20 +1,50 @@
 # Convo Vault
 
-> Knowledge base experiment: Raw Pack v0.1 is available under [`tools/knowledge-pack/`](tools/knowledge-pack/README.md). It imports mixed local files into an Obsidian-compatible, immutable raw evidence layer with hashes, manifests, duplicate detection, and optional PDF page assets. Private Vault folders are excluded from Git.
+如果要在 ChatGPT 里长期沉淀有价值的对话资产，怎么办？
 
-如果在 ChatGPT 里遇到一段值得长期保存的对话，怎么办？
-
-如果一段长对话里混着代码、表格、图片、文件线索和思考过程，手动复制太痛苦，怎么办？
+如果一段长对话里混着代码、表格、图片、文件线索和复杂思考过程，手动复制太痛苦，怎么办？
 
 如果你不想把私密对话丢给陌生在线转换工具，但又想要漂亮的 Markdown、PDF 和结构化数据，怎么办？
 
 现在你有了 **Convo Vault**。
 
-Convo Vault 是一个本地优先的 Chrome 扩展，用来把 ChatGPT 对话导出成可以长期保存、检索和二次处理的本地档案。它会读取你当前打开的 ChatGPT 对话，把选中的消息打包成本地 `.zip`，里面包含可读的 Markdown、PDF，以及适合后续放进 Obsidian、知识库、搜索索引或 RAG 流程的结构化数据。
+Convo Vault 是一个本地优先的 Chrome 扩展，用来把 ChatGPT 对话导出成可以长期保存、检索和供各类 Agent 二次处理的通用知识包（Universal Knowledge Pack）。它会读取你当前打开的 ChatGPT 对话，把选中的消息打包成本地 `.zip`，里面包含高保真排版的 Markdown、PDF，以及适合后续放进各类 AI Agent（如 Codex、Claude、Cursor、本地智能体）、知识库、搜索索引或 RAG 流程的结构化数据（JSONL、QA 对、主题图谱、实体索引与深度推理追踪）。
 
-当前版本：`0.7.26`
+当前版本：`0.8.5`
+
+## 效果展示 (Showcase)
+
+> 💡 截图存放在 `docs/images/` 目录下。
+
+| 核心特性 | 界面效果与知识资产展示 |
+| :--- | :--- |
+| **选择器与完整性门禁**<br>· 结构完整性校验 (0 漏抓)<br>· Fast / Full / Hybrid 双引擎<br>· 动态序列缺口自愈 | <img src="docs/images/04-open-selector-modal.png" width="450" alt="选择器与完整性门禁" /><br>*图 1: 对话选择器、实时完整性校验与导出面板* |
+| **灵活的抓取模式选择**<br>· Fast (API 极速直连)<br>· Full (DOM 深度遍历)<br>· Hybrid (靶向精准补水) | <img src="docs/images/05-choose-capture-mode.png" width="300" alt="选择抓取模式" /><br>*图 2: 依据对话复杂度和素材类型灵活选定抓取策略* |
+| **对话轮次检视与一键导出**<br>· 严格 User-Assistant 对称序列<br>· 思考过程、代码与多媒体素材检视<br>· 完整性拦截与一键打包下载 | <img src="docs/images/06-inspect-and-export.png" width="350" alt="展开对话检视与导出" /><br>*图 3: 对话多轮详情展开、素材状态与一键 ZIP 打包* |
+| **本地安全守护与服务管理**<br>· 独占 Token 授权隔离<br>· 本地优先 (127.0.0.1 闭环)<br>· 随用随起、一键安全停止 | <img src="docs/images/02-configure-backend-path.png" width="450" alt="服务配置与安全管理" /><br>*图 4: 本地渲染服务配置、安全令牌与端口释放* |
 
 ## 最近更新
+
+`0.8.5` 深度强化思考链（Thinking Trace）与文献引用可点击性：
+
+- **高保真深度思考捕获**：支持长达数分钟的复杂多步思考链（Multi-Step Chain-of-Thought）全量提取，耗时与推理标题规范化折叠
+- **点击直达的文献引用**：搜索引用与云端文档切片全面转换为标准 Markdown 格式，引用角标点击直达目标源
+- **架构解耦与纯净知识包**：彻底解除对下游特定笔记软件（如 Obsidian）的强制绑定，回归通用 Agent 知识资产原语
+
+`0.8.3` 强化图像素材完整性与离线账本：
+
+- **图像素材完整归档**：多模态对话中的关键图片本地 SHA-256 缓存归档，远端引用与占位卡片标准化
+- **Assets Manifest 账本**：详细记录全部 100+ 媒体资产的来源、存储策略、降级原因与引用位置
+
+`0.8.2` 迁移 ChatGPT 复数分页接口（Plural API Pagination）：
+
+- **Fast API 分页自动穿越**：全面适配 `/backend-api/conversations/{id}` 最新长对话分页流，自动向前分页至对话起点
+- **会话 Token 凭证自愈**：当 `/api/auth/session` 受限时，自动无缝提取网页端 Bootstrap Session，无需用户重新登录
+
+`0.8.1` 推出 Agent 认知与工具调用执行链路 Sidecars（`*.agent-trace.json` & `*.agent-trace.md`）：
+
+- **执行追踪隔离归档**：将 ChatGPT 内部的文档切片（`[L1]...`）、Python 沙盒代码与 Web 搜索操作单独提取为 Agent 报告，避免污染干净的 Markdown/PDF 答复正文
+- **思考活动时间线**：计划 (`💬`)、工具 (`🔌`)、搜索 (`🔍`)、执行 (`⚙️`)、推理 (`🧠`) 结构化分类呈现
 
 `0.7.26` 重磅推出 Fast 2.0 轮次聚合引擎（Turn-Chain Synthesizer）与全维度元数据提取：
 
@@ -24,100 +54,80 @@ Convo Vault 是一个本地优先的 Chrome 扩展，用来把 ChatGPT 对话导
 - **文献引用与标准角标（Sources & Citations Footnotes）**：自动解析 Google Docs / 网页调研引用，将内部标记替换为标准 Markdown 文献脚注 `[^1]: [标题](URL)`
 - **长期记忆与历史对话（Memory & Context）**：自动提取记忆引用与前置历史对话关联卡片
 
-`0.7.25` 增强 Hybrid 2.0 靶向富化与长对话虚拟化缺口自愈：
+## 怎么使用 (快速上手指南)
 
-- **Hybrid 2.0 靶向增强**：以 Fast API 建立的 100% 完整线性拓扑（Ground Truth）为主控骨架，引导 Full DOM 执行靶向精准滚动富化；遇到 DOM 偶发未挂载节点自动以 API 文本保底，彻底杜绝漏抓（100% 召回率）
-- **连续序列缺口自愈（Sequential Gap Recovery）**：扫描中发现的最大 Turn 序号 $M$ 自动生成 $1 \sim M$ 连续整数基准；中间虚拟化缺失序号（如 49~51）会自动定位并按比例精准滚动视口补抓
-- **动态扫描与遍历预算**：结合视口最大滚动高度与预期消息数自适应调整遍历与水合时间，避免长对话/多图对话在未抵达页面底部前提前超时中断
-- **完整性闸门加固**：序列断层缺口与同角色异常相邻（Same-Role Adjacency）直接触发缺失警告并拦截未闭合的不完整快照
-
-`0.7.24` 修复完整性闸门的误报：
-
-- 期望角色统计现在与有序的 canonical turn 身份使用同一组数据，不再把 ChatGPT 页面里无序号的重复 DOM 外壳误算成额外的 user message
-- Full 扫描中保留 URL、等到导出时再 Base64 化的图片现在标记为 `deferred`，不再误记为 `failed`；真正缺失来源或导出嵌入失败的图片仍会触发完整性拦截
-- Selector 的完整性详情会分别显示 embedded、deferred 和 failed 图片数量
-
-`0.7.23` 改进 Selector 扫描生命周期与完整性保护：
-
-- Selector 改为 Full-first：打开面板不会自动扫描，必须明确点击 `Start Scan`
-- 每次扫描由单一任务持有固定模式；取消、切换模式或较旧任务都不能覆盖新的结果
-- 导出使用已验证快照的 capture mode，不再读取可能已经变化的下拉框值
-- 新增完整性闸门：显示期望/实际消息身份、角色、缺失顺序和图片覆盖；不完整结果默认禁止导出，只能显式 override
-- Hybrid 遇到无法对齐的实质 Full-only assistant turn 时会判定为不完整，避免静默漏掉 ImageGen 回复
-
-`0.7.22` 修复图片型对话的抓取与 Bundle 性能问题：
-
-- Full/Hybrid 图片序列化会按稳定资源身份去掉相邻的主图、预览层和模糊层重复节点，同时保留不同清晰度版本和正文后的有意重复引用
-- Bundle 内的图片按 SHA-256 内容哈希只保存一次，Markdown 与 JSON 改为引用 `assets/` 路径，避免重复写入大段 Base64
-- 资产分析会跳过 Base64 正文的链接与文件名扫描；七张高清图的真实样本从约 245 MB、140 秒降到约 32 MB、13 秒
-- Hybrid 针对 ImageGen 等非标准 assistant 节点的兼容修复仍在后续完善；当前此类对话建议使用 Full 模式
-
-`0.7.21` 主要把导出从“文本 + 基础 PDF”推进到“轻量工作台归档”，并改进了思考活动的结构化排版：
-
-- 新增输出类型矩阵：公式、Mermaid、图表、图片、GIF、文件、视频、音频、交互卡片和引用都会进入 PDF/JSON 的归档逻辑
-- PDF 支持更好的公式静态排版，包含常见上下标、分数、根号和数学符号
-- Mermaid 支持 flowchart、sequenceDiagram、erDiagram 和 stateDiagram 的静态 SVG 渲染
-- 新增简单 `chart` 代码块渲染，可以把 JSON 或 CSV-like 数据变成柱状图、折线图
-- JSON sidecars 增加 `outputObjects`，记录每个非纯文本对象的类型、渲染状态和降级原因
-- 测试样本库扩展到多语言、RTL、输出类型矩阵和视觉渲染样本
-
-## 怎么使用
-
-1. 复制仓库链接：
-
-```text
-https://github.com/rcha585/convo-vault.git
-```
-
-2. 克隆项目：
+### 步骤 1：安装与环境准备
 
 ```bash
+# 1. 克隆项目到本地
 git clone https://github.com/rcha585/convo-vault.git
 cd convo-vault
-```
 
-3. 安装本地渲染后端依赖：
-
-```bash
+# 2. 安装本地渲染后端依赖
 cd tools/advanced-pdf
 pnpm install
 cd ../..
-```
 
-4. 构建 Chrome 扩展：
-
-```bash
+# 3. 一键构建 Chrome 扩展
 npm run build:extension
 ```
 
-5. 在 Chrome 里加载扩展：
+构建完成后，在 Chrome 浏览器中加载扩展：
+1. 访问 `chrome://extensions/` 并开启右上角 **开发者模式 (Developer mode)**。
+2. 点击 **加载已解压的扩展程序 (Load unpacked)**，选择仓库目录下的 `dist/convo-vault-extension` 文件夹。
 
-- 打开 `chrome://extensions`
-- 开启 **Developer mode**
-- 点击 **Load unpacked**
-- 选择 `dist/convo-vault-extension`
+---
 
-6. 启动本地后端：
+### 步骤 2：图文实操操作流程 (7 步完整走通)
 
-- 打开一个 ChatGPT 对话页面
-- 点击 Convo Vault 扩展图标
-- 在 `Backend folder` 里填入这个仓库目录，比如 `F:\AI\convo-vault`
-- 点击 **Copy Start**
-- 把复制出来的命令粘贴到终端执行
+#### 1. 打开对话并唤起扩展面板
+在 Chrome 打开任意已登录的 ChatGPT 对话页面，点击浏览器右上角工具栏的 **Convo Vault** 扩展图标，弹出扩展管理浮窗。
 
-`Copy Start` 会自动带上本地访问 token。推荐用这个方式启动后端，不要手动裸跑 `npm run backend` 来做正式导出。
+<p align="center">
+  <img src="docs/images/01-click-extension-icon.png" alt="01-点击扩展图标" width="750" />
+</p>
 
-7. 导出对话：
+#### 2. 配置本地服务路径并复制启动命令
+在浮窗中，扩展已智能生成访问令牌（Token）。确认下方 `Backend folder` 填入当前仓库所在的绝对路径，点击 **Copy Start**。
 
-- 回到 ChatGPT 对话页面
-- 点击扩展图标
-- 点击 **Open Selector**
-- 面板只打开，不会立即扫描
-- 默认使用 `Full (Recommended)`；确认模式后点击 **Start Scan**
-- `Fast` 使用 ChatGPT 当前的复数会话接口，并自动向前分页直到最早消息；旧单数接口仍作为兼容兜底
-- 等待完整性检查通过；若显示缺失消息，先重新扫描或检查列出的缺失顺序
-- 勾选要导出的消息
-- 导出 bundle
+<p align="center">
+  <img src="docs/images/02-configure-backend-path.png" alt="02-配置服务路径" width="750" />
+</p>
+
+#### 3. 打开终端粘贴启动本地渲染服务
+打开系统终端（Terminal / PowerShell），直接粘贴刚才复制的命令并回车，本地高保真渲染后端即刻启动监听 `127.0.0.1`。
+
+<p align="center">
+  <img src="docs/images/03-terminal-start-backend.png" alt="03-终端启动服务" width="800" />
+</p>
+
+#### 4. 打开会话选择器 (Open Selector)
+返回 ChatGPT 网页，再次点击扩展图标，点击 **Open Selector** 按钮唤起网页内嵌的高级导出控制面板。
+
+<p align="center">
+  <img src="docs/images/04-open-selector-modal.png" alt="04-打开选择器面板" width="750" />
+</p>
+
+#### 5. 选择抓取模式 (Fast / Full / Hybrid)
+根据需求选择最合适的捕获引擎（长对话与包含特殊图片推荐 `Full`，追求极速与纯净 API 拓扑推荐 `Fast`），点击 **Start Scan** 开始扫描。
+
+<p align="center">
+  <img src="docs/images/05-choose-capture-mode.png" alt="05-选择抓取模式" width="450" />
+</p>
+
+#### 6. 展开核验完整性并导出知识包
+扫描完成后，面板会呈现**完整性闸门审计报告（Integrity Gate）**。你可以自由展开对话轮次、检视各节点状态与素材，核对无误后点击右下角 **Export Selected (ZIP)**，即可一键下载全套结构化知识包！
+
+<p align="center">
+  <img src="docs/images/06-inspect-and-export.png" alt="06-展开检视并导出" width="500" />
+</p>
+
+#### 7. 导出完成，随手停止本地后台服务
+导出完毕后，随时可以在扩展浮窗中点击 **Stop** 优雅停止本地后端进程，释放端口与系统资源。
+
+<p align="center">
+  <img src="docs/images/07-stop-local-backend.png" alt="07-停止本地服务" width="450" />
+</p>
 
 ## 需要什么环境
 
