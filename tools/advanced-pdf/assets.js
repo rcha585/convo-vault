@@ -22,19 +22,20 @@ const SUPPORTED_DIAGRAM_TYPES = new Set(["flowchart", "graph", "sequencediagram"
 function buildAssetManifest(payload, options = {}) {
   const cacheRoot = options.cacheRoot || process.env.CGCE_CACHE_DIR || "";
   const assetRoot = cacheRoot ? path.join(cacheRoot, "assets") : "";
+  const localImageAssetMap = createLocalImageAssetMap(options.localImageAssets);
   const assetsById = new Map();
   const embeddedAssetCache = new Map();
   const dataUriCache = new Map();
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
-  const outputObjectIndex = buildOutputObjectIndex(payload, { dataUriCache });
+  const outputObjectIndex = buildOutputObjectIndex(payload, { dataUriCache, localImageAssetMap });
 
   if (assetRoot) {
     fs.mkdirSync(assetRoot, { recursive: true });
   }
 
   for (const message of messages) {
-    collectMessageImageAssets(message, "markdown", assetRoot, assetsById, embeddedAssetCache, dataUriCache);
-    collectMessageImageAssets(message, "thinkingMarkdown", assetRoot, assetsById, embeddedAssetCache, dataUriCache);
+    collectMessageImageAssets(message, "markdown", assetRoot, assetsById, embeddedAssetCache, dataUriCache, localImageAssetMap);
+    collectMessageImageAssets(message, "thinkingMarkdown", assetRoot, assetsById, embeddedAssetCache, dataUriCache, localImageAssetMap);
     collectMessageFileAssets(message, "markdown", assetsById);
     collectMessageFileAssets(message, "thinkingMarkdown", assetsById);
   }
@@ -80,15 +81,16 @@ function buildAssetManifest(payload, options = {}) {
   };
 }
 
-function externalizeEmbeddedImageAssets(payload, assetManifest) {
-  return rewriteEmbeddedImageAssets(payload, assetManifest, { externalize: true });
+function externalizeEmbeddedImageAssets(payload, assetManifest, options = {}) {
+  return rewriteEmbeddedImageAssets(payload, assetManifest, { ...options, externalize: true });
 }
 
-function dedupeEmbeddedImageAssets(payload, assetManifest) {
-  return rewriteEmbeddedImageAssets(payload, assetManifest, { externalize: false });
+function dedupeEmbeddedImageAssets(payload, assetManifest, options = {}) {
+  return rewriteEmbeddedImageAssets(payload, assetManifest, { ...options, externalize: false });
 }
 
 function rewriteEmbeddedImageAssets(payload, assetManifest, options = {}) {
+  const localImageAssetMap = createLocalImageAssetMap(options.localImageAssets);
   const assetsBySha = new Map((assetManifest?.assets || [])
     .filter((asset) => asset?.sha256 && asset?.cachePath)
     .map((asset) => [asset.sha256, asset]));
@@ -96,8 +98,8 @@ function rewriteEmbeddedImageAssets(payload, assetManifest, options = {}) {
   const messages = (Array.isArray(payload?.messages) ? payload.messages : []).map((message) => {
     return {
       ...message,
-      markdown: rewriteMarkdownImages(message?.markdown, assetsBySha, replacementCache, options),
-      thinkingMarkdown: rewriteMarkdownImages(message?.thinkingMarkdown, assetsBySha, replacementCache, options)
+      markdown: rewriteMarkdownImages(message?.markdown, assetsBySha, replacementCache, localImageAssetMap, options),
+      thinkingMarkdown: rewriteMarkdownImages(message?.thinkingMarkdown, assetsBySha, replacementCache, localImageAssetMap, options)
     };
   });
 
@@ -107,7 +109,7 @@ function rewriteEmbeddedImageAssets(payload, assetManifest, options = {}) {
   };
 }
 
-function rewriteMarkdownImages(markdown, assetsBySha, replacementCache, options = {}) {
+function rewriteMarkdownImages(markdown, assetsBySha, replacementCache, localImageAssetMap, options = {}) {
   const imagePattern = new RegExp(MARKDOWN_IMAGE_RE.source, MARKDOWN_IMAGE_RE.flags);
   const source = String(markdown || "");
   const seenAssets = new Set();
@@ -117,16 +119,21 @@ function rewriteMarkdownImages(markdown, assetsBySha, replacementCache, options 
       seenAssets.clear();
     }
     previousMatchEnd = offset + match.length;
-    let asset = replacementCache.get(src);
+    let replacement = replacementCache.get(src);
 
-    if (asset === undefined) {
+    if (replacement === undefined) {
+      const localAsset = resolveLocalImageAsset(src, localImageAssetMap);
       const dataUri = parseDataUri(src);
-      asset = dataUri?.mimeType.startsWith("image/")
-        ? assetsBySha.get(hashBuffer(dataUri.bytes)) || null
-        : null;
-      replacementCache.set(src, asset);
+      const asset = localAsset?.sha256
+        ? assetsBySha.get(localAsset.sha256) || null
+        : dataUri?.mimeType.startsWith("image/")
+          ? assetsBySha.get(hashBuffer(dataUri.bytes)) || null
+          : null;
+      replacement = { asset, localAsset };
+      replacementCache.set(src, replacement);
     }
 
+    const { asset, localAsset } = replacement;
     if (!asset?.cachePath) {
       return match;
     }
@@ -136,9 +143,16 @@ function rewriteMarkdownImages(markdown, assetsBySha, replacementCache, options 
     }
 
     seenAssets.add(asset.assetId);
-    return options.externalize
-      ? `![${alt || "Image"}](${asset.cachePath})`
-      : match;
+    if (options.externalize) {
+      return `![${alt || "Image"}](${asset.cachePath})`;
+    }
+
+    const renderUrl = localAsset?.renderUrl || localAsset?.fileUrl;
+    if (options.renderLocalFiles && renderUrl) {
+      return `![${alt || "Image"}](${renderUrl})`;
+    }
+
+    return match;
   });
 
   return replaced
@@ -156,11 +170,12 @@ function hasSubstantiveImageGap(value) {
 function buildOutputObjectIndex(payload, options = {}) {
   const objectsById = new Map();
   const dataUriCache = options.dataUriCache || new Map();
+  const localImageAssetMap = options.localImageAssetMap || createLocalImageAssetMap(options.localImageAssets);
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
 
   for (const message of messages) {
-    collectOutputObjects(message, "markdown", objectsById, dataUriCache);
-    collectOutputObjects(message, "thinkingMarkdown", objectsById, dataUriCache);
+    collectOutputObjects(message, "markdown", objectsById, dataUriCache, localImageAssetMap);
+    collectOutputObjects(message, "thinkingMarkdown", objectsById, dataUriCache, localImageAssetMap);
   }
 
   const objects = [...objectsById.values()].sort((a, b) => a.objectId.localeCompare(b.objectId));
@@ -189,7 +204,7 @@ function buildOutputObjectIndex(payload, options = {}) {
   };
 }
 
-function collectMessageImageAssets(message, field, assetRoot, assetsById, embeddedAssetCache = new Map(), dataUriCache = new Map()) {
+function collectMessageImageAssets(message, field, assetRoot, assetsById, embeddedAssetCache = new Map(), dataUriCache = new Map(), localImageAssetMap = new Map()) {
   const source = String(message?.[field] || "");
   let match;
 
@@ -197,7 +212,24 @@ function collectMessageImageAssets(message, field, assetRoot, assetsById, embedd
     const alt = cleanText(match[1] || "Image", 160);
     const src = match[2] || "";
     const reference = buildReference(message, field, { label: alt });
+    const localAsset = resolveLocalImageAsset(src, localImageAssetMap);
     const embeddedAsset = resolveEmbeddedImageAsset(src, assetRoot, embeddedAssetCache, dataUriCache);
+
+    if (localAsset) {
+      upsertAsset(assetsById, {
+        assetId: `sha256:${localAsset.sha256}`,
+        sha256: localAsset.sha256,
+        kind: kindFromMime(localAsset.mimeType),
+        storage: "local-cache",
+        mimeType: localAsset.mimeType,
+        sizeBytes: localAsset.sizeBytes,
+        cachePath: localAsset.cachePath,
+        origin: originFromMessageRole(message?.role),
+        label: alt,
+        references: [reference]
+      });
+      continue;
+    }
 
     if (embeddedAsset) {
       upsertAsset(assetsById, {
@@ -293,14 +325,14 @@ function collectMessageFileAssets(message, field, assetsById) {
   }
 }
 
-function collectOutputObjects(message, field, objectsById, dataUriCache) {
+function collectOutputObjects(message, field, objectsById, dataUriCache, localImageAssetMap) {
   const source = String(message?.[field] || "");
   const textSource = maskEmbeddedDataUris(source);
 
   collectMathOutputObjects(message, field, textSource, objectsById);
   collectMermaidOutputObjects(message, field, textSource, objectsById);
   collectChartOutputObjects(message, field, textSource, objectsById);
-  collectImageOutputObjects(message, field, source, objectsById, dataUriCache);
+  collectImageOutputObjects(message, field, source, objectsById, dataUriCache, localImageAssetMap);
   collectLinkOutputObjects(message, field, textSource, objectsById);
 }
 
@@ -360,19 +392,21 @@ function collectChartOutputObjects(message, field, source, objectsById) {
   });
 }
 
-function collectImageOutputObjects(message, field, source, objectsById, dataUriCache) {
+function collectImageOutputObjects(message, field, source, objectsById, dataUriCache, localImageAssetMap) {
   collectPatternObjects(source, MARKDOWN_IMAGE_RE, (match) => {
     const alt = cleanText(match[1] || "Image", 160);
     const src = match[2] || "";
     const dataUri = getCachedDataUri(src, dataUriCache);
-    const mimeType = dataUri?.mimeType || mimeTypeFromUrl(src);
+    const localAsset = resolveLocalImageAsset(src, localImageAssetMap);
+    const mimeType = localAsset?.mimeType || dataUri?.mimeType || mimeTypeFromUrl(src);
     const animated = isAnimatedImageMimeOrUrl(mimeType, src);
-    const remote = !dataUri;
+    const remote = !dataUri && !localAsset;
 
     upsertOutputObject(objectsById, buildOutputObject(message, field, {
       kind: animated ? "gif" : "image",
       subtype: mimeSubtype(mimeType) || (animated ? "gif" : "image"),
       label: alt,
+      identity: localAsset?.sha256 || (dataUri ? hashBuffer(dataUri.bytes) : hashString(src)),
       sourceUrl: remote ? src : "",
       mimeType,
       renderStatus: animated ? "degraded" : (remote ? "reference-only" : "embedded-static"),
@@ -381,6 +415,42 @@ function collectImageOutputObjects(message, field, source, objectsById, dataUriC
       degradationReason: animated ? "animated-media-static-poster" : (remote ? "remote-image-reference-only" : "")
     }));
   });
+}
+
+function createLocalImageAssetMap(localImageAssets) {
+  const map = new Map();
+
+  for (const asset of Array.isArray(localImageAssets) ? localImageAssets : []) {
+    if (!asset?.sha256 || !asset?.cachePath) {
+      continue;
+    }
+
+    if (asset.sourceKey) {
+      map.set(asset.sourceKey, asset);
+    }
+
+    if (asset.source) {
+      map.set(hashString(asset.source), asset);
+    }
+
+    if (asset.cachePath) {
+      map.set(hashString(asset.cachePath), asset);
+    }
+
+    if (asset.renderUrl) {
+      map.set(hashString(asset.renderUrl), asset);
+    }
+  }
+
+  return map;
+}
+
+function resolveLocalImageAsset(source, localImageAssetMap) {
+  if (!source || !localImageAssetMap?.size) {
+    return null;
+  }
+
+  return localImageAssetMap.get(hashString(source)) || null;
 }
 
 function collectLinkOutputObjects(message, field, source, objectsById) {
@@ -455,6 +525,7 @@ function buildOutputObject(message, field, details) {
     details.label || "",
     details.sourceUrl || "",
     details.content || "",
+    details.identity || "",
     message?.id || "",
     message?.turnNumber || message?.order || "",
     field

@@ -15,6 +15,7 @@ test("content script is generated from modular Hybrid, Fast, and Full sources", 
   const background = await readFile(path.join(repoRoot, "background.js"), "utf8");
   const backendServer = await readFile(path.join(repoRoot, "tools", "advanced-pdf", "server.js"), "utf8");
   const backendRender = await readFile(path.join(repoRoot, "tools", "advanced-pdf", "render.js"), "utf8");
+  const manifest = JSON.parse(await readFile(path.join(repoRoot, "manifest.json"), "utf8"));
   const popupHtml = await readFile(path.join(repoRoot, "popup.html"), "utf8");
   const popupJs = await readFile(path.join(repoRoot, "popup.js"), "utf8");
 
@@ -23,6 +24,11 @@ test("content script is generated from modular Hybrid, Fast, and Full sources", 
   assert.match(generated, /async function collectFastConversationMessages/);
   assert.match(generated, /\/api\/auth\/session/);
   assert.match(generated, /Bearer \$\{attempt\.accessToken\}/);
+  assert.match(generated, /\/backend-api\/conversations\/\$\{encodedId\}/);
+  assert.match(generated, /include_has_versions=true&num_turns=\$\{FAST_CONVERSATION_API_PAGE_SIZE\}/);
+  assert.match(generated, /conversationApi\.pagination\.complete/);
+  assert.match(generated, /pageUrl\.searchParams\.set\("before", cursor\)/);
+  assert.match(generated, /getChatGptAccessTokenFromPageBootstrap/);
   assert.match(generated, /tree_format=true/);
   assert.match(generated, /routes\/_conversation\.g\.\$gizmoId\.c\.\$conversationId/);
   assert.match(generated, /function createMessageCollector/);
@@ -84,6 +90,9 @@ test("content script is generated from modular Hybrid, Fast, and Full sources", 
   assert.match(generated, /resolveMountedMessageNodeForPortableMessage/);
   assert.match(generated, /sediment/);
   assert.match(generated, /ADVANCED_PDF_IMAGE_EMBED_CONCURRENCY/);
+  assert.match(generated, /CONVO_VAULT_LOCAL_RENDERER_BUNDLE/);
+  assert.match(generated, /function requestBackgroundBundleExport/);
+  assert.doesNotMatch(generated, /fetch\(`\$\{rendererUrl\}\/render-bundle`/);
   assert.match(debugModule, /function downloadDebugLog/);
   assert.match(fastModule, /function buildMessagesFromConversationApi/);
   assert.match(fastModule, /function getApiMessageStructuralSkipReason/);
@@ -95,10 +104,16 @@ test("content script is generated from modular Hybrid, Fast, and Full sources", 
   assert.match(background, /sediment/);
   assert.match(background, /\/backend-api\/files\/\$\{encodedId\}\/content/);
   assert.match(background, /extractImageUrlsFromMetadata/);
+  assert.match(background, /CONVO_VAULT_LOCAL_RENDERER_BUNDLE/);
+  assert.match(background, /\/prepare-render-bundle/);
+  assert.match(background, /chrome\.downloads\.download/);
+  assert.ok(manifest.permissions.includes("downloads"));
   assert.match(backendServer, /captureMode: payload\.captureMode \|\| ""/);
   assert.match(backendServer, /CGCE_LOCAL_API_TOKEN/);
   assert.match(backendServer, /X-Convo-Vault-Token/);
   assert.match(backendServer, /X-Bundle-Timings/);
+  assert.match(backendServer, /\/prepare-render-bundle/);
+  assert.match(backendServer, /\/download-bundle\//);
   assert.match(backendServer, /externalizeEmbeddedImageAssets/);
   assert.match(backendServer, /buildBundleAssetEntries/);
   assert.match(backendServer, /compactMarkdownSourceLinks/);

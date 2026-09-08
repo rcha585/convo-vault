@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Convo Vault",
-  "version": "0.7.24",
-  "description": "Local-first ChatGPT conversation exporter with Hybrid, Fast, and Full capture modes.",
+  "version": "0.8.5",
+  "description": "Export ChatGPT conversations into searchable Markdown, JSON, and PDF bundles.",
   "permissions": [
     "activeTab",
+    "downloads",
     "scripting",
     "storage"
   ],

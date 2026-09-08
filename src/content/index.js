@@ -1,5 +1,6 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.24";
+  const EXPORTER_VERSION = "0.8.5";
+  const IS_EXTENSION_ENV = typeof chrome !== "undefined" && Boolean(chrome?.runtime?.id);
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -22,8 +23,8 @@
     installedAt: Date.now()
   };
   window.__chatGptConversationExporterVersion = EXPORTER_VERSION;
-  const TOP_LOAD_ATTEMPTS = 14;
-  const WALK_ATTEMPTS = 56;
+  const TOP_LOAD_ATTEMPTS = 32;
+  const WALK_ATTEMPTS = 240;
   const SCROLL_SETTLE_MS = 110;
   const DOM_IDLE_MS = 45;
   const MAX_DOM_IDLE_MS = 220;
@@ -57,6 +58,9 @@
     backendToken: ""
   };
   const DEFAULT_ADVANCED_PDF_RENDERER_URL = "http://127.0.0.1:38474";
+  const LOCAL_RENDERER_BUNDLE_PORT = "CONVO_VAULT_LOCAL_RENDERER_BUNDLE";
+  const LOCAL_RENDERER_REQUEST_CHUNK_CHARACTERS = 512 * 1024;
+  const MAX_LOCAL_RENDERER_REQUEST_BYTES = 256 * 1024 * 1024;
   const MESSAGE_NODE_SELECTORS = [
     '[data-turn-id]',
     '[data-turn-container]',
@@ -431,6 +435,8 @@
         fullMessages = await collectFullDomMessages(debugLog, onProgress, {
           finishDebug: false,
           progressPrefix: "Full enrichment: ",
+          expectedTurnCount: fastMessages.length,
+          expectedOrders: fastMessages.map((m) => Number(m.order)).filter((order) => Number.isFinite(order) && order > 0),
           signal
         });
       } catch (error) {
@@ -473,7 +479,9 @@
     const scrollTarget = getBestScrollTarget();
     const originalScrollTop = getScrollTop(scrollTarget);
     const collector = createMessageCollector(debugLog);
-    const scanBudget = getConversationScanBudget();
+    const expectedTurnCount = Number(options.expectedTurnCount || 0);
+    const expectedOrders = Array.isArray(options.expectedOrders) ? options.expectedOrders : null;
+    const scanBudget = getConversationScanBudget({ expectedTurnCount });
     const scanDeadline = Date.now() + scanBudget.maxScanMs;
     const walkDeadline = scanDeadline - scanBudget.hydrateReservedMs;
     debugLog.setScrollTarget(scrollTarget);
@@ -499,10 +507,13 @@
       await collector.captureFromDom({ signal });
       debugLog.mark("finalCapture");
       onProgress(`${progressPrefix}Recovering missed turns...`);
-      const missingBeforeRecovery = getMissingConversationTurnOrders(collector.getMessages());
+      const missingBeforeRecovery = getMissingConversationTurnOrders(collector.getMessages(), expectedOrders);
       const recoveryBudgetMs = getMissingRecoveryBudgetMs(missingBeforeRecovery.length, scanBudget.pageTurnCount);
       const recoveryDeadline = Date.now() + recoveryBudgetMs;
-      await recoverMissingTurnMessages(scrollTarget, collector, debugLog, recoveryDeadline, recoveryBudgetMs, signal);
+      await recoverMissingTurnMessages(scrollTarget, collector, debugLog, recoveryDeadline, recoveryBudgetMs, signal, {
+        expectedOrders,
+        maxKnownOrder: expectedTurnCount || Math.max(...(getAvailableConversationTurnOrders() || [0]))
+      });
       throwIfCaptureCancelled(signal);
       debugLog.mark("recoveredMissingTurns");
       await collector.captureFromDom({ settleMs: 0, signal });
@@ -761,19 +772,25 @@
     return isTimestampDividerText(text) || isLikelyNonMessageMarkdown(message);
   }
 
-  function getConversationScanBudget() {
+  function getConversationScanBudget(options = {}) {
+    const scrollTarget = getBestScrollTarget();
+    const maxScrollTop = getMaxScrollTop(scrollTarget);
     const pageTurnDiagnostics = getPageTurnDiagnostics();
     const availableTurnCount = getAvailableConversationTurnOrders().length;
+    const estimatedTurnsByHeight = Math.ceil(maxScrollTop / 1800);
+    const expectedTurnCount = Number(options?.expectedTurnCount || 0);
     const pageTurnCount = Math.max(
       pageTurnDiagnostics.dataTurnIdCount || 0,
-      availableTurnCount
+      availableTurnCount,
+      estimatedTurnsByHeight,
+      expectedTurnCount
     );
-    const isLargeConversation = pageTurnCount >= 120;
+    const isLargeConversation = pageTurnCount >= 36 || maxScrollTop >= 30_000;
     const maxScanMs = isLargeConversation
-      ? Math.min(MAX_ADAPTIVE_SCAN_MS, Math.max(MAX_SCAN_MS, pageTurnCount * 1200))
+      ? Math.min(MAX_ADAPTIVE_SCAN_MS, Math.max(MAX_SCAN_MS, pageTurnCount * 1400))
       : MAX_SCAN_MS;
     const hydrateReservedMs = isLargeConversation
-      ? Math.min(MAX_ADAPTIVE_HYDRATE_RESERVED_MS, Math.max(HYDRATE_RESERVED_MS, pageTurnCount * 300))
+      ? Math.min(MAX_ADAPTIVE_HYDRATE_RESERVED_MS, Math.max(HYDRATE_RESERVED_MS, pageTurnCount * 350))
       : HYDRATE_RESERVED_MS;
 
     return {
@@ -790,7 +807,7 @@
       return MISSING_TURN_RECOVERY_MS;
     }
 
-    const needsAdaptiveRecovery = pageTurnCount >= 120 || missingCount >= 20;
+    const needsAdaptiveRecovery = pageTurnCount >= 36 || missingCount >= 10;
 
     if (!needsAdaptiveRecovery) {
       return MISSING_TURN_RECOVERY_MS;
@@ -1017,17 +1034,26 @@
       .map(Math.floor);
     const expectedTurnCount = Number(summary?.expectedTurnCount || 0);
 
-    if (!summaryOrders.length && Number.isInteger(expectedTurnCount) && expectedTurnCount > 0 && expectedTurnCount < 1_000_000) {
-      summaryOrders = Array.from({ length: expectedTurnCount }, (_, index) => index + 1);
-    }
+    const allDiscoveredOrders = [...new Set([...domOrders, ...summaryOrders])].sort((a, b) => a - b);
+    const maxDiscoveredOrder = Math.max(
+      allDiscoveredOrders.length ? allDiscoveredOrders[allDiscoveredOrders.length - 1] : 0,
+      Number.isInteger(expectedTurnCount) ? expectedTurnCount : 0
+    );
 
-    const orders = [...new Set([...domOrders, ...summaryOrders])].sort((a, b) => a - b);
+    const orders = maxDiscoveredOrder > 0
+      ? Array.from({ length: maxDiscoveredOrder }, (_, index) => index + 1)
+      : allDiscoveredOrders;
     const canonicalEntries = orders.length
       ? orders.map((order) => {
         const candidates = entries.filter((entry) => Math.floor(entry.order) === order);
-        const role = candidates.find((entry) => entry.role === "user" || entry.role === "assistant")?.role
+        let role = candidates.find((entry) => entry.role === "user" || entry.role === "assistant")?.role
           || candidates[0]?.role
           || "";
+        if (!role && order % 2 === 1) {
+          role = "user";
+        } else if (!role && order % 2 === 0) {
+          role = "assistant";
+        }
         return { identity: `order:${order}`, order, role };
       })
       : entries;
@@ -1370,13 +1396,21 @@
 
   async function getExporterSettings() {
     if (typeof chrome === "undefined" || !chrome.storage?.local) {
-      return { ...DEFAULT_EXPORTER_SETTINGS };
+      return Promise.resolve({ ...DEFAULT_EXPORTER_SETTINGS });
     }
 
     return new Promise((resolve) => {
-      chrome.storage.local.get([SETTINGS_STORAGE_KEY], (result) => {
-        resolve(normalizeExporterSettings(result?.[SETTINGS_STORAGE_KEY]));
-      });
+      try {
+        chrome.storage.local.get([SETTINGS_STORAGE_KEY], (result) => {
+          if (chrome.runtime?.lastError) {
+            resolve({ ...DEFAULT_EXPORTER_SETTINGS });
+            return;
+          }
+          resolve(normalizeExporterSettings(result?.[SETTINGS_STORAGE_KEY]));
+        });
+      } catch (_) {
+        resolve({ ...DEFAULT_EXPORTER_SETTINGS });
+      }
     });
   }
 
@@ -1402,48 +1436,117 @@
   async function downloadExportBundle(metadata, messages, exportedAt = new Date(), options = {}) {
     const defaultFileName = markdownBuilder.filename(metadata.title, exportedAt, "zip");
     const payload = await createStructuredExportPayload(messages, exportedAt, {
-      embedImages: true,
+      embedImages: false,
       captureMode: options.captureMode,
       debugLog: options.debugLog
     });
 
-    const rendererSettings = await getExporterSettings();
-    const rendererUrl = getAdvancedPdfRendererUrl(rendererSettings);
-    let response;
+    const result = await requestBackgroundBundleExport({
+      exportPayload: payload,
+      fileName: defaultFileName
+    });
 
-    try {
-      response = await fetch(`${rendererUrl}/render-bundle`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...getLocalApiHeaders(rendererSettings)
-        },
-        body: JSON.stringify({
-          exportPayload: payload,
-          fileName: defaultFileName
-        })
-      });
-    } catch (error) {
-      throw new Error(`Local renderer is not running at ${rendererUrl}. Details: ${error.message || error}`);
+    if (!result?.ok) {
+      throw new Error(result?.error || "The local renderer could not export this conversation bundle.");
     }
-
-    if (!response.ok) {
-      await throwRendererResponseError(response, "Bundle renderer");
-    }
-
-    const blob = await response.blob();
-    const filename = getFilenameFromContentDisposition(response.headers.get("content-disposition")) || defaultFileName;
-    downloadBlob(filename, blob);
 
     return {
-      filename,
-      rendererUrl,
-      bundleFiles: decodeHeaderValue(response.headers.get("x-bundle-files")),
-      rendererTimings: parseEncodedJsonHeader(response.headers.get("x-bundle-timings")),
-      assetCount: Number(response.headers.get("x-asset-count")) || 0,
-      imagesEmbedded: payload.assetStats?.imagesEmbedded || 0,
-      imagesFailed: payload.assetStats?.imagesFailed || 0
+      filename: result.filename || defaultFileName,
+      rendererUrl: result.rendererUrl || DEFAULT_ADVANCED_PDF_RENDERER_URL,
+      bundleFiles: result.bundleFiles || "",
+      rendererTimings: result.rendererTimings || null,
+      assetCount: Number(result.assetCount) || 0,
+      imagesEmbedded: result.assetStats?.imagesEmbedded ?? payload.assetStats?.imagesEmbedded ?? 0,
+      imagesFailed: result.assetStats?.imagesFailed ?? payload.assetStats?.imagesFailed ?? 0
     };
+  }
+
+  async function requestBackgroundBundleExport(body) {
+    if (typeof chrome === "undefined" || !chrome.runtime?.connect) {
+      throw new Error("The Convo Vault extension background service is unavailable.");
+    }
+
+    const serializedBody = JSON.stringify(body);
+    const totalBytes = new TextEncoder().encode(serializedBody).byteLength;
+
+    if (totalBytes > MAX_LOCAL_RENDERER_REQUEST_BYTES) {
+      throw new Error(`This export request is ${totalBytes} bytes and exceeds the ${MAX_LOCAL_RENDERER_REQUEST_BYTES} byte local renderer limit.`);
+    }
+
+    const port = chrome.runtime.connect({ name: LOCAL_RENDERER_BUNDLE_PORT });
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+
+      const settle = (handler, value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        port.onMessage.removeListener(onMessage);
+        port.onDisconnect.removeListener(onDisconnect);
+        handler(value);
+      };
+
+      const onMessage = (message) => {
+        if (message?.type === "KEEPALIVE") {
+          return;
+        }
+
+        if (message?.type === "RESULT") {
+          settle(resolve, message.result || { ok: false, error: "The local renderer returned an empty result." });
+          try {
+            port.disconnect();
+          } catch (_) {
+            // The background service may already have closed the completed stream.
+          }
+        }
+      };
+
+      const onDisconnect = () => {
+        if (settled) {
+          return;
+        }
+        const detail = chrome.runtime.lastError?.message || "The extension background service disconnected before the export completed.";
+        settle(reject, new Error(detail));
+      };
+
+      port.onMessage.addListener(onMessage);
+      port.onDisconnect.addListener(onDisconnect);
+
+      port.postMessage({
+        type: "START",
+        totalCharacters: serializedBody.length,
+        totalBytes
+      });
+
+      void sendChunks();
+
+      async function sendChunks() {
+        try {
+          let chunkIndex = 0;
+          for (let offset = 0; offset < serializedBody.length; offset += LOCAL_RENDERER_REQUEST_CHUNK_CHARACTERS) {
+            port.postMessage({
+              type: "CHUNK",
+              data: serializedBody.slice(offset, offset + LOCAL_RENDERER_REQUEST_CHUNK_CHARACTERS)
+            });
+            chunkIndex += 1;
+
+            if (chunkIndex % 8 === 0) {
+              await new Promise((resume) => setTimeout(resume, 0));
+            }
+          }
+          port.postMessage({ type: "END" });
+        } catch (error) {
+          settle(reject, error);
+          try {
+            port.disconnect();
+          } catch (_) {
+            // The port may already be closed by the background service.
+          }
+        }
+      }
+    });
   }
 
   async function downloadAdvancedMarkdown(metadata, messages, exportedAt = new Date()) {
@@ -1589,7 +1692,30 @@
       const node = resolveMountedMessageNodeForPortableMessage(message);
 
       if (!node) {
-        result.missingNode += refs.length;
+        const globalDomImages = Array.from(document.querySelectorAll("img"));
+        const replacements = new Map();
+        for (const ref of refs) {
+          const fileMatch = ref.url.match(/(file_[a-f0-9]{32}|file-[a-zA-Z0-9_-]+)/i);
+          const fileId = fileMatch ? fileMatch[1] : "";
+          if (!fileId) continue;
+          const match = globalDomImages.find((img) => {
+            const src = img.currentSrc || img.src || "";
+            return src && !isInternalAssetImageUrl(src) && (src.includes(fileId) || img.alt?.includes(fileId));
+          });
+          if (match) {
+            try {
+              const dataUri = await imageToDataUri(match, match.currentSrc || match.src);
+              replacements.set(ref.url, dataUri);
+              result.embedded += 1;
+              stats.imagesEmbedded += 1;
+            } catch (_) {}
+          }
+        }
+        if (replacements.size) {
+          message.markdown = replaceEmbeddedMarkdownImages(message.markdown, replacements);
+          message.thinkingMarkdown = replaceEmbeddedMarkdownImages(message.thinkingMarkdown, replacements);
+        }
+        result.missingNode += refs.length - replacements.size;
         continue;
       }
 
@@ -1900,6 +2026,7 @@
       preview: message?.preview || "",
       markdown,
       thinkingMarkdown,
+      agentTrace: message?.agentTrace || null,
       codeBlockCount: message?.codeBlockCount || 0,
       fileCount: message?.fileCount || 0,
       imageCount,
@@ -3251,7 +3378,7 @@
         <aside class="cgce-panel" aria-label="ChatGPT export message selector">
           <header class="cgce-header">
             <div>
-              <h2 class="cgce-title">Select messages</h2>
+              <h2 class="cgce-title">Select messages <span style="font-size: 11px; font-weight: 500; color: #64748b; margin-left: 6px;">v${EXPORTER_VERSION}</span></h2>
               <p class="cgce-subtitle">Choose a capture mode, review loaded turns, then export the bundle.</p>
             </div>
             <div class="cgce-icon-buttons">

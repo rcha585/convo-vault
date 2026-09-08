@@ -1,10 +1,13 @@
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readZip } from "../scripts/lib/zip-reader.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const fixturesDir = path.join(repoRoot, "tests", "fixtures");
@@ -15,6 +18,8 @@ const cases = JSON.parse(
 test("backend Markdown and data endpoints preserve export fixture text", async (t) => {
   const port = await getAvailablePort();
   const token = `fixture-token-${process.pid}-${Date.now()}`;
+  const cacheRoot = await mkdtemp(path.join(os.tmpdir(), "convo-vault-backend-cache-"));
+  const outputRoot = await mkdtemp(path.join(os.tmpdir(), "convo-vault-backend-output-"));
   const server = spawn(process.execPath, [
     path.join(repoRoot, "tools", "advanced-pdf", "server.js")
   ], {
@@ -22,7 +27,8 @@ test("backend Markdown and data endpoints preserve export fixture text", async (
     env: {
       ...process.env,
       CGCE_ADVANCED_PDF_PORT: String(port),
-      CGCE_LOCAL_API_TOKEN: token
+      CGCE_LOCAL_API_TOKEN: token,
+      CGCE_CACHE_DIR: cacheRoot
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -43,6 +49,8 @@ test("backend Markdown and data endpoints preserve export fixture text", async (
     } catch (_) {
       server.kill();
     }
+    await rm(cacheRoot, { recursive: true, force: true });
+    await rm(outputRoot, { recursive: true, force: true });
   });
 
   await waitForHealth(port, token, () => `${stdout}\n${stderr}`);
@@ -66,6 +74,159 @@ test("backend Markdown and data endpoints preserve export fixture text", async (
     assertFixtureText(collectDataText(data), fixtureCase, "data");
     assertFixtureData(data, fixtureCase);
   }
+
+  const bundleFixture = cases[0];
+  const bundlePayload = JSON.parse(await readFile(path.join(fixturesDir, bundleFixture.payload), "utf8"));
+  const bundleBaseName = `${bundleFixture.name}.fixture`;
+  const preparedResponse = await fetch(`http://127.0.0.1:${port}/prepare-render-bundle`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Convo-Vault-Token": token
+    },
+    body: JSON.stringify({
+      exportPayload: bundlePayload,
+      fileName: `${bundleBaseName}.zip`
+    })
+  });
+  const prepared = await preparedResponse.json();
+  assert.equal(preparedResponse.ok, true, `prepare-render-bundle failed: ${JSON.stringify(prepared)}`);
+  assert.equal(prepared.ok, true);
+  assert.match(prepared.downloadPath, /^\/download-bundle\/[a-f0-9]{48}$/);
+  assert.equal(prepared.filename, `${bundleBaseName}.zip`);
+
+  const bundleFiles = String(prepared.bundleFiles || "").split(",").filter(Boolean);
+  const expectedBundleSuffixes = [
+    ".md",
+    ".pdf",
+    ".payload.json",
+    ".assets.manifest.json",
+    ".data.json",
+    ".conversation.json",
+    ".agent-trace.json",
+    ".agent-trace.md",
+    ".messages.jsonl",
+    ".qa-pairs.json",
+    ".topics.json",
+    ".entities.json",
+    ".summary.md"
+  ];
+  assert.equal(bundleFiles.length, expectedBundleSuffixes.length);
+  for (const suffix of expectedBundleSuffixes) {
+    assert.ok(bundleFiles.some((file) => file.endsWith(suffix)), `Prepared bundle must keep ${suffix}`);
+  }
+
+  const downloadResponse = await fetch(`http://127.0.0.1:${port}${prepared.downloadPath}`);
+  const downloadBytes = Buffer.from(await downloadResponse.arrayBuffer());
+  assert.equal(downloadResponse.ok, true);
+  assert.equal(downloadResponse.headers.get("content-type"), "application/zip");
+  assert.equal(Number(downloadResponse.headers.get("content-length")), downloadBytes.length);
+  assert.equal(downloadBytes.readUInt32LE(0), 0x04034b50, "Prepared download must be a ZIP archive");
+  assert.equal(downloadBytes.length, prepared.bundleSize);
+
+  const stagedSource = "sediment://file_00000000bbbbbbbbbbbbbbbbbbbbbbbb";
+  const stagedBytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=", "base64");
+  const stagedSha = createHash("sha256").update(stagedBytes).digest("hex");
+  const sourceKey = createHash("sha256").update(stagedSource).digest("hex");
+  const sessionResponse = await fetch(`http://127.0.0.1:${port}/export-sessions`, {
+    method: "POST",
+    headers: { "X-Convo-Vault-Token": token }
+  });
+  const session = await sessionResponse.json();
+  assert.equal(sessionResponse.ok, true);
+  assert.match(session.sessionId, /^[a-f0-9]{48}$/);
+
+  const assetResponse = await fetch(`http://127.0.0.1:${port}/export-sessions/${session.sessionId}/assets/${sourceKey}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "image/png",
+      "X-Convo-Vault-Token": token
+    },
+    body: stagedBytes
+  });
+  const stagedAsset = await assetResponse.json();
+  assert.equal(assetResponse.ok, true, JSON.stringify(stagedAsset));
+  assert.equal(stagedAsset.sha256, stagedSha);
+
+  const stagedPayload = {
+    schemaVersion: 1,
+    exporterVersion: "0.8.5",
+    title: "Staged local asset fixture",
+    source: "https://chatgpt.com/c/staged-local-asset",
+    exportedAt: "2026-08-30T00:00:00.000Z",
+    captureMode: "fast",
+    messageCount: 2,
+    assetStats: { imagesEmbedded: 1, imagesFailed: 0, imagesSkipped: 0 },
+    messages: [
+      {
+        id: "staged-user",
+        role: "user",
+        turnNumber: 1,
+        markdown: `![Staged local image](${stagedSource})`,
+        thinkingMarkdown: ""
+      },
+      {
+        id: "staged-assistant",
+        role: "assistant",
+        turnNumber: 2,
+        markdown: "The staged image remains portable.",
+        thinkingMarkdown: "> Thinking summary"
+      }
+    ]
+  };
+  const stagedPrepareResponse = await fetch(`http://127.0.0.1:${port}/prepare-render-bundle`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Convo-Vault-Token": token
+    },
+    body: JSON.stringify({
+      exportPayload: stagedPayload,
+      exportSessionId: session.sessionId,
+      fileName: "staged-local-asset.fixture.zip"
+    })
+  });
+  const stagedPrepared = await stagedPrepareResponse.json();
+  assert.equal(stagedPrepareResponse.ok, true, JSON.stringify(stagedPrepared));
+  assert.equal(stagedPrepared.assetStats.imagesEmbedded, 1);
+
+  const stagedDownload = await fetch(`http://127.0.0.1:${port}${stagedPrepared.downloadPath}`);
+  const stagedZipBytes = Buffer.from(await stagedDownload.arrayBuffer());
+  const stagedZipPath = path.join(outputRoot, "staged-local-asset.fixture.zip");
+  await writeFile(stagedZipPath, stagedZipBytes);
+  const stagedZip = readZip(stagedZipPath);
+  const stagedEntries = new Map(stagedZip.entries.map((entry) => [entry.name, entry]));
+  const stagedPayloadEntry = [...stagedEntries.keys()].find((name) => name.endsWith(".payload.json"));
+  const stagedManifestEntry = [...stagedEntries.keys()].find((name) => name.endsWith(".assets.manifest.json"));
+  const stagedDataEntry = [...stagedEntries.keys()].find((name) => name.endsWith(".data.json"));
+  const stagedConversationEntry = [...stagedEntries.keys()].find((name) => name.endsWith(".conversation.json"));
+  const stagedPdfEntry = [...stagedEntries.keys()].find((name) => name.endsWith(".pdf"));
+  const stagedAssetEntry = [...stagedEntries.keys()].find((name) => name === `assets/sha256/${stagedSha.slice(0, 2)}/${stagedSha.slice(2, 4)}/${stagedSha}.png`);
+
+  assert.ok(stagedPayloadEntry);
+  assert.ok(stagedManifestEntry);
+  assert.ok(stagedDataEntry);
+  assert.ok(stagedConversationEntry);
+  assert.ok(stagedPdfEntry);
+  assert.ok(stagedAssetEntry);
+  assert.equal(stagedEntries.get(stagedPayloadEntry).method, 8, "JSON entries should use Deflate");
+  assert.equal(stagedEntries.get(stagedPdfEntry).method, 0, "PDF entries should remain stored");
+  assert.equal(stagedEntries.get(stagedAssetEntry).method, 0, "PNG entries should remain stored");
+
+  const portablePayload = JSON.parse(stagedZip.data(stagedEntries.get(stagedPayloadEntry)).toString("utf8"));
+  const portableManifest = JSON.parse(stagedZip.data(stagedEntries.get(stagedManifestEntry)).toString("utf8"));
+  const portableData = JSON.parse(stagedZip.data(stagedEntries.get(stagedDataEntry)).toString("utf8"));
+  const portableConversation = JSON.parse(stagedZip.data(stagedEntries.get(stagedConversationEntry)).toString("utf8"));
+  assert.match(portablePayload.messages[0].markdown, new RegExp(`assets/sha256/.+/${stagedSha}\\.png`));
+  assert.doesNotMatch(portablePayload.messages[0].markdown, /data:image|sediment:/);
+  assert.equal(portableManifest.assets.find((asset) => asset.sha256 === stagedSha)?.storage, "local-cache");
+  assert.equal(portableManifest.outputObjectCounts.total, 1);
+  assert.equal(portableManifest.outputObjectCounts.degraded, 0);
+  assert.deepEqual(portableData.outputObjectCounts, portableManifest.outputObjectCounts);
+  assert.equal(portableConversation.outputObjectCount, 1);
+  assert.equal(portableConversation.degradedObjectCount, 0);
+  assert.equal(createHash("sha256").update(stagedZip.data(stagedEntries.get(stagedAssetEntry))).digest("hex"), stagedSha);
+  assert.equal(stagedZip.data(stagedEntries.get(stagedPdfEntry)).subarray(0, 4).toString("ascii"), "%PDF");
 });
 
 function getAvailablePort() {

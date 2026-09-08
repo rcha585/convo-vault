@@ -192,7 +192,11 @@ test("advanced PDF renderer keeps attachments after prose, embedded images, and 
         "正文第二行",
         "",
         "[File: 金融面试问题.pptx]",
-        `![Uploaded image](${genericPng})`
+        `![Uploaded image 1](${genericPng})`,
+        `![Uploaded image 2](${genericPng})`,
+        `![Uploaded image 3](${genericPng})`,
+        `![Uploaded image 4](${genericPng})`,
+        `![Uploaded image 5](${genericPng})`
       ].join("\n")
     }, {
       id: "assistant-1",
@@ -200,6 +204,12 @@ test("advanced PDF renderer keeps attachments after prose, embedded images, and 
       turnNumber: 2,
       thinkingMarkdown: "正在整理内容。",
       markdown: "整理完成。"
+    }, {
+      id: "assistant-images",
+      role: "assistant",
+      turnNumber: 3,
+      preview: `![Image](${genericPng.slice(0, 48)}...)`,
+      markdown: `![Generated image](${genericPng})`
     }]
   };
 
@@ -223,7 +233,11 @@ test("advanced PDF renderer keeps attachments after prose, embedded images, and 
   assert.match(html, /<p>正文第一行<br>\s*正文第二行<\/p>/);
   assert.match(html, /assistant-intro[\s\S]*<section class="thinking">/);
   assert.match(html, /\.assistant-intro \{[\s\S]*break-inside: avoid;/);
-  assert.match(html, /Image Attachments/);
+  assert.doesNotMatch(html, /Image Attachments/);
+  assert.match(html, /class="user-attachments image-grid" data-image-count="5"/);
+  assert.equal((html.match(/class="attachment-card image with-thumb image-preview-card"/g) || []).length, 5);
+  assert.match(html, /Turn 03\. Assistant image/);
+  assert.doesNotMatch(html, /Turn 03\.[^<]*data:application/);
   assert.match(html, /data:image\/png;base64,/);
 });
 

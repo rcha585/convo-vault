@@ -1,5 +1,6 @@
 (() => {
-  const EXPORTER_VERSION = "0.7.24";
+  const EXPORTER_VERSION = "0.8.5";
+  const IS_EXTENSION_ENV = typeof chrome !== "undefined" && Boolean(chrome?.runtime?.id);
   const installedState = window.__chatGptConversationExporterInstalled;
 
   if (
@@ -22,8 +23,8 @@
     installedAt: Date.now()
   };
   window.__chatGptConversationExporterVersion = EXPORTER_VERSION;
-  const TOP_LOAD_ATTEMPTS = 14;
-  const WALK_ATTEMPTS = 56;
+  const TOP_LOAD_ATTEMPTS = 32;
+  const WALK_ATTEMPTS = 240;
   const SCROLL_SETTLE_MS = 110;
   const DOM_IDLE_MS = 45;
   const MAX_DOM_IDLE_MS = 220;
@@ -57,6 +58,9 @@
     backendToken: ""
   };
   const DEFAULT_ADVANCED_PDF_RENDERER_URL = "http://127.0.0.1:38474";
+  const LOCAL_RENDERER_BUNDLE_PORT = "CONVO_VAULT_LOCAL_RENDERER_BUNDLE";
+  const LOCAL_RENDERER_REQUEST_CHUNK_CHARACTERS = 512 * 1024;
+  const MAX_LOCAL_RENDERER_REQUEST_BYTES = 256 * 1024 * 1024;
   const MESSAGE_NODE_SELECTORS = [
     '[data-turn-id]',
     '[data-turn-container]',
@@ -431,6 +435,8 @@
         fullMessages = await collectFullDomMessages(debugLog, onProgress, {
           finishDebug: false,
           progressPrefix: "Full enrichment: ",
+          expectedTurnCount: fastMessages.length,
+          expectedOrders: fastMessages.map((m) => Number(m.order)).filter((order) => Number.isFinite(order) && order > 0),
           signal
         });
       } catch (error) {
@@ -473,7 +479,9 @@
     const scrollTarget = getBestScrollTarget();
     const originalScrollTop = getScrollTop(scrollTarget);
     const collector = createMessageCollector(debugLog);
-    const scanBudget = getConversationScanBudget();
+    const expectedTurnCount = Number(options.expectedTurnCount || 0);
+    const expectedOrders = Array.isArray(options.expectedOrders) ? options.expectedOrders : null;
+    const scanBudget = getConversationScanBudget({ expectedTurnCount });
     const scanDeadline = Date.now() + scanBudget.maxScanMs;
     const walkDeadline = scanDeadline - scanBudget.hydrateReservedMs;
     debugLog.setScrollTarget(scrollTarget);
@@ -499,10 +507,13 @@
       await collector.captureFromDom({ signal });
       debugLog.mark("finalCapture");
       onProgress(`${progressPrefix}Recovering missed turns...`);
-      const missingBeforeRecovery = getMissingConversationTurnOrders(collector.getMessages());
+      const missingBeforeRecovery = getMissingConversationTurnOrders(collector.getMessages(), expectedOrders);
       const recoveryBudgetMs = getMissingRecoveryBudgetMs(missingBeforeRecovery.length, scanBudget.pageTurnCount);
       const recoveryDeadline = Date.now() + recoveryBudgetMs;
-      await recoverMissingTurnMessages(scrollTarget, collector, debugLog, recoveryDeadline, recoveryBudgetMs, signal);
+      await recoverMissingTurnMessages(scrollTarget, collector, debugLog, recoveryDeadline, recoveryBudgetMs, signal, {
+        expectedOrders,
+        maxKnownOrder: expectedTurnCount || Math.max(...(getAvailableConversationTurnOrders() || [0]))
+      });
       throwIfCaptureCancelled(signal);
       debugLog.mark("recoveredMissingTurns");
       await collector.captureFromDom({ settleMs: 0, signal });
@@ -761,19 +772,25 @@
     return isTimestampDividerText(text) || isLikelyNonMessageMarkdown(message);
   }
 
-  function getConversationScanBudget() {
+  function getConversationScanBudget(options = {}) {
+    const scrollTarget = getBestScrollTarget();
+    const maxScrollTop = getMaxScrollTop(scrollTarget);
     const pageTurnDiagnostics = getPageTurnDiagnostics();
     const availableTurnCount = getAvailableConversationTurnOrders().length;
+    const estimatedTurnsByHeight = Math.ceil(maxScrollTop / 1800);
+    const expectedTurnCount = Number(options?.expectedTurnCount || 0);
     const pageTurnCount = Math.max(
       pageTurnDiagnostics.dataTurnIdCount || 0,
-      availableTurnCount
+      availableTurnCount,
+      estimatedTurnsByHeight,
+      expectedTurnCount
     );
-    const isLargeConversation = pageTurnCount >= 120;
+    const isLargeConversation = pageTurnCount >= 36 || maxScrollTop >= 30_000;
     const maxScanMs = isLargeConversation
-      ? Math.min(MAX_ADAPTIVE_SCAN_MS, Math.max(MAX_SCAN_MS, pageTurnCount * 1200))
+      ? Math.min(MAX_ADAPTIVE_SCAN_MS, Math.max(MAX_SCAN_MS, pageTurnCount * 1400))
       : MAX_SCAN_MS;
     const hydrateReservedMs = isLargeConversation
-      ? Math.min(MAX_ADAPTIVE_HYDRATE_RESERVED_MS, Math.max(HYDRATE_RESERVED_MS, pageTurnCount * 300))
+      ? Math.min(MAX_ADAPTIVE_HYDRATE_RESERVED_MS, Math.max(HYDRATE_RESERVED_MS, pageTurnCount * 350))
       : HYDRATE_RESERVED_MS;
 
     return {
@@ -790,7 +807,7 @@
       return MISSING_TURN_RECOVERY_MS;
     }
 
-    const needsAdaptiveRecovery = pageTurnCount >= 120 || missingCount >= 20;
+    const needsAdaptiveRecovery = pageTurnCount >= 36 || missingCount >= 10;
 
     if (!needsAdaptiveRecovery) {
       return MISSING_TURN_RECOVERY_MS;
@@ -1017,17 +1034,26 @@
       .map(Math.floor);
     const expectedTurnCount = Number(summary?.expectedTurnCount || 0);
 
-    if (!summaryOrders.length && Number.isInteger(expectedTurnCount) && expectedTurnCount > 0 && expectedTurnCount < 1_000_000) {
-      summaryOrders = Array.from({ length: expectedTurnCount }, (_, index) => index + 1);
-    }
+    const allDiscoveredOrders = [...new Set([...domOrders, ...summaryOrders])].sort((a, b) => a - b);
+    const maxDiscoveredOrder = Math.max(
+      allDiscoveredOrders.length ? allDiscoveredOrders[allDiscoveredOrders.length - 1] : 0,
+      Number.isInteger(expectedTurnCount) ? expectedTurnCount : 0
+    );
 
-    const orders = [...new Set([...domOrders, ...summaryOrders])].sort((a, b) => a - b);
+    const orders = maxDiscoveredOrder > 0
+      ? Array.from({ length: maxDiscoveredOrder }, (_, index) => index + 1)
+      : allDiscoveredOrders;
     const canonicalEntries = orders.length
       ? orders.map((order) => {
         const candidates = entries.filter((entry) => Math.floor(entry.order) === order);
-        const role = candidates.find((entry) => entry.role === "user" || entry.role === "assistant")?.role
+        let role = candidates.find((entry) => entry.role === "user" || entry.role === "assistant")?.role
           || candidates[0]?.role
           || "";
+        if (!role && order % 2 === 1) {
+          role = "user";
+        } else if (!role && order % 2 === 0) {
+          role = "assistant";
+        }
         return { identity: `order:${order}`, order, role };
       })
       : entries;
@@ -1370,13 +1396,21 @@
 
   async function getExporterSettings() {
     if (typeof chrome === "undefined" || !chrome.storage?.local) {
-      return { ...DEFAULT_EXPORTER_SETTINGS };
+      return Promise.resolve({ ...DEFAULT_EXPORTER_SETTINGS });
     }
 
     return new Promise((resolve) => {
-      chrome.storage.local.get([SETTINGS_STORAGE_KEY], (result) => {
-        resolve(normalizeExporterSettings(result?.[SETTINGS_STORAGE_KEY]));
-      });
+      try {
+        chrome.storage.local.get([SETTINGS_STORAGE_KEY], (result) => {
+          if (chrome.runtime?.lastError) {
+            resolve({ ...DEFAULT_EXPORTER_SETTINGS });
+            return;
+          }
+          resolve(normalizeExporterSettings(result?.[SETTINGS_STORAGE_KEY]));
+        });
+      } catch (_) {
+        resolve({ ...DEFAULT_EXPORTER_SETTINGS });
+      }
     });
   }
 
@@ -1402,48 +1436,117 @@
   async function downloadExportBundle(metadata, messages, exportedAt = new Date(), options = {}) {
     const defaultFileName = markdownBuilder.filename(metadata.title, exportedAt, "zip");
     const payload = await createStructuredExportPayload(messages, exportedAt, {
-      embedImages: true,
+      embedImages: false,
       captureMode: options.captureMode,
       debugLog: options.debugLog
     });
 
-    const rendererSettings = await getExporterSettings();
-    const rendererUrl = getAdvancedPdfRendererUrl(rendererSettings);
-    let response;
+    const result = await requestBackgroundBundleExport({
+      exportPayload: payload,
+      fileName: defaultFileName
+    });
 
-    try {
-      response = await fetch(`${rendererUrl}/render-bundle`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...getLocalApiHeaders(rendererSettings)
-        },
-        body: JSON.stringify({
-          exportPayload: payload,
-          fileName: defaultFileName
-        })
-      });
-    } catch (error) {
-      throw new Error(`Local renderer is not running at ${rendererUrl}. Details: ${error.message || error}`);
+    if (!result?.ok) {
+      throw new Error(result?.error || "The local renderer could not export this conversation bundle.");
     }
-
-    if (!response.ok) {
-      await throwRendererResponseError(response, "Bundle renderer");
-    }
-
-    const blob = await response.blob();
-    const filename = getFilenameFromContentDisposition(response.headers.get("content-disposition")) || defaultFileName;
-    downloadBlob(filename, blob);
 
     return {
-      filename,
-      rendererUrl,
-      bundleFiles: decodeHeaderValue(response.headers.get("x-bundle-files")),
-      rendererTimings: parseEncodedJsonHeader(response.headers.get("x-bundle-timings")),
-      assetCount: Number(response.headers.get("x-asset-count")) || 0,
-      imagesEmbedded: payload.assetStats?.imagesEmbedded || 0,
-      imagesFailed: payload.assetStats?.imagesFailed || 0
+      filename: result.filename || defaultFileName,
+      rendererUrl: result.rendererUrl || DEFAULT_ADVANCED_PDF_RENDERER_URL,
+      bundleFiles: result.bundleFiles || "",
+      rendererTimings: result.rendererTimings || null,
+      assetCount: Number(result.assetCount) || 0,
+      imagesEmbedded: result.assetStats?.imagesEmbedded ?? payload.assetStats?.imagesEmbedded ?? 0,
+      imagesFailed: result.assetStats?.imagesFailed ?? payload.assetStats?.imagesFailed ?? 0
     };
+  }
+
+  async function requestBackgroundBundleExport(body) {
+    if (typeof chrome === "undefined" || !chrome.runtime?.connect) {
+      throw new Error("The Convo Vault extension background service is unavailable.");
+    }
+
+    const serializedBody = JSON.stringify(body);
+    const totalBytes = new TextEncoder().encode(serializedBody).byteLength;
+
+    if (totalBytes > MAX_LOCAL_RENDERER_REQUEST_BYTES) {
+      throw new Error(`This export request is ${totalBytes} bytes and exceeds the ${MAX_LOCAL_RENDERER_REQUEST_BYTES} byte local renderer limit.`);
+    }
+
+    const port = chrome.runtime.connect({ name: LOCAL_RENDERER_BUNDLE_PORT });
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+
+      const settle = (handler, value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        port.onMessage.removeListener(onMessage);
+        port.onDisconnect.removeListener(onDisconnect);
+        handler(value);
+      };
+
+      const onMessage = (message) => {
+        if (message?.type === "KEEPALIVE") {
+          return;
+        }
+
+        if (message?.type === "RESULT") {
+          settle(resolve, message.result || { ok: false, error: "The local renderer returned an empty result." });
+          try {
+            port.disconnect();
+          } catch (_) {
+            // The background service may already have closed the completed stream.
+          }
+        }
+      };
+
+      const onDisconnect = () => {
+        if (settled) {
+          return;
+        }
+        const detail = chrome.runtime.lastError?.message || "The extension background service disconnected before the export completed.";
+        settle(reject, new Error(detail));
+      };
+
+      port.onMessage.addListener(onMessage);
+      port.onDisconnect.addListener(onDisconnect);
+
+      port.postMessage({
+        type: "START",
+        totalCharacters: serializedBody.length,
+        totalBytes
+      });
+
+      void sendChunks();
+
+      async function sendChunks() {
+        try {
+          let chunkIndex = 0;
+          for (let offset = 0; offset < serializedBody.length; offset += LOCAL_RENDERER_REQUEST_CHUNK_CHARACTERS) {
+            port.postMessage({
+              type: "CHUNK",
+              data: serializedBody.slice(offset, offset + LOCAL_RENDERER_REQUEST_CHUNK_CHARACTERS)
+            });
+            chunkIndex += 1;
+
+            if (chunkIndex % 8 === 0) {
+              await new Promise((resume) => setTimeout(resume, 0));
+            }
+          }
+          port.postMessage({ type: "END" });
+        } catch (error) {
+          settle(reject, error);
+          try {
+            port.disconnect();
+          } catch (_) {
+            // The port may already be closed by the background service.
+          }
+        }
+      }
+    });
   }
 
   async function downloadAdvancedMarkdown(metadata, messages, exportedAt = new Date()) {
@@ -1589,7 +1692,30 @@
       const node = resolveMountedMessageNodeForPortableMessage(message);
 
       if (!node) {
-        result.missingNode += refs.length;
+        const globalDomImages = Array.from(document.querySelectorAll("img"));
+        const replacements = new Map();
+        for (const ref of refs) {
+          const fileMatch = ref.url.match(/(file_[a-f0-9]{32}|file-[a-zA-Z0-9_-]+)/i);
+          const fileId = fileMatch ? fileMatch[1] : "";
+          if (!fileId) continue;
+          const match = globalDomImages.find((img) => {
+            const src = img.currentSrc || img.src || "";
+            return src && !isInternalAssetImageUrl(src) && (src.includes(fileId) || img.alt?.includes(fileId));
+          });
+          if (match) {
+            try {
+              const dataUri = await imageToDataUri(match, match.currentSrc || match.src);
+              replacements.set(ref.url, dataUri);
+              result.embedded += 1;
+              stats.imagesEmbedded += 1;
+            } catch (_) {}
+          }
+        }
+        if (replacements.size) {
+          message.markdown = replaceEmbeddedMarkdownImages(message.markdown, replacements);
+          message.thinkingMarkdown = replaceEmbeddedMarkdownImages(message.thinkingMarkdown, replacements);
+        }
+        result.missingNode += refs.length - replacements.size;
         continue;
       }
 
@@ -1849,7 +1975,10 @@
     const isDetailed = options.detailed ?? DETAILED_DEBUG_LOG;
     const maxEvents = options.maxEvents || DEBUG_EVENT_LIMIT;
     let captureMode = normalizeCaptureMode(options.captureMode);
+    const debugMode = options.debugMode || (isDetailed ? "fidelity-audit" : "standard");
     let droppedEvents = 0;
+    const fidelityWarnings = [];
+    const turnThinkingDiagnostics = [];
     const stats = {
       selectorHits: {},
       normalizedCandidates: 0,
@@ -1862,6 +1991,15 @@
       emptyMessages: 0,
       emptyReasons: {},
       filterReasons: {},
+      fidelity: {
+        warningsCount: 0,
+        emptyThoughtContentCount: 0,
+        stepsWithFullContent: 0,
+        stepsWithSummaryOnly: 0,
+        totalThinkingSteps: 0,
+        reasoningSearchesCount: 0,
+        unassociatedSearchesCount: 0
+      },
       roles: {
         user: 0,
         assistant: 0,
@@ -1879,8 +2017,55 @@
 
     return {
       stats,
+      debugMode,
       setCaptureMode(value) {
         captureMode = normalizeCaptureMode(value);
+      },
+      fidelityWarning(warning = {}) {
+        stats.fidelity.warningsCount += 1;
+        const code = warning.code || "FIDELITY_ANOMALY";
+        if (code === "EMPTY_THOUGHT_CONTENT") {
+          stats.fidelity.emptyThoughtContentCount += 1;
+        } else if (code === "UNASSOCIATED_REASONING_SEARCH") {
+          stats.fidelity.unassociatedSearchesCount += 1;
+        }
+        fidelityWarnings.push({
+          atMs: Date.now() - startedAt.getTime(),
+          severity: warning.severity || "warning",
+          code,
+          turnNumber: warning.turnNumber || null,
+          message: warning.message || "",
+          details: warning.details || {}
+        });
+        this.event("fidelity.warning", {
+          code,
+          turnNumber: warning.turnNumber,
+          message: warning.message,
+          details: warning.details
+        });
+      },
+      recordThinkingDiagnostic(diag = {}) {
+        const turnNumber = diag.turnNumber || null;
+        const totalSteps = Number(diag.totalSteps || 0);
+        const stepsWithFull = Number(diag.stepsWithFullContent || 0);
+        const stepsSummaryOnly = Number(diag.stepsWithSummaryOnly || 0);
+        const searches = Number(diag.searchQueriesCount || 0);
+
+        stats.fidelity.totalThinkingSteps += totalSteps;
+        stats.fidelity.stepsWithFullContent += stepsWithFull;
+        stats.fidelity.stepsWithSummaryOnly += stepsSummaryOnly;
+        stats.fidelity.reasoningSearchesCount += searches;
+
+        turnThinkingDiagnostics.push({
+          turnNumber,
+          totalSteps,
+          stepsWithFullContent: stepsWithFull,
+          stepsWithSummaryOnly: stepsSummaryOnly,
+          durationSec: diag.durationSec || 0,
+          searchQueriesCount: searches,
+          toolCallsCount: diag.toolCallsCount || 0,
+          hasRecap: Boolean(diag.hasRecap)
+        });
       },
       event(type, data = {}) {
         if (events.length >= maxEvents) {
@@ -2050,15 +2235,41 @@
         const roleSequenceDiagnostics = getRoleSequenceDiagnostics(messages);
         const effectiveTurnCount = messages.length;
         const availableTurnOrders = getAvailableConversationTurnOrders();
-        const expectedTurnOrders = availableTurnOrders.length
-          ? availableTurnOrders
-          : pageTurnDiagnostics.dataTurnIdCount
-            ? Array.from({ length: pageTurnDiagnostics.dataTurnIdCount }, (_, index) => index + 1)
-            : capturedTurnOrders;
+        const allDiscoveredOrders = [...new Set([
+          ...capturedTurnOrders,
+          ...availableTurnOrders
+        ])].sort((a, b) => a - b);
+        const maxKnownOrder = allDiscoveredOrders.length ? allDiscoveredOrders[allDiscoveredOrders.length - 1] : 0;
+        const expectedTurnOrders = maxKnownOrder > 0
+          ? Array.from({ length: maxKnownOrder }, (_, index) => index + 1)
+          : (availableTurnOrders.length
+            ? availableTurnOrders
+            : (pageTurnDiagnostics.dataTurnIdCount
+              ? Array.from({ length: pageTurnDiagnostics.dataTurnIdCount }, (_, index) => index + 1)
+              : capturedTurnOrders));
         const expectedTurnCount = expectedTurnOrders.length || pageTurnDiagnostics.dataTurnIdCount || effectiveTurnCount;
         const missingTurnOrders = expectedTurnOrders.filter((order) => !capturedTurnOrderSet.has(order));
+        const hasCriticalFidelityIssue = fidelityWarnings.some((w) => w.severity === "high" || w.code === "EMPTY_THOUGHT_CONTENT");
+        const fidelityAudit = {
+          status: fidelityWarnings.length === 0
+            ? "clean"
+            : (hasCriticalFidelityIssue ? "degraded" : "warning"),
+          debugMode,
+          totalAssistantTurns: assistantMessages,
+          turnsWithThinking: assistantThinkingMessages,
+          totalThinkingSteps: stats.fidelity.totalThinkingSteps,
+          stepsWithFullContent: stats.fidelity.stepsWithFullContent,
+          stepsWithSummaryOnly: stats.fidelity.stepsWithSummaryOnly,
+          contentCompletenessRate: stats.fidelity.totalThinkingSteps > 0
+            ? Number((stats.fidelity.stepsWithFullContent / stats.fidelity.totalThinkingSteps).toFixed(3))
+            : 1.0,
+          warningsCount: fidelityWarnings.length,
+          warnings: fidelityWarnings,
+          turnDiagnostics: turnThinkingDiagnostics
+        };
         finalSummary = {
           captureMode,
+          debugMode,
           totalMessages: messages.length,
           userMessages,
           assistantMessages,
@@ -2081,7 +2292,8 @@
             : null,
           roleSequenceDiagnostics,
           capturedTurnOrders,
-          missingTurnOrders
+          missingTurnOrders,
+          fidelityAudit
         };
       },
       getFinalSummary() {
@@ -2091,12 +2303,20 @@
         return {
           exporterVersion: EXPORTER_VERSION,
           captureMode,
+          debugMode,
           features: {
             conversationTimestampApi: true,
             visibleThinkingFlyoutCapture: true,
             autoOpenThinkingFlyouts: true,
             thinkingFlyoutAutoOpenLimit: THINKING_FLYOUT_AUTO_OPEN_LIMIT,
+            cognitiveFidelityTracking: true,
             pdfEngine: "advanced-local-chrome"
+          },
+          fidelityAudit: finalSummary?.fidelityAudit || {
+            status: fidelityWarnings.length === 0 ? "clean" : "warning",
+            debugMode,
+            warningsCount: fidelityWarnings.length,
+            warnings: fidelityWarnings
           },
           pageUrl: location.href,
           title: getConversationTitle(),
@@ -2198,6 +2418,7 @@
       preview: message?.preview || "",
       markdown,
       thinkingMarkdown,
+      agentTrace: message?.agentTrace || null,
       codeBlockCount: message?.codeBlockCount || 0,
       fileCount: message?.fileCount || 0,
       imageCount,
@@ -3549,7 +3770,7 @@
         <aside class="cgce-panel" aria-label="ChatGPT export message selector">
           <header class="cgce-header">
             <div>
-              <h2 class="cgce-title">Select messages</h2>
+              <h2 class="cgce-title">Select messages <span style="font-size: 11px; font-weight: 500; color: #64748b; margin-left: 6px;">v${EXPORTER_VERSION}</span></h2>
               <p class="cgce-subtitle">Choose a capture mode, review loaded turns, then export the bundle.</p>
             </div>
             <div class="cgce-icon-buttons">
@@ -4016,13 +4237,13 @@
   }
 
   function getWalkScrollStep(scrollTarget) {
-    return Math.max(Math.floor(getClientHeight(scrollTarget) * 3.6), 3000);
+    return Math.max(Math.floor(getClientHeight(scrollTarget) * 0.85), 650);
   }
 
   function getWalkAttemptLimit(scrollTarget) {
     const step = getWalkScrollStep(scrollTarget);
-    const estimated = Math.ceil(getMaxScrollTop(scrollTarget) / Math.max(1, step)) + 6;
-    return Math.min(WALK_ATTEMPTS, Math.max(10, estimated));
+    const estimated = Math.ceil(getMaxScrollTop(scrollTarget) / Math.max(1, step)) + 16;
+    return Math.min(WALK_ATTEMPTS, Math.max(20, estimated));
   }
 
   async function hydrateVirtualizedTurns(collector, debugLog = null, deadline = Infinity, budget = null, signal = null) {
@@ -4116,8 +4337,9 @@
     };
   }
 
-  async function recoverMissingTurnMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budgetMs = MISSING_TURN_RECOVERY_MS, signal = null) {
-    let missingOrders = getMissingConversationTurnOrders(collector.getMessages());
+  async function recoverMissingTurnMessages(scrollTarget, collector, debugLog = null, deadline = Infinity, budgetMs = MISSING_TURN_RECOVERY_MS, signal = null, options = {}) {
+    const expectedOrders = options?.expectedOrders || null;
+    let missingOrders = getMissingConversationTurnOrders(collector.getMessages(), expectedOrders);
 
     debugLog?.progress("missingRecovery.start", {
       missingOrders,
@@ -4140,8 +4362,25 @@
         let turn = findBestTurnNodeByOrder(order);
 
         if (!turn) {
-          await scrollNearTurnOrder(scrollTarget, order);
+          await scrollNearTurnOrder(scrollTarget, order, options?.maxKnownOrder || 0);
+          await collector.captureFromDom({ settleMs: 0, signal });
           turn = findBestTurnNodeByOrder(order);
+        }
+
+        if (!turn) {
+          const currentTop = getScrollTop(scrollTarget);
+          const offset = Math.floor(getClientHeight(scrollTarget) * 0.75);
+          setScrollTop(scrollTarget, Math.max(0, currentTop - offset));
+          await waitForScrollAndDomIdle(160);
+          await collector.captureFromDom({ settleMs: 0, signal });
+          turn = findBestTurnNodeByOrder(order);
+
+          if (!turn) {
+            setScrollTop(scrollTarget, Math.min(getMaxScrollTop(scrollTarget), currentTop + offset));
+            await waitForScrollAndDomIdle(160);
+            await collector.captureFromDom({ settleMs: 0, signal });
+            turn = findBestTurnNodeByOrder(order);
+          }
         }
 
         if (!turn?.isConnected) {
@@ -4154,7 +4393,7 @@
         const beforeHasMountedText = hasMountedMessageText(turn);
         const hydrationResult = await hydrateSingleTurn(turn, collector, deadline, signal);
         await collector.captureFromDom({ settleMs: 0, nodes: [turn], signal });
-        const captured = !getMissingConversationTurnOrders(collector.getMessages()).includes(order);
+        const captured = !getMissingConversationTurnOrders(collector.getMessages(), expectedOrders).includes(order);
 
         debugLog?.progress("missingRecovery.turn", {
           pass,
@@ -4172,7 +4411,7 @@
         });
       }
 
-      missingOrders = getMissingConversationTurnOrders(collector.getMessages());
+      missingOrders = getMissingConversationTurnOrders(collector.getMessages(), expectedOrders);
     }
 
     debugLog?.progress("missingRecovery.finish", {
@@ -4182,16 +4421,30 @@
     });
   }
 
-  function getMissingConversationTurnOrders(messages) {
+  function getMissingConversationTurnOrders(messages, expectedOrders = null) {
     const availableOrders = getAvailableConversationTurnOrders();
-
-    if (!availableOrders.length) {
-      return [];
-    }
-
     const capturedOrders = new Set(messages
       .map((message) => Number(message.order))
       .filter((order) => Number.isFinite(order) && order > 0 && order < 1_000_000));
+
+    if (Array.isArray(expectedOrders) && expectedOrders.length) {
+      return expectedOrders.filter((order) => !capturedOrders.has(order));
+    }
+
+    const allDiscoveredOrders = [...new Set([
+      ...availableOrders,
+      ...capturedOrders
+    ])].sort((a, b) => a - b);
+
+    if (!allDiscoveredOrders.length) {
+      return [];
+    }
+
+    const maxOrder = allDiscoveredOrders[allDiscoveredOrders.length - 1];
+    if (maxOrder > 0 && maxOrder < 1_000_000) {
+      const canonicalOrders = Array.from({ length: maxOrder }, (_, index) => index + 1);
+      return canonicalOrders.filter((order) => !capturedOrders.has(order));
+    }
 
     return availableOrders.filter((order) => !capturedOrders.has(order));
   }
@@ -4231,14 +4484,14 @@
       + (getPotentialMessageNodeResult(turn).ok ? 500 : 0);
   }
 
-  async function scrollNearTurnOrder(scrollTarget, order) {
+  async function scrollNearTurnOrder(scrollTarget, order, maxKnownOrder = 0) {
     const orders = getAvailableConversationTurnOrders();
-    const first = orders[0] || 1;
-    const last = orders[orders.length - 1] || order;
+    const first = 1;
+    const last = Math.max(orders[orders.length - 1] || order, maxKnownOrder || order, 1);
     const span = Math.max(1, last - first);
     const ratio = Math.min(1, Math.max(0, (order - first) / span));
     setScrollTop(scrollTarget, Math.round(getMaxScrollTop(scrollTarget) * ratio));
-    await waitForScrollAndDomIdle(220);
+    await waitForScrollAndDomIdle(240);
   }
 
   function getTurnsNeedingHydration(turns, collector) {
@@ -5735,6 +5988,9 @@
     return Boolean(time && time === text && TIMESTAMP_CUE_RE.test(text));
   }
 
+  const FAST_CONVERSATION_API_PAGE_SIZE = 100;
+  const FAST_CONVERSATION_API_MAX_PAGES = 200;
+
   async function collectFastConversationMessages(debugLog = null, options = {}) {
     const signal = options.signal || null;
     throwIfCaptureCancelled(signal);
@@ -5767,89 +6023,96 @@
     const pathNodes = getConversationApiCurrentPath(data);
     const messages = [];
     const filterStats = {};
-    let pendingAssistantThinking = [];
-    let pendingThinkingApplied = 0;
+    let pendingAssistantNodes = [];
     let directThinkingMessageCount = 0;
-    let skippedThinkingCandidateCount = 0;
 
-    for (const node of pathNodes) {
-      const message = node?.message;
-      const role = normalizeApiRole(message?.author?.role);
-
-      const structuralSkipReason = getApiMessageStructuralSkipReason(message, role);
-      if (structuralSkipReason) {
-        const skippedThinking = extractSkippedApiThinkingMarkdown(message, role, structuralSkipReason);
-        if (skippedThinking) {
-          pendingAssistantThinking.push(skippedThinking);
-          skippedThinkingCandidateCount += 1;
-        }
-        incrementReasonCount(filterStats, structuralSkipReason);
-        continue;
+    function flushAssistantTurn() {
+      if (!pendingAssistantNodes.length) {
+        return;
       }
 
-      const directThinkingMarkdown = role === "assistant" ? extractApiThinkingMarkdown(message) : "";
-      if (directThinkingMarkdown) {
+      const synthesized = synthesizeAssistantTurn(pendingAssistantNodes, messages.length + 1, "", null, debugLog);
+      pendingAssistantNodes = [];
+
+      if (!synthesized) {
+        return;
+      }
+
+      if (synthesized.thinkingMarkdown) {
         directThinkingMessageCount += 1;
       }
 
-      const markdown = cleanApiMarkdown([
-        extractApiContentMarkdown(message.content),
-        extractApiAttachmentMarkdown(message)
-      ].filter(Boolean).join("\n\n"));
-      const thinkingMarkdown = cleanApiMarkdown([
-        role === "assistant" ? pendingAssistantThinking.join("\n\n") : "",
-        directThinkingMarkdown
-      ].filter(Boolean).join("\n\n"));
-
-      if (!markdown && !thinkingMarkdown) {
-        continue;
-      }
-
-      if (role === "user" && pendingAssistantThinking.length) {
-        pendingAssistantThinking = [];
-      }
-
-      const contentSkipReason = getApiMessageContentSkipReason(message, role, markdown);
-      if (contentSkipReason) {
-        incrementReasonCount(filterStats, contentSkipReason);
-        continue;
-      }
-
-      const turnNumber = messages.length + 1;
-      const id = message.id || node.id || `api-message-${turnNumber}`;
-
-      if (role === "assistant" && pendingAssistantThinking.length) {
-        pendingThinkingApplied += 1;
-        pendingAssistantThinking = [];
-      }
-
-      messages.push({
-        id,
-        role,
-        order: turnNumber,
-        turnNumber,
-        conversationOrder: turnNumber,
-        timestamp: formatConversationTimestamp(
-          message.create_time ??
-          message.update_time ??
-          message.metadata?.create_time ??
-          message.metadata?.timestamp
-        ),
-        markdown,
-        thinkingMarkdown,
-        preview: truncatePreview(cleanMarkdown(`${markdown}\n${thinkingMarkdown}`), 180),
-        sourceMessageId: message.id || "",
-        sourceTurnId: node.id || "",
-        sourceNode: null,
-        codeBlockCount: getCodeBlockDiagnostics(markdown, thinkingMarkdown).length,
-        fileCount: countApiFileAttachments(message),
-        imageCount: countMarkdownImages(markdown),
-        imagesEmbedded: 0,
-        imagesDeferred: countMarkdownImages(markdown),
-        imagesFailed: 0,
-        captureMode: "fast"
-      });
+      messages.push(synthesized);
     }
+
+    for (const node of pathNodes) {
+      const message = node?.message;
+      if (!message) {
+        incrementReasonCount(filterStats, "missing-message");
+        continue;
+      }
+
+      const rawRole = String(message.author?.role || "").toLowerCase();
+      const metadata = message.metadata || {};
+      const authorMetadata = message.author?.metadata || {};
+
+      if (
+        isTruthyApiFlag(metadata.is_visually_hidden_from_conversation)
+        || isTruthyApiFlag(metadata.is_hidden)
+        || isTruthyApiFlag(metadata.hidden)
+        || isTruthyApiFlag(authorMetadata.is_visually_hidden_from_conversation)
+        || isTruthyApiFlag(authorMetadata.is_hidden)
+        || isTruthyApiFlag(authorMetadata.hidden)
+      ) {
+        incrementReasonCount(filterStats, "hidden");
+        continue;
+      }
+
+      if (rawRole === "user") {
+        flushAssistantTurn();
+
+        const turnNumber = messages.length + 1;
+        const id = message.id || node.id || `api-message-${turnNumber}`;
+        const markdown = cleanApiMarkdown([
+          extractApiContentMarkdown(message.content),
+          extractApiAttachmentMarkdown(message)
+        ].filter(Boolean).join("\n\n"));
+
+        messages.push({
+          id,
+          role: "user",
+          order: turnNumber,
+          turnNumber,
+          conversationOrder: turnNumber,
+          timestamp: formatConversationTimestamp(
+            message.create_time ??
+            message.update_time ??
+            message.metadata?.create_time ??
+            message.metadata?.timestamp
+          ),
+          markdown,
+          thinkingMarkdown: "",
+          preview: truncatePreview(markdown, 180),
+          sourceMessageId: message.id || "",
+          sourceTurnId: node.id || "",
+          sourceNode: null,
+          codeBlockCount: getCodeBlockDiagnostics(markdown, "").length,
+          fileCount: countApiFileAttachments(message),
+          imageCount: countMarkdownImages(markdown),
+          imagesEmbedded: 0,
+          imagesDeferred: countMarkdownImages(markdown),
+          imagesFailed: 0,
+          captureMode: "fast"
+        });
+      } else if (rawRole === "assistant" || rawRole === "tool") {
+        if (message.end_turn === false) {
+          incrementReasonCount(filterStats, "assistant-not-final");
+        }
+        pendingAssistantNodes.push(node);
+      }
+    }
+
+    flushAssistantTurn();
 
     debugLog?.event("fastCapture.path", {
       pathNodeCount: pathNodes.length,
@@ -5862,21 +6125,232 @@
       });
     }
 
-    if (pendingThinkingApplied) {
+    if (directThinkingMessageCount) {
       debugLog?.event("fastCapture.thinkingMerged", {
-        applied: pendingThinkingApplied
-      });
-    }
-
-    if (directThinkingMessageCount || skippedThinkingCandidateCount || pendingThinkingApplied) {
-      debugLog?.event("fastCapture.thinkingSummary", {
-        directMetadataMessages: directThinkingMessageCount,
-        skippedThinkingCandidates: skippedThinkingCandidateCount,
-        mergedIntoFinalAssistant: pendingThinkingApplied
+        applied: directThinkingMessageCount
       });
     }
 
     return messages;
+  }
+
+  function synthesizeAssistantTurn(nodes, turnNumber, turnId = "", primaryNode = null, debugLog = null) {
+    if (!nodes.length) {
+      return null;
+    }
+
+    let primaryMessage = primaryNode?.message || null;
+    const textParts = [];
+    const imagePointers = [];
+    const fileEntries = [];
+    const citations = [];
+    const memories = [];
+    let turnMsgId = "";
+    let timestamp = null;
+
+    // First pass: locate the primary final assistant message and metadata
+    for (const node of nodes) {
+      const msg = node?.message;
+      if (!msg) continue;
+      const role = String(msg.author?.role || "").toLowerCase();
+      if (role === "assistant") {
+        if (!turnMsgId) turnMsgId = msg.id || node.id;
+        if (!timestamp) {
+          timestamp = msg.create_time ?? msg.update_time ?? msg.metadata?.create_time ?? msg.metadata?.timestamp;
+        }
+        if (msg.channel === "final" || msg.end_turn === true || !primaryMessage) {
+          primaryMessage = msg;
+        }
+      }
+
+      const metadata = msg.metadata || {};
+      if (Array.isArray(metadata.citations)) {
+        citations.push(...metadata.citations);
+      }
+      if (Array.isArray(metadata.conversation_context_citation_metadata)) {
+        memories.push(...metadata.conversation_context_citation_metadata);
+      }
+    }
+
+    // 1. Cognitive reasoning extraction (single source of truth for timeline and agentTrace)
+    const parsedReasoning = FastThinkingEngine.parseTurnReasoning(nodes, citations, debugLog, turnNumber);
+    const thinkingMarkdown = cleanApiMarkdown(FastThinkingEngine.buildTurnThinkingTimeline(parsedReasoning, citations));
+    const agentTrace = FastThinkingEngine.extractTurnAgentTrace(parsedReasoning, citations, memories);
+
+    // 2. Aggregate prose text, image pointers, generated files and attachments
+    for (const node of nodes) {
+      const msg = node?.message;
+      if (!msg) continue;
+
+      // Collect generated files
+      const fileCandidate = extractApiGeneratedFilesMarkdown(msg);
+      if (fileCandidate) {
+        fileEntries.push(fileCandidate);
+      }
+
+      // Collect attachments
+      const attachmentCandidate = extractApiAttachmentMarkdown(msg);
+      if (attachmentCandidate) {
+        fileEntries.push(attachmentCandidate);
+      }
+
+      const isThinking = isApiThinkingNode(msg);
+      const isInternalTool = isApiInternalToolCallNode(msg);
+
+      // Collect text and image parts
+      const content = msg.content;
+      if (content && typeof content === "object") {
+        const parts = Array.isArray(content.parts) ? content.parts : [];
+        for (const part of parts) {
+          if (typeof part === "string" && part.trim()) {
+            if (
+              !isThinking
+              && !isInternalTool
+              && !isApiInternalFileIngestionText(part)
+              && !looksLikeInternalApiToolCall(part)
+              && !looksLikeApiJsonPayload(part)
+            ) {
+              textParts.push(part.trim());
+            }
+          } else if (part && typeof part === "object") {
+            const ptr = part.asset_pointer || part.assetPointer || part.url || "";
+            if (ptr && isApiImageHaystack(`${part.content_type || ""} ${part.mime_type || ""} ${ptr}`)) {
+              const label = sanitizeApiMarkdownLabel(part.name || part.filename || part.title || "Image");
+              const imgMd = `![${label}](${ptr})`;
+              if (!imagePointers.includes(imgMd)) {
+                imagePointers.push(imgMd);
+              }
+            }
+          }
+        }
+
+        if (!parts.length && typeof content.text === "string" && content.text.trim()) {
+          if (
+            !isThinking
+            && !isInternalTool
+            && !isApiInternalFileIngestionText(content.text)
+            && !looksLikeInternalApiToolCall(content.text)
+            && !looksLikeApiJsonPayload(content.text)
+          ) {
+            textParts.push(content.text.trim());
+          }
+        }
+      }
+    }
+
+    // Build synthesized markdown
+    const combinedProse = uniqueStrings(textParts).join("\n\n");
+    const combinedImages = imagePointers.join("\n\n");
+    const combinedFiles = uniqueStrings(fileEntries).join("\n\n");
+
+    let markdown = cleanApiMarkdown([
+      combinedProse,
+      combinedImages,
+      combinedFiles
+    ].filter(Boolean).join("\n\n"));
+
+    if (primaryMessage) {
+      markdown = enrichApiMarkdownWithCitations(markdown, primaryMessage);
+      markdown = enrichApiMarkdownWithMemories(markdown, primaryMessage);
+    } else if (citations.length || memories.length) {
+      markdown = enrichApiMarkdownWithCitations(markdown, { metadata: { citations } });
+      markdown = enrichApiMarkdownWithMemories(markdown, { metadata: { conversation_context_citation_metadata: memories } });
+    }
+
+    if (!markdown && !thinkingMarkdown) {
+      return null;
+    }
+
+    const id = turnId || turnMsgId || `api-assistant-${turnNumber}`;
+
+    return {
+      id,
+      role: "assistant",
+      order: turnNumber,
+      turnNumber,
+      conversationOrder: turnNumber,
+      timestamp: formatConversationTimestamp(timestamp),
+      markdown,
+      thinkingMarkdown,
+      agentTrace,
+      preview: truncatePreview(cleanMarkdown(`${markdown}\n${thinkingMarkdown}`), 180),
+      sourceMessageId: primaryMessage?.id || id,
+      sourceTurnId: id,
+      sourceNode: null,
+      codeBlockCount: getCodeBlockDiagnostics(markdown, thinkingMarkdown).length,
+      fileCount: (primaryMessage ? countApiFileAttachments(primaryMessage) : 0) + fileEntries.length,
+      imageCount: countMarkdownImages(markdown),
+      imagesEmbedded: 0,
+      imagesDeferred: countMarkdownImages(markdown),
+      imagesFailed: 0,
+      captureMode: "fast"
+    };
+  }
+
+  function isApiThinkingNode(msg) {
+    if (!msg) return false;
+    const channel = String(msg.channel || msg.metadata?.channel || msg.author?.metadata?.channel || "").toLowerCase();
+    const contentType = String(msg.content?.content_type || msg.content?.contentType || "").toLowerCase();
+    return (
+      channel === "analysis"
+      || channel === "reasoning"
+      || channel === "commentary"
+      || contentType === "thoughts"
+      || contentType === "reasoning"
+      || contentType === "reasoning_recap"
+      || msg.metadata?.is_thinking_preamble_message === true
+    );
+  }
+
+  function isApiInternalFileIngestionText(text) {
+    const str = String(text || "").trim();
+    if (!str) return false;
+    return (
+      /Make sure to include fileL\d+-L\d+ in your response/i.test(str)
+      || /Use ref_id "turn\d+file\d+"/i.test(str)
+      || /\[L\d+\]\s*<PARSED TEXT FOR PAGE/i.test(str)
+      || (/^\[L\d+\]/m.test(str) && /PARSED TEXT/i.test(str))
+      || /scoped to this file\.\s*Use `?files\.(?:search|find|read)`?/i.test(str)
+      || /Full file size:\s*\d+\s*pages/i.test(str)
+    );
+  }
+
+  function isApiInternalToolCallNode(msg) {
+    if (!msg) return false;
+    const recipient = String(msg.recipient || msg.metadata?.recipient || msg.author?.metadata?.recipient || "").toLowerCase();
+    const contentType = String(msg.content?.content_type || msg.content?.contentType || "").toLowerCase();
+    const messageType = String(msg.metadata?.message_type || msg.metadata?.messageType || "").toLowerCase();
+    const role = String(msg.author?.role || "").toLowerCase();
+    const name = String(msg.author?.name || "").toLowerCase();
+
+    if (role === "tool" || role === "system") {
+      return true;
+    }
+
+    if (name.includes("browser") || name.includes("myfiles") || name.includes("search") || name.includes("tool")) {
+      return true;
+    }
+
+    if (["python", "web.run", "browser", "search", "myfiles_browser", "file_search", "api_tool", "api_tool.search_plugins", "api_tool.call_tool", "api_tool.suggest_installs", "api_tool.list_resources"].some((r) => recipient.includes(r))) {
+      return true;
+    }
+
+    if (["code", "execution", "tool", "tool_call", "search_query", "search_result"].includes(messageType)) {
+      return true;
+    }
+
+    if (contentType === "code" && recipient && recipient !== "all") {
+      return true;
+    }
+
+    const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
+    for (const part of parts) {
+      if (typeof part === "string" && isApiInternalFileIngestionText(part)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   function getApiMessageStructuralSkipReason(message, role) {
@@ -6088,21 +6562,7 @@
   }
 
   function getConversationApiLinearMessages(data) {
-    const candidates = [
-      data?.messages,
-      data?.items,
-      data?.linear_conversation,
-      data?.linearConversation,
-      data?.conversation?.messages,
-      data?.conversation?.items,
-      data?.conversation?.linear_conversation,
-      data?.data?.messages,
-      data?.data?.items,
-      data?.data?.linear_conversation
-    ];
-
-    return candidates
-      .find(Array.isArray)
+    return getConversationApiRawMessages(data)
       ?.map((item) => item?.message || item)
       .filter((message) => message && typeof message === "object") || [];
   }
@@ -6123,7 +6583,8 @@
 
   function removeApiPrivateUseArtifacts(value) {
     return String(value || "")
-      .replace(/[\uE000-\uF8FF]*cite(?:[\uE000-\uF8FF]+turn[0-9A-Za-z_-]+)+[\uE000-\uF8FF]*/gi, "")
+      .replace(/[\uE000-\uF8FF]+(?:file|web|mem)?cite(?:[\uE000-\uF8FF]+[0-9A-Za-z_-]+)*[\uE000-\uF8FF]*/gi, "")
+      .replace(/\bfileL\d+(?:-L\d+)?\b/gi, "")
       .replace(/[\uE000-\uF8FF]+/g, "")
       .replace(/[ \t]+\n/g, "\n");
   }
@@ -6273,6 +6734,11 @@
       .length;
   }
 
+  function isApiImageHaystack(haystack) {
+    const text = String(haystack || "");
+    return /\bimage\b|image\/|img|picture|\.(?:png|jpe?g|gif|webp|avif|bmp|svg)(?:$|[?#])|sediment:\/\/|file_000/i.test(text);
+  }
+
   function isApiImageAttachment(attachment) {
     const haystack = [
       attachment?.mime_type,
@@ -6288,7 +6754,7 @@
       attachment?.file_url
     ].join(" ");
 
-    return /\bimage\//i.test(haystack) || /\.(?:png|jpe?g|gif|webp|avif|bmp|svg)(?:$|[?#])/i.test(haystack);
+    return isApiImageHaystack(haystack);
   }
 
   function sanitizeApiMarkdownLabel(value) {
@@ -6300,19 +6766,687 @@
       || "Image";
   }
 
-  function extractApiThinkingMarkdown(message) {
-    const metadata = message?.metadata || {};
-    const candidates = [
-      metadata.reasoning,
-      metadata.reasoning_content,
-      metadata.thinking,
-      metadata.thinking_text,
-      metadata.thoughts
-    ];
+  // ============================================================================
+  // FAST THINKING & COGNITIVE REASONING ENGINE
+  // ============================================================================
 
-    return candidates
-      .filter((value) => typeof value === "string" && value.trim())
-      .join("\n\n");
+  const FastThinkingEngine = {
+    parseTurnReasoning(nodes, citations = [], debugLog = null, turnNumber = null) {
+      const thinkingSteps = [];
+      const searchSteps = [];
+      const toolInvocations = [];
+      const fileIngestions = [];
+      const internalToolCalls = [];
+      let maxDurationSec = 0;
+      let recapText = "";
+      const seenStepKeys = new Set();
+
+      const safeNodes = Array.isArray(nodes) ? nodes : (nodes ? [nodes] : []);
+      const consumedNodeIndices = new Set();
+
+      for (let i = 0; i < safeNodes.length; i++) {
+        if (consumedNodeIndices.has(i)) continue;
+        const node = safeNodes[i];
+        const msg = node?.message;
+        if (!msg) continue;
+
+        const role = String(msg.author?.role || "").toLowerCase();
+        const recipient = String(msg.recipient || msg.metadata?.recipient || "").toLowerCase();
+        const channel = String(msg.channel || msg.metadata?.channel || "").toLowerCase();
+        const contentType = String(msg.content?.content_type || "").toLowerCase();
+        const metadata = msg.metadata || {};
+
+        const duration = Number(metadata.finished_duration_sec || metadata.thinking_duration_seconds || 0);
+        if (duration > maxDurationSec) {
+          maxDurationSec = duration;
+        }
+
+        // 1. Content Type: reasoning_recap
+        if (contentType === "reasoning_recap") {
+          const recapContent = typeof msg.content?.content === "string" ? msg.content.content.trim() : "";
+          if (recapContent) {
+            recapText = recapContent;
+          }
+          continue;
+        }
+
+        // 2. Multi-step Thoughts (msg.content.thoughts array)
+        if (Array.isArray(msg.content?.thoughts) && msg.content.thoughts.length) {
+          for (const t of msg.content.thoughts) {
+            const summary = String(t?.summary || "").trim();
+            const content = String(t?.content || "").trim();
+            if (!summary && !content) continue;
+
+            const key = `thought:${summary}:${content}`;
+            if (seenStepKeys.has(key)) continue;
+            seenStepKeys.add(key);
+
+            thinkingSteps.push({
+              type: "thinking",
+              nodeId: node.id,
+              channel: channel || "reasoning",
+              summary,
+              content,
+              duration
+            });
+
+            if (summary && !content) {
+              debugLog?.fidelityWarning?.({
+                turnNumber,
+                severity: "info",
+                code: "EMPTY_THOUGHT_CONTENT",
+                message: `Thought step "${summary}" has no descriptive body in API payload`,
+                details: { summary, nodeId: node.id }
+              });
+            }
+          }
+          continue;
+        }
+
+        // 3. Web Search during Reasoning (is_reasoning or reasoning_title)
+        if (
+          metadata.reasoning_status === "is_reasoning"
+          || (role === "assistant" && contentType === "code" && metadata.reasoning_title)
+        ) {
+          const title = String(metadata.reasoning_title || "").trim();
+          let queries = Array.isArray(metadata.search_queries) ? [...metadata.search_queries] : [];
+          const results = [];
+
+          // Scan forward for tool message with search_result_groups
+          for (let k = i + 1; k < safeNodes.length; k++) {
+            const nextMsg = safeNodes[k]?.message;
+            if (!nextMsg) continue;
+            if (nextMsg.author?.role !== "tool") break;
+            const nextMeta = nextMsg.metadata || {};
+            if (Array.isArray(nextMeta.search_result_groups)) {
+              consumedNodeIndices.add(k);
+              for (const grp of nextMeta.search_result_groups) {
+                if (grp?.search_query) queries.push(grp.search_query);
+                if (Array.isArray(grp?.entries)) {
+                  for (const entry of grp.entries) {
+                    if (entry?.url || entry?.title) {
+                      results.push({
+                        title: entry.title || grp.domain || entry.url || "",
+                        url: entry.url || "",
+                        snippet: entry.snippet || ""
+                      });
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          queries = uniqueStrings(queries);
+          if (title || queries.length || results.length) {
+            searchSteps.push({
+              type: "searching",
+              nodeId: node.id,
+              title: title || "联网检索",
+              queries,
+              results
+            });
+          }
+          continue;
+        }
+
+        // 4. Standard Web Searches (recipient === "web.run" / "browser" or metadata search results)
+        if (recipient === "web.run" || recipient === "browser" || metadata.search_result_groups || metadata.search_results) {
+          const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
+          let queries = [];
+          for (const p of parts) {
+            if (typeof p === "string") {
+              const match = p.match(/"q(?:uery)?"\s*:\s*"([^"]+)"/g);
+              if (match) {
+                queries.push(...match.map((m) => m.replace(/.*"([^"]+)"$/, "$1")));
+              }
+            }
+          }
+          if (Array.isArray(metadata.search_result_groups)) {
+            for (const grp of metadata.search_result_groups) {
+              if (grp?.search_query) queries.push(grp.search_query);
+            }
+          }
+          queries = uniqueStrings(queries);
+
+          const results = [];
+          if (Array.isArray(metadata.search_results)) {
+            for (const r of metadata.search_results) {
+              if (r?.url || r?.title) {
+                results.push({ title: r.title || "", url: r.url || "", snippet: r.snippet || "" });
+              }
+            }
+          }
+          if (Array.isArray(metadata.search_result_groups)) {
+            for (const grp of metadata.search_result_groups) {
+              if (Array.isArray(grp?.entries)) {
+                for (const entry of grp.entries) {
+                  if (entry?.url || entry?.title) {
+                    results.push({ title: entry.title || grp.domain || entry.url || "", url: entry.url || "", snippet: entry.snippet || "" });
+                  }
+                }
+              }
+            }
+          }
+
+          if (queries.length || results.length) {
+            searchSteps.push({
+              type: "searching",
+              nodeId: node.id,
+              title: "联网检索",
+              queries,
+              results
+            });
+          }
+        }
+
+        // 5. Commentary / Analysis / General Thinking Nodes
+        const isCommentary = channel === "commentary" || msg.metadata?.is_thinking_preamble_message === true;
+        if (isCommentary || channel === "analysis" || channel === "reasoning" || contentType === "thoughts" || isApiThinkingNode(msg)) {
+          const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
+          const text = parts.filter((p) => typeof p === "string" && p.trim()).join("\n");
+          if (text && !looksLikeInternalApiToolCall(text) && !looksLikeApiJsonPayload(text)) {
+            const key = `text:${channel}:${text}`;
+            if (!seenStepKeys.has(key)) {
+              seenStepKeys.add(key);
+              thinkingSteps.push({
+                type: isCommentary ? "commentary" : "thinking",
+                nodeId: node.id,
+                channel: channel || (isCommentary ? "commentary" : "reasoning"),
+                summary: "",
+                content: text,
+                duration
+              });
+            }
+          }
+        }
+
+        // 6. Reasoning Titles metadata fallback
+        if (Array.isArray(metadata.reasoning_titles)) {
+          for (const title of metadata.reasoning_titles) {
+            const cleanTitle = String(title || "").trim();
+            if (cleanTitle && !seenStepKeys.has(`title:${cleanTitle}`)) {
+              seenStepKeys.add(`title:${cleanTitle}`);
+              thinkingSteps.push({
+                type: "thinking",
+                nodeId: node.id,
+                channel: "reasoning",
+                summary: cleanTitle,
+                content: "",
+                duration
+              });
+            }
+          }
+        }
+
+        // 7. Fallback simple string thoughts (metadata.reasoning, metadata.thinking, etc.)
+        const simpleThoughts = [metadata.reasoning, metadata.reasoning_content, metadata.thinking, metadata.thoughts]
+          .filter((v) => typeof v === "string" && v.trim());
+        for (const thought of simpleThoughts) {
+          if (!looksLikeInternalApiToolCall(thought) && !looksLikeApiJsonPayload(thought)) {
+            const key = `simple:${thought}`;
+            if (!seenStepKeys.has(key)) {
+              seenStepKeys.add(key);
+              thinkingSteps.push({
+                type: "thinking",
+                nodeId: node.id,
+                channel: "reasoning",
+                summary: "",
+                content: thought,
+                duration
+              });
+            }
+          }
+        }
+
+        // 8. Tool Invocations & Skill Integrations
+        if (recipient.includes("google_drive") || recipient.includes("api_tool")) {
+          const docCitation = citations.find((c) => c?.metadata?.title || c?.title);
+          const docTitle = docCitation?.metadata?.title || docCitation?.title || "";
+          toolInvocations.push({
+            nodeId: node.id,
+            role,
+            recipient,
+            label: "调用工具",
+            icon: "🔌",
+            description: `**Google Drive** · ${docTitle ? `读取文档《${docTitle}》` : "查询相关文档"}`
+          });
+        } else if (recipient === "container.exec" || recipient === "python") {
+          const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
+          const codeText = parts.filter((p) => typeof p === "string").join(" ");
+          const isSlide = /slides|pptx/i.test(codeText);
+          toolInvocations.push({
+            nodeId: node.id,
+            role,
+            recipient,
+            label: isSlide ? "调用技能" : "执行代码",
+            icon: isSlide ? "🎨" : "⚙️",
+            description: isSlide ? "**Slide Generator** · 生成 PPTX 幻灯片演示文稿" : "**Python Sandbox** · 执行数据与资产处理",
+            preview: codeText.slice(0, 500)
+          });
+        } else if (recipient === "dalle.text2im" || recipient.includes("image")) {
+          toolInvocations.push({
+            nodeId: node.id,
+            role,
+            recipient,
+            label: "生成图像",
+            icon: "🖼️",
+            description: "**DALL-E** · 渲染多模态视觉设计与图标",
+            preview: "image generation"
+          });
+        }
+
+        // 9. File Ingestion Slices & Internal Tool Execution
+        if (role === "tool" || isApiInternalToolCallNode(msg)) {
+          const parts = Array.isArray(msg.content?.parts) ? msg.content.parts : [msg.content?.text];
+          const rawText = parts.filter((p) => typeof p === "string").join("\n");
+          const isFileIngest = isApiInternalFileIngestionText(rawText);
+
+          if (isFileIngest) {
+            fileIngestions.push({
+              nodeId: node.id,
+              recipient,
+              sizeBytes: rawText.length,
+              rawText
+            });
+          } else if (rawText) {
+            internalToolCalls.push({
+              nodeId: node.id,
+              role,
+              recipient,
+              rawContent: rawText,
+              preview: rawText.slice(0, 500)
+            });
+          }
+        }
+      }
+
+      // Record Turn Diagnostic to debugLog if available
+      if (debugLog?.recordThinkingDiagnostic) {
+        const stepsWithFullContent = thinkingSteps.filter((s) => s.content && s.summary).length;
+        const stepsWithSummaryOnly = thinkingSteps.filter((s) => !s.content && s.summary).length;
+        const searchQueriesCount = searchSteps.reduce((sum, s) => sum + s.queries.length, 0);
+
+        debugLog.recordThinkingDiagnostic({
+          turnNumber,
+          totalSteps: thinkingSteps.length,
+          stepsWithFullContent,
+          stepsWithSummaryOnly,
+          durationSec: maxDurationSec,
+          searchQueriesCount,
+          toolCallsCount: toolInvocations.length + internalToolCalls.length,
+          hasRecap: Boolean(recapText)
+        });
+      }
+
+      return {
+        thinkingSteps,
+        searchSteps,
+        toolInvocations,
+        fileIngestions,
+        internalToolCalls,
+        maxDurationSec,
+        recapText
+      };
+    },
+
+    buildTurnThinkingTimeline(parsedReasoning, citations = []) {
+      const steps = [];
+      const seenStepText = new Set();
+
+      function addStep(icon, label, content) {
+        const cleanContent = String(content || "").trim();
+        if (!cleanContent) return;
+        const key = `${label}:${cleanContent}`;
+        if (seenStepText.has(key)) return;
+        seenStepText.add(key);
+
+        const lines = cleanContent.split("\n").map((l) => l.trim()).filter(Boolean);
+        if (lines.length > 1) {
+          steps.push(`- ${icon} **${label}**: ${lines[0]}`);
+          for (let i = 1; i < lines.length; i++) {
+            steps.push(`  ${lines[i]}`);
+          }
+        } else {
+          steps.push(`- ${icon} **${label}**: ${cleanContent}`);
+        }
+      }
+
+      // 1. Thinking Steps (Formatting both summary title and detailed prose)
+      for (const step of parsedReasoning.thinkingSteps || []) {
+        const summary = step.summary;
+        const content = step.content;
+        const icon = step.type === "commentary" ? "💬" : "🧠";
+        const label = step.type === "commentary" ? "分析计划" : "推理思考";
+
+        if (summary && content && summary !== content) {
+          addStep(icon, label, `**${summary}**\n${content}`);
+        } else if (summary || content) {
+          addStep(icon, label, summary || content);
+        }
+      }
+
+      // 2. Searches during and outside reasoning
+      for (const search of parsedReasoning.searchSteps || []) {
+        const title = search.title || "联网检索";
+        const queriesText = search.queries?.length ? ` · 检索 \`${search.queries.slice(0, 3).join("`, `")}\`` : "";
+        const foundLinks = (search.results || [])
+          .filter((r) => r.url)
+          .slice(0, 4)
+          .map((r) => `[${r.title || r.url}](${r.url})`);
+        const linksText = foundLinks.length ? ` · 查阅 ${foundLinks.join(" · ")}` : "";
+        addStep("🔍", "网页搜索", `${title}${queriesText}${linksText}`);
+      }
+
+      // 3. Tool Invocations
+      for (const tool of parsedReasoning.toolInvocations || []) {
+        addStep(tool.icon || "🔧", tool.label || "执行工具", tool.description);
+      }
+
+      // 4. Recap
+      if (parsedReasoning.recapText) {
+        addStep("⏱️", "思考总结", parsedReasoning.recapText);
+      }
+
+      // 5. Source Citations
+      const activeCitations = (citations || [])
+        .map((c, i) => {
+          const title = c?.metadata?.title || c?.title || c?.metadata?.name || `来源 [${i + 1}]`;
+          const url = c?.metadata?.url || c?.url || c?.metadata?.extra?.url || c?.metadata?.cloud_doc_url || "";
+          return url ? `[${title}](${url})` : `📄 ${title}`;
+        })
+        .filter(Boolean);
+      if (activeCitations.length) {
+        addStep("🌐", "引用来源", activeCitations.slice(0, 6).join(" · "));
+      }
+
+      if (!steps.length && (!parsedReasoning.maxDurationSec || parsedReasoning.maxDurationSec === 0)) {
+        return "";
+      }
+
+      const durationPrefix = parsedReasoning.maxDurationSec > 0
+        ? `Worked for ${parsedReasoning.maxDurationSec >= 60 ? `${Math.floor(parsedReasoning.maxDurationSec / 60)}m ${parsedReasoning.maxDurationSec % 60}s` : `${parsedReasoning.maxDurationSec}s`}`
+        : "";
+
+      const header = durationPrefix ? `> 💭 **Thinking Process (${durationPrefix})**` : "> 💭 **Thinking Process**";
+
+      if (!steps.length) {
+        return header;
+      }
+
+      return `${header}\n>\n` + steps.map((s) => `> ${s}`).join("\n");
+    },
+
+    extractTurnAgentTrace(parsedReasoning, citations = [], memories = []) {
+      const activities = [];
+      const thinkingNodes = [];
+      const searches = [];
+
+      for (const step of parsedReasoning.thinkingSteps || []) {
+        const summary = step.summary;
+        const content = step.content;
+        const fullSnippet = content || summary;
+        thinkingNodes.push({
+          nodeId: step.nodeId,
+          channel: step.channel,
+          contentType: "thoughts",
+          durationSeconds: step.duration || parsedReasoning.maxDurationSec,
+          summary,
+          content: content || summary
+        });
+        activities.push({
+          type: "reasoning",
+          channel: step.channel,
+          durationSeconds: step.duration || parsedReasoning.maxDurationSec,
+          summary,
+          snippet: fullSnippet.slice(0, 600)
+        });
+      }
+
+      for (const search of parsedReasoning.searchSteps || []) {
+        searches.push({
+          nodeId: search.nodeId,
+          recipient: "web.run",
+          queries: search.queries,
+          results: search.results
+        });
+        activities.push({
+          type: "web_search",
+          queries: search.queries,
+          title: search.title,
+          resultCount: search.results?.length || 0
+        });
+      }
+
+      for (const file of parsedReasoning.fileIngestions || []) {
+        activities.push({
+          type: "file_ingestion",
+          recipient: file.recipient,
+          sizeBytes: file.sizeBytes,
+          preview: file.rawText.slice(0, 300)
+        });
+      }
+
+      for (const tool of parsedReasoning.internalToolCalls || []) {
+        activities.push({
+          type: "tool_execution",
+          role: tool.role,
+          recipient: tool.recipient,
+          preview: (tool.preview || "").slice(0, 300)
+        });
+      }
+
+      for (const tool of parsedReasoning.toolInvocations || []) {
+        activities.push({
+          type: "tool_execution",
+          role: tool.role,
+          recipient: tool.recipient,
+          preview: (tool.preview || tool.description || "").slice(0, 300)
+        });
+      }
+
+      return {
+        activityCount: activities.length,
+        activities,
+        thinkingNodes,
+        searches,
+        internalToolCalls: parsedReasoning.internalToolCalls || [],
+        fileIngestions: parsedReasoning.fileIngestions || [],
+        citations: citations || [],
+        memories: memories || []
+      };
+    },
+
+    extractApiThinkingMarkdown(message) {
+      const metadata = message?.metadata || {};
+      const durationSec = Number(metadata.finished_duration_sec || metadata.thinking_duration_seconds || 0);
+      const durationPrefix = durationSec > 0
+        ? `Worked for ${durationSec >= 60 ? `${Math.floor(durationSec / 60)}m ${durationSec % 60}s` : `${durationSec}s`}`
+        : "";
+
+      const thoughtItems = [];
+
+      // Multi-step thoughts: extract BOTH summary and content
+      if (Array.isArray(message?.content?.thoughts)) {
+        for (const t of message.content.thoughts) {
+          const summary = String(t?.summary || "").trim();
+          const content = String(t?.content || "").trim();
+          if (summary && content && summary !== content) {
+            thoughtItems.push(`**${summary}**\n\n${content}`);
+          } else if (content || summary) {
+            thoughtItems.push(content || summary);
+          }
+        }
+      }
+
+      // String thoughts fallback
+      const candidates = [
+        metadata.reasoning,
+        metadata.reasoning_content,
+        metadata.thinking,
+        metadata.thinking_text,
+        metadata.thoughts
+      ];
+      for (const c of candidates) {
+        if (typeof c === "string" && c.trim() && !thoughtItems.includes(c.trim())) {
+          thoughtItems.push(c.trim());
+        }
+      }
+
+      if (Array.isArray(metadata.reasoning_titles)) {
+        for (const title of metadata.reasoning_titles) {
+          if (title && !thoughtItems.some((item) => item.includes(title))) {
+            thoughtItems.push(title);
+          }
+        }
+      }
+
+      let thinkingText = thoughtItems.join("\n\n").trim();
+      if (durationPrefix && thinkingText) {
+        thinkingText = `> 💭 **Thinking Process (${durationPrefix})**\n>\n` + thinkingText.split("\n").map((line) => `> ${line}`).join("\n");
+      } else if (durationPrefix && !thinkingText) {
+        thinkingText = `> 💭 **Thinking Process (${durationPrefix})**`;
+      }
+
+      return thinkingText;
+    }
+  };
+
+  function buildTurnThinkingTimeline(nodesOrParsed, citations = []) {
+    if (nodesOrParsed && Array.isArray(nodesOrParsed.thinkingSteps)) {
+      return FastThinkingEngine.buildTurnThinkingTimeline(nodesOrParsed, citations);
+    }
+    const nodes = Array.isArray(nodesOrParsed) ? nodesOrParsed : (nodesOrParsed ? [nodesOrParsed] : []);
+    const parsed = FastThinkingEngine.parseTurnReasoning(nodes, citations);
+    return FastThinkingEngine.buildTurnThinkingTimeline(parsed, citations);
+  }
+
+  function extractTurnAgentTrace(nodesOrParsed, citations = [], memories = []) {
+    if (nodesOrParsed && Array.isArray(nodesOrParsed.thinkingSteps)) {
+      return FastThinkingEngine.extractTurnAgentTrace(nodesOrParsed, citations, memories);
+    }
+    const nodes = Array.isArray(nodesOrParsed) ? nodesOrParsed : (nodesOrParsed ? [nodesOrParsed] : []);
+    const parsed = FastThinkingEngine.parseTurnReasoning(nodes, citations);
+    return FastThinkingEngine.extractTurnAgentTrace(parsed, citations, memories);
+  }
+
+  function extractApiThinkingMarkdown(message) {
+    return FastThinkingEngine.extractApiThinkingMarkdown(message);
+  }
+
+  function extractApiGeneratedFilesMarkdown(message) {
+    const metadata = message?.metadata || {};
+    const files = [];
+
+    // Check aggregate_result
+    const aggregate = metadata.aggregate_result;
+    if (aggregate?.status === "success" && typeof aggregate.final_expression_output === "string") {
+      const match = aggregate.final_expression_output.match(/name:\s*([^\n]+)/);
+      if (match && !files.some((f) => f.name === match[1].trim())) {
+        files.push({ name: match[1].trim(), url: "" });
+      }
+    }
+
+    // Check sandbox files in parts
+    const parts = Array.isArray(message?.content?.parts) ? message.content.parts : [];
+    for (const part of parts) {
+      if (typeof part === "string") {
+        const sandboxMatches = [...part.matchAll(/\[([^\]]+)\]\((sandbox:[^)]+)\)/g)];
+        for (const match of sandboxMatches) {
+          if (!files.some((f) => f.url === match[2])) {
+            files.push({ name: match[1], url: match[2] });
+          }
+        }
+      }
+    }
+
+    if (!files.length) {
+      return "";
+    }
+
+    return files.map((file) => file.url ? `📥 **Generated File**: [${file.name}](${file.url})` : `📥 **Generated Artifact**: ${file.name}`).join("\n");
+  }
+
+  function enrichApiMarkdownWithCitations(markdown, message) {
+    const citations = Array.isArray(message?.metadata?.citations) ? message.metadata.citations : [];
+    if (!citations.length) {
+      return markdown;
+    }
+
+    let enriched = markdown;
+    const footnotes = [];
+
+    citations.forEach((citation, index) => {
+      const footnoteIndex = index + 1;
+      const title = citation?.metadata?.title
+        || citation?.title
+        || citation?.metadata?.name
+        || citation?.name
+        || `Source ${footnoteIndex}`;
+      const url = citation?.metadata?.url
+        || citation?.url
+        || citation?.metadata?.cloud_doc_url
+        || citation?.metadata?.extra?.url
+        || citation?.metadata?.search_result?.url
+        || citation?.metadata?.search_result?.link
+        || citation?.link
+        || "";
+
+      if (url) {
+        footnotes.push(`[^${footnoteIndex}]: [${title}](${url})`);
+      } else {
+        footnotes.push(`[^${footnoteIndex}]: 📄 **Document**: ${title}`);
+      }
+
+      // Replace matching citation tokens if present
+      const markerPattern = new RegExp(`fileciteturn\\d+file\\d+L\\d+-L\\d+|fileciteturn\\d+file\\d+|【\\d+:\\d+†source】|【\\d+†source】|【turn\\d+search\\d+】`, "g");
+      enriched = enriched.replace(markerPattern, `[^${footnoteIndex}]`);
+    });
+
+    // Remove any remaining raw citation tokens and normalize footnote spacing
+    enriched = enriched
+      .replace(/(?:file|web|mem)?citeturn\w+(?:L\d+-L\d+)?/gi, "")
+      .replace(/\bfileL\d+(?:-L\d+)?\b/gi, "")
+      .replace(/【\d+(?::\d+)?†source】/gi, "")
+      .replace(/【turn\d+search\d+】/gi, "")
+      .replace(/[ \t]+(\[\^\d+\])/g, " $1");
+
+    if (footnotes.length) {
+      enriched = enriched.trim() + "\n\n" + footnotes.join("\n");
+    }
+
+    return enriched;
+  }
+
+  function enrichApiMarkdownWithMemories(markdown, message) {
+    const memories = Array.isArray(message?.metadata?.conversation_context_citation_metadata)
+      ? message.metadata.conversation_context_citation_metadata
+      : [];
+
+    let enriched = markdown.replace(/memcite/gi, "");
+
+    if (!memories.length) {
+      return enriched;
+    }
+
+    const memoryLines = memories
+      .map((item) => {
+        const citation = item?.citation;
+        if (!citation) return "";
+        const title = citation.title || citation.snippet || "";
+        const attribution = citation.attribution || "Memory";
+        const url = citation.url || "";
+        return url
+          ? `> - **${attribution}**: [${title}](${url})`
+          : `> - **${attribution}**: ${title}`;
+      })
+      .filter(Boolean);
+
+    if (memoryLines.length) {
+      enriched = enriched.trim() + "\n\n> 🧠 **Memory & Context**:\n" + memoryLines.join("\n");
+    }
+
+    return enriched;
   }
 
   async function enrichMessageTimestamps(messages, debugLog = null, options = {}) {
@@ -6404,7 +7538,12 @@
     for (const attempt of attempts) {
       throwIfCaptureCancelled(signal);
       try {
-        const data = await fetchConversationApiAttempt(attempt, attemptTimeoutMs, signal);
+        let data = await fetchConversationApiAttempt(attempt, attemptTimeoutMs, signal);
+        data = await fetchRemainingConversationApiPages(data, attempt, {
+          timeoutMs: attemptTimeoutMs,
+          signal,
+          debugLog
+        });
         throwIfCaptureCancelled(signal);
         const mapping = getConversationApiMapping(data);
         const linearMessages = getConversationApiLinearMessages(data);
@@ -6464,6 +7603,9 @@
   function buildConversationApiAttempts(conversationId, accessToken = "") {
     const encodedId = encodeURIComponent(conversationId);
     const paths = uniqueStrings([
+      `/backend-api/conversations/${encodedId}?include_has_versions=true&num_turns=${FAST_CONVERSATION_API_PAGE_SIZE}`,
+      `/backend-api/conversations/${encodedId}?include_has_versions=true&num_turns=10`,
+      `/backend-api/conversations/${encodedId}`,
       `/backend-api/conversation/${encodedId}?tree_format=true`,
       `/backend-api/conversation/${encodedId}`,
       `/backend-api/conversation/${encodedId}?tree_format=false`,
@@ -6483,12 +7625,184 @@
           url: url.href,
           authMode,
           accessToken,
+          pagination: /^\/backend-api\/conversations\//i.test(url.pathname) ? "before" : "",
           headers: isRouteData ? { "x-remix-request": "yes" } : {}
         });
       }
     }
 
     return attempts;
+  }
+
+  async function fetchRemainingConversationApiPages(initialData, attempt, options = {}) {
+    if (attempt?.pagination !== "before") {
+      return initialData;
+    }
+
+    const signal = options.signal || null;
+    const debugLog = options.debugLog || null;
+    const timeoutMs = Number(options.timeoutMs || CONVERSATION_API_ATTEMPT_TIMEOUT_MS);
+    let mergedData = initialData;
+    let pageData = initialData;
+    let pageCount = 1;
+    let totalRawMessages = getConversationApiRawMessages(initialData).length;
+    const seenCursors = new Set();
+
+    while (conversationApiHasPreviousPage(pageData)) {
+      throwIfCaptureCancelled(signal);
+      const pageInfo = getConversationApiPageInfo(pageData);
+      const cursor = String(pageInfo?.start_cursor || pageInfo?.startCursor || "").trim();
+
+      if (!cursor) {
+        throw new Error("pagination response is missing start_cursor");
+      }
+
+      if (seenCursors.has(cursor)) {
+        throw new Error("pagination cursor repeated");
+      }
+
+      if (pageCount >= FAST_CONVERSATION_API_MAX_PAGES) {
+        throw new Error(`pagination exceeded ${FAST_CONVERSATION_API_MAX_PAGES} pages`);
+      }
+
+      seenCursors.add(cursor);
+      const pageUrl = new URL(attempt.url);
+      pageUrl.searchParams.set("before", cursor);
+      const pageAttempt = {
+        ...attempt,
+        label: `${attempt.label}:older-page-${pageCount + 1}`,
+        url: pageUrl.href
+      };
+
+      pageData = await fetchConversationApiAttempt(pageAttempt, timeoutMs, signal);
+      throwIfCaptureCancelled(signal);
+      const pageMessages = getConversationApiRawMessages(pageData);
+
+      if (!pageMessages.length) {
+        throw new Error("pagination returned an empty older page");
+      }
+
+      mergedData = mergeConversationApiPages(pageData, mergedData);
+      pageCount += 1;
+      totalRawMessages = getConversationApiRawMessages(mergedData).length;
+      debugLog?.event("conversationApi.pagination.page", {
+        label: attempt.label,
+        pageCount,
+        pageMessageCount: pageMessages.length,
+        totalRawMessages,
+        hasPreviousPage: conversationApiHasPreviousPage(pageData)
+      });
+    }
+
+    if (pageCount > 1) {
+      debugLog?.event("conversationApi.pagination.complete", {
+        label: attempt.label,
+        pageCount,
+        totalRawMessages
+      });
+    }
+
+    return mergedData;
+  }
+
+  function mergeConversationApiPages(olderPage, newerPage) {
+    const olderMessages = getConversationApiRawMessages(olderPage);
+    const newerMessages = getConversationApiRawMessages(newerPage);
+    const combined = [...olderMessages, ...newerMessages];
+    const lastIndexById = new Map();
+
+    combined.forEach((item, index) => {
+      const id = getConversationApiRawMessageId(item);
+      if (id) {
+        lastIndexById.set(id, index);
+      }
+    });
+
+    const messages = combined.filter((item, index) => {
+      const id = getConversationApiRawMessageId(item);
+      return !id || lastIndexById.get(id) === index;
+    });
+    const olderPageInfo = getConversationApiPageInfo(olderPage);
+    const newerPageInfo = getConversationApiPageInfo(newerPage);
+    const pageInfo = {
+      ...(newerPageInfo || {}),
+      start_cursor: olderPageInfo?.start_cursor ?? olderPageInfo?.startCursor ?? newerPageInfo?.start_cursor,
+      has_previous_page: conversationApiHasPreviousPage(olderPage),
+      end_cursor: newerPageInfo?.end_cursor ?? newerPageInfo?.endCursor ?? olderPageInfo?.end_cursor,
+      has_next_page: newerPageInfo?.has_next_page ?? newerPageInfo?.hasNextPage ?? false
+    };
+
+    return setConversationApiMessagesAndPageInfo(newerPage, messages, pageInfo);
+  }
+
+  function getConversationApiRawMessages(data) {
+    const candidates = [
+      data?.messages,
+      data?.items,
+      data?.linear_conversation,
+      data?.linearConversation,
+      data?.conversation?.messages,
+      data?.conversation?.items,
+      data?.conversation?.linear_conversation,
+      data?.data?.messages,
+      data?.data?.items,
+      data?.data?.linear_conversation
+    ];
+
+    return candidates.find(Array.isArray) || [];
+  }
+
+  function getConversationApiRawMessageId(item) {
+    const message = item?.message || item;
+    return String(message?.id || message?.message_id || item?.id || "").trim();
+  }
+
+  function getConversationApiPageInfo(data) {
+    const candidates = [
+      data?.page_info,
+      data?.pageInfo,
+      data?.conversation?.page_info,
+      data?.conversation?.pageInfo,
+      data?.data?.page_info,
+      data?.data?.pageInfo
+    ];
+
+    return candidates.find((value) => value && typeof value === "object" && !Array.isArray(value)) || null;
+  }
+
+  function conversationApiHasPreviousPage(data) {
+    const pageInfo = getConversationApiPageInfo(data);
+    return pageInfo?.has_previous_page === true || pageInfo?.hasPreviousPage === true;
+  }
+
+  function setConversationApiMessagesAndPageInfo(data, messages, pageInfo) {
+    if (Array.isArray(data?.conversation?.messages)) {
+      return {
+        ...data,
+        conversation: {
+          ...data.conversation,
+          messages,
+          page_info: pageInfo
+        }
+      };
+    }
+
+    if (Array.isArray(data?.data?.messages)) {
+      return {
+        ...data,
+        data: {
+          ...data.data,
+          messages,
+          page_info: pageInfo
+        }
+      };
+    }
+
+    return {
+      ...data,
+      messages,
+      page_info: pageInfo
+    };
   }
 
   function buildConversationRouteDataPaths() {
@@ -6567,6 +7881,8 @@
 
     chatGptAccessTokenLoaded = true;
 
+    let tokenSource = "";
+
     try {
       const url = new URL("/api/auth/session", location.origin);
       const response = await fetchWithTimeout(url.href, {
@@ -6581,15 +7897,11 @@
 
       if (!response.ok) {
         debugLog?.event("conversationApi.token.failed", { status: response.status });
-        return "";
+      } else {
+        const session = await response.json();
+        cachedChatGptAccessToken = extractAccessTokenFromSession(session);
+        tokenSource = cachedChatGptAccessToken ? "session-api" : "";
       }
-
-      const session = await response.json();
-      cachedChatGptAccessToken = extractAccessTokenFromSession(session);
-      debugLog?.event("conversationApi.token.loaded", {
-        available: Boolean(cachedChatGptAccessToken)
-      });
-      return cachedChatGptAccessToken;
     } catch (error) {
       if (isCaptureCancelledError(error)) {
         chatGptAccessTokenLoaded = false;
@@ -6598,8 +7910,18 @@
       debugLog?.event("conversationApi.token.failed", {
         error: error?.message || String(error)
       });
-      return "";
     }
+
+    if (!cachedChatGptAccessToken) {
+      cachedChatGptAccessToken = getChatGptAccessTokenFromPageBootstrap();
+      tokenSource = cachedChatGptAccessToken ? "page-bootstrap" : "";
+    }
+
+    debugLog?.event("conversationApi.token.loaded", {
+      available: Boolean(cachedChatGptAccessToken),
+      source: tokenSource
+    });
+    return cachedChatGptAccessToken;
   }
 
   function extractAccessTokenFromSession(session) {
@@ -6607,11 +7929,37 @@
       session?.accessToken,
       session?.access_token,
       session?.token,
+      session?.session?.accessToken,
+      session?.session?.access_token,
+      session?.session?.token,
       session?.user?.accessToken,
       session?.user?.access_token
     ];
 
     return String(candidates.find((value) => typeof value === "string" && value.length > 20) || "");
+  }
+
+  function getChatGptAccessTokenFromPageBootstrap() {
+    const scripts = document.querySelectorAll("script:not([src])");
+
+    for (const script of scripts) {
+      const text = String(script?.textContent || "").trim();
+
+      if (!text.includes('"accessToken"') || text.length > 2_000_000) {
+        continue;
+      }
+
+      try {
+        const token = extractAccessTokenFromSession(JSON.parse(text));
+        if (token) {
+          return token;
+        }
+      } catch {
+        // Ignore non-JSON bootstrap scripts and continue probing.
+      }
+    }
+
+    return "";
   }
 
   async function fetchWithTimeout(url, options = {}) {
@@ -6651,7 +7999,7 @@
 
   function buildConversationTimestampMap(data) {
     const map = new Map();
-    const mapping = data?.mapping && typeof data.mapping === "object" ? data.mapping : {};
+    const mapping = getConversationApiMapping(data);
 
     for (const node of Object.values(mapping)) {
       const message = node?.message || {};
@@ -6661,6 +8009,20 @@
         message.update_time ??
         message.metadata?.create_time ??
         message.metadata?.timestamp
+      );
+
+      if (messageId && timestamp) {
+        map.set(messageId, timestamp);
+      }
+    }
+
+    for (const message of getConversationApiLinearMessages(data)) {
+      const messageId = String(message?.id || message?.message_id || "").trim();
+      const timestamp = formatConversationTimestamp(
+        message?.create_time ??
+        message?.update_time ??
+        message?.metadata?.create_time ??
+        message?.metadata?.timestamp
       );
 
       if (messageId && timestamp) {

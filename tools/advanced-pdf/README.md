@@ -166,8 +166,8 @@ and is separate from the browser tab where the extension runs.
   Markdown headings, and JSON payloads.
 - Adds PDF outline/bookmarks from those headings with a local post-processing
   pass that targets the PDF's existing named destinations.
-- Provides a backend Markdown endpoint so PDF, Markdown, and future Obsidian
-  export can share the same structured payload.
+- Provides a backend Markdown endpoint so PDF, Markdown, and downstream Agent / RAG
+  workflows can share the same structured payload.
 - Writes `*.assets.manifest.json` into bundle exports and stores available data
   URI image bytes under `.convo-vault/assets` by SHA-256 so repeated generated
   assets are deduplicated.
@@ -188,7 +188,7 @@ not have to start it manually.
 
 The same `exportPayload` can also become the stable source for:
 
-- Obsidian Markdown vault export.
+- Agent-ready knowledge packages and downstream archives.
 - Full-conversation archives.
 - Keyword/entity indexes.
 - Searchable JSONL datasets for later analysis.
