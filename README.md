@@ -1,3 +1,17 @@
+> [!IMPORTANT]
+> **This repository is no longer maintained. / 本仓库已停止维护。**
+>
+> Convo Vault has moved to the **Amethyst Cosmos** organisation. All future development, releases, bug fixes, and documentation updates are maintained at:
+>
+> **[amethyst-cosmos/convo-vault](https://github.com/amethyst-cosmos/convo-vault)**
+>
+> Please use the new repository for the latest version and installation instructions, and report new issues there.
+>
+> Convo Vault 已迁移至 Amethyst Cosmos。请前往新仓库获取最新版本、安装说明及提交问题。
+> 本仓库保留作为历史存档；下方文档和安装命令仅供历史参考，不再维护。
+
+---
+
 # Convo Vault
 
 如果要在 ChatGPT 里长期沉淀有价值的对话资产，怎么办？
